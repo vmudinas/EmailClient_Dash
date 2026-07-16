@@ -69,7 +69,7 @@ textarea:focus-visible {
 
 .topbar {
   display: grid;
-  grid-template-columns: 250px minmax(280px, 680px) minmax(300px, 1fr);
+  grid-template-columns: 300px minmax(280px, 680px) minmax(300px, 1fr);
   align-items: center;
   gap: 18px;
   height: 58px;
@@ -334,7 +334,7 @@ textarea:focus-visible {
 
 .workspace {
   display: grid;
-  grid-template-columns: 252px minmax(340px, 410px) minmax(420px, 1fr);
+  grid-template-columns: 300px minmax(340px, 410px) minmax(420px, 1fr);
   min-height: 0;
   overflow: hidden;
 }
