@@ -798,6 +798,8 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(screen.getByText("120")).toBeTruthy());
     expect(screen.getByText(/Welcome aboard/)).toBeTruthy();
     expect(screen.getByText(/Q3 numbers/)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Top 10 senders (excluding Spam)" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Top 10 recipients (excluding Spam)" })).toBeTruthy();
     expect(screen.getByText("Vendor Co")).toBeTruthy();
     expect(screen.getByText("Owner")).toBeTruthy();
     expect(screen.getByText(/urgent: 1/)).toBeTruthy();

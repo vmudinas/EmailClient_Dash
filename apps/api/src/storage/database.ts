@@ -2970,10 +2970,12 @@ export class EmailDatabase {
     `).get() as Row | undefined;
 
     const topSenders = (this.db.prepare(`
-      SELECT sender_address AS address, MAX(sender_name) AS name, COUNT(*) AS count
-      FROM messages
-      WHERE sender_address != ''
-      GROUP BY sender_address
+      SELECT m.sender_address AS address, MAX(m.sender_name) AS name, COUNT(*) AS count
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.sender_address != ''
+        AND lower(trim(f.name)) != 'spam'
+      GROUP BY m.sender_address
       ORDER BY count DESC
       LIMIT 10
     `).all() as Row[]).map((row) => this.mapTopContact(row));
@@ -2983,8 +2985,12 @@ export class EmailDatabase {
         json_extract(je.value, '$.address') AS address,
         MAX(json_extract(je.value, '$.name')) AS name,
         COUNT(*) AS count
-      FROM messages m, json_each(m.to_json) je
-      WHERE json_extract(je.value, '$.address') IS NOT NULL AND json_extract(je.value, '$.address') != ''
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      JOIN json_each(m.to_json) AS je
+      WHERE lower(trim(f.name)) != 'spam'
+        AND json_extract(je.value, '$.address') IS NOT NULL
+        AND json_extract(je.value, '$.address') != ''
       GROUP BY address
       ORDER BY count DESC
       LIMIT 10

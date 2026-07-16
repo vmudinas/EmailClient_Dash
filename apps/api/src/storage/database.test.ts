@@ -1288,6 +1288,7 @@ describe("EmailDatabase", () => {
       sizeBytes: 100
     });
     const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const spam = database.ensureFolder(archive.id, "Spam", "Spam", null);
     database.completeArchive(archive.id, 0);
 
     const empty = database.getAdminInsights();
@@ -1348,6 +1349,26 @@ describe("EmailDatabase", () => {
       sizeBytes: 10,
       attachments: []
     });
+    for (let index = 0; index < 12; index += 1) {
+      database.insertMessage({
+        archiveId: archive.id,
+        folderId: spam.id,
+        sourceKey: `spam-insight-${index}`,
+        internetMessageId: null,
+        subject: `Ignored spam ${index}`,
+        sender: { name: "Spam Leader", address: "spam-leader@example.test" },
+        to: [{ name: "Spam Recipient", address: "spam-recipient@example.test" }],
+        cc: [],
+        bcc: [],
+        sentAt: "2021-06-01T00:00:00.000Z",
+        receivedAt: "2021-06-01T00:00:00.000Z",
+        bodyText: "spam rankings must ignore this message",
+        bodyHtml: null,
+        headers: {},
+        sizeBytes: 10,
+        attachments: []
+      });
+    }
 
     database.upsertMessageAnalysis({
       messageId: oldestId,
@@ -1383,7 +1404,7 @@ describe("EmailDatabase", () => {
     });
 
     const insights = database.getAdminInsights();
-    expect(insights.totalMessages).toBe(3);
+    expect(insights.totalMessages).toBe(15);
     expect(insights.endpoints.oldest).toMatchObject({ id: oldestId, subject: "First contact", date: "2020-01-01T00:00:00.000Z" });
     expect(insights.endpoints.newest).toMatchObject({ id: newestId, subject: "Third contact", date: "2022-01-01T00:00:00.000Z" });
     expect(insights.topSenders).toEqual([
@@ -1393,6 +1414,8 @@ describe("EmailDatabase", () => {
     expect(insights.topRecipients).toEqual([
       { address: "owner@example.test", name: "Owner", count: 3 }
     ]);
+    expect(insights.topSenders).not.toContainEqual(expect.objectContaining({ address: "spam-leader@example.test" }));
+    expect(insights.topRecipients).not.toContainEqual(expect.objectContaining({ address: "spam-recipient@example.test" }));
     expect(insights.analysis).toMatchObject({
       analyzedCount: 2,
       priorityBreakdown: { low: 1, normal: 0, high: 1, urgent: 0 },

@@ -784,7 +784,7 @@ function InsightsPanel({ api, onError }: { api: ApiClient; onError(value: string
 
       <div className="insights-columns">
         <section className="insights-card">
-          <h4>Top 10 senders</h4>
+          <h4>Top 10 senders (excluding Spam)</h4>
           {insights.topSenders.length === 0 ? <p className="settings-hint">No data yet.</p> : (
             <ol className="insights-contact-list">
               {insights.topSenders.map((contact) => (
@@ -797,7 +797,7 @@ function InsightsPanel({ api, onError }: { api: ApiClient; onError(value: string
           )}
         </section>
         <section className="insights-card">
-          <h4>Top 10 recipients</h4>
+          <h4>Top 10 recipients (excluding Spam)</h4>
           {insights.topRecipients.length === 0 ? <p className="settings-hint">No data yet.</p> : (
             <ol className="insights-contact-list">
               {insights.topRecipients.map((contact) => (
