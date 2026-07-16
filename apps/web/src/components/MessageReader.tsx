@@ -23,6 +23,7 @@ import {
   Paperclip,
   Reply,
   Save,
+  ShieldBan,
   Sparkles,
   Star,
   Tag,
@@ -55,8 +56,10 @@ interface MessageReaderProps {
   onLoadFolders(archiveId: string): Promise<Folder[]>;
   onMove(messageId: string, folderId: string): Promise<void>;
   onArchive(message: MessageDetail): Promise<void>;
+  onSpamSender(message: MessageDetail): Promise<void>;
   onIndicatorsChange(messageId: string, patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean }): void;
   moveBusy: boolean;
+  spamBusy: boolean;
 }
 
 export function MessageReader({
@@ -73,8 +76,10 @@ export function MessageReader({
   onLoadFolders,
   onMove,
   onArchive,
+  onSpamSender,
   onIndicatorsChange,
-  moveBusy
+  moveBusy,
+  spamBusy
 }: MessageReaderProps) {
   const [note, setNote] = useState("");
   const [tagInput, setTagInput] = useState("");
@@ -248,6 +253,15 @@ export function MessageReader({
             </button>
             <button className="icon-button" title="Forward" aria-label="Forward" onClick={() => onForward(message)}>
               <Forward size={18} />
+            </button>
+            <button
+              className="icon-button spam-sender-button"
+              title="Always send this sender to Spam locally"
+              aria-label="Always send sender to Spam"
+              disabled={spamBusy || !message.sender.address.trim()}
+              onClick={() => void onSpamSender(message)}
+            >
+              {spamBusy ? <LoaderCircle className="spin" size={17} /> : <ShieldBan size={18} />}
             </button>
             {!archived && (
               <button

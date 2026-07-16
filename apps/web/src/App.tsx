@@ -139,6 +139,7 @@ export function App() {
   const [draftsBusy, setDraftsBusy] = useState(false);
   const [draftsError, setDraftsError] = useState("");
   const [moveBusy, setMoveBusy] = useState(false);
+  const [spamBusy, setSpamBusy] = useState(false);
   const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -900,6 +901,38 @@ export function App() {
     }
   };
 
+  const spamSender = async (target: MessageDetail) => {
+    if (!api || readOnly) return;
+    const senderAddress = target.sender.address.trim();
+    if (!senderAddress) {
+      showError("This message does not have a sender address");
+      return;
+    }
+    if (!window.confirm(
+      `Move all messages from ${senderAddress} to Spam locally and automatically file future imported Inbox messages from this sender there?`
+    )) return;
+
+    setSpamBusy(true);
+    try {
+      const result = await api.markSenderAsSpam(target.id);
+      if (message?.id === target.id) setMessage(result.message);
+      await Promise.all([
+        refreshArchives(),
+        loadMessages(false),
+        target.archiveId === selectedArchiveId
+          ? api.listFolders(target.archiveId).then(setFolders)
+          : Promise.resolve()
+      ]);
+      showError(
+        `${senderAddress} will now go to ${result.spamFolderPath}. Moved ${result.movedMessages.toLocaleString()} existing message${result.movedMessages === 1 ? "" : "s"}.`
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Sender could not be marked as spam");
+    } finally {
+      setSpamBusy(false);
+    }
+  };
+
   const dropMessageIntoFolder = (messageId: string, folderId: string) => {
     setDraggedMessage(null);
     void moveMessage(messageId, folderId);
@@ -1299,8 +1332,10 @@ export function App() {
               onLoadFolders={loadFoldersForGmail}
               onMove={(messageId, folderId) => moveMessage(messageId, folderId)}
               onArchive={archiveMessage}
+              onSpamSender={spamSender}
               onIndicatorsChange={updateMessageIndicators}
               moveBusy={moveBusy}
+              spamBusy={spamBusy}
             />
           </>
         )}

@@ -251,7 +251,7 @@ describe("Email API sender filing routes", () => {
       sizeBytes: 10
     });
     const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
-    runtime.database.insertMessage({
+    const messageId = runtime.database.insertMessage({
       archiveId: archive.id,
       folderId: inbox.id,
       sourceKey: "sender-route-message",
@@ -299,7 +299,32 @@ describe("Email API sender filing routes", () => {
     expect(organized.json()).toMatchObject({
       enabled: true,
       lastRunMovedMessages: 1,
-      rules: [{ senderAddress: "vendor@example.test", folderPath: "Top Senders/Vendor Co" }]
+      rules: [{ senderAddress: "vendor@example.test", ruleType: "folder", folderPath: "Top Senders/Vendor Co" }]
+    });
+
+    const markedSpam = await runtime.app.inject({
+      method: "POST",
+      url: `/api/messages/${messageId}/spam-sender`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(markedSpam.statusCode).toBe(200);
+    expect(markedSpam.json()).toMatchObject({
+      senderAddress: "vendor@example.test",
+      spamFolderPath: "Spam",
+      movedMessages: 1,
+      message: { id: messageId, folderPath: "Spam" }
+    });
+
+    const spamStatus = await runtime.app.inject({
+      method: "GET",
+      url: `/api/admin/sender-filing?archiveId=${archive.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(spamStatus.statusCode).toBe(200);
+    expect(spamStatus.json()).toMatchObject({
+      rules: [{ senderAddress: "vendor@example.test", ruleType: "spam", folderPath: "Spam" }]
     });
 
     const disabled = await runtime.app.inject({

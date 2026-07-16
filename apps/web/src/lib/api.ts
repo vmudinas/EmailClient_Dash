@@ -43,6 +43,7 @@ import type {
   SearchFilters,
   SearchHit,
   SenderFilingStatus,
+  SenderSpamRuleResult,
   SharingState,
   TodoCreate,
   TodoItem,
@@ -372,6 +373,12 @@ export class ApiClient {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/move`, {
       method: "POST",
       body: JSON.stringify({ folderId })
+    });
+  }
+
+  markSenderAsSpam(messageId: string): Promise<SenderSpamRuleResult> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/spam-sender`, {
+      method: "POST"
     });
   }
 

@@ -703,6 +703,31 @@ export class EmailApiRuntime {
       }
     });
 
+    this.app.post<{ Params: { messageId: string } }>(
+      "/api/messages/:messageId/spam-sender",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          const result = this.database.markSenderAsSpam(request.params.messageId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: `Sender marked as spam: ${result.senderAddress}`,
+            archiveId: result.message.archiveId,
+            context: {
+              operation: "sender_marked_spam",
+              movedMessages: result.movedMessages,
+              spamFolderPath: result.spamFolderPath
+            }
+          });
+          return result;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Sender could not be marked as spam";
+          return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+        }
+      }
+    );
+
     this.app.get<{ Params: { messageId: string } }>(
       "/api/messages/:messageId/ai",
       async (request, reply) => {

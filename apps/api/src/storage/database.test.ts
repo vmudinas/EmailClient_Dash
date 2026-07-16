@@ -222,6 +222,65 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("adds sender rule types when upgrading an existing version 18 database", async () => {
+    const dataDir = await temporaryDirectory();
+    let database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Legacy sender rules",
+      sourceType: "gmail",
+      fingerprint: "legacy-sender-rule-type",
+      sizeBytes: 10
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "legacy-sender-rule-message",
+      "Legacy Vendor",
+      "legacy-vendor@example.test"
+    );
+    database.completeArchive(archive.id, 0);
+    database.organizeTopSenderFolders(archive.id);
+    database.close();
+
+    const rawDatabase = new BetterSqlite3(join(dataDir, "archive-mail.sqlite"));
+    rawDatabase.pragma("foreign_keys = OFF");
+    rawDatabase.exec(`
+      DROP INDEX sender_filing_rules_archive_idx;
+      ALTER TABLE sender_filing_rules RENAME TO sender_filing_rules_v19;
+      CREATE TABLE sender_filing_rules (
+        id TEXT PRIMARY KEY,
+        archive_id TEXT NOT NULL,
+        sender_address TEXT NOT NULL,
+        sender_name TEXT,
+        folder_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(archive_id) REFERENCES archives(id) ON DELETE CASCADE,
+        FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE CASCADE,
+        UNIQUE(archive_id, sender_address)
+      );
+      INSERT INTO sender_filing_rules (
+        id, archive_id, sender_address, sender_name, folder_id, created_at, updated_at
+      )
+      SELECT id, archive_id, sender_address, sender_name, folder_id, created_at, updated_at
+      FROM sender_filing_rules_v19;
+      DROP TABLE sender_filing_rules_v19;
+      CREATE INDEX sender_filing_rules_archive_idx
+        ON sender_filing_rules(archive_id, created_at);
+      PRAGMA user_version = 18;
+    `);
+    rawDatabase.close();
+
+    database = new EmailDatabase(dataDir);
+    expect(database.getSenderFilingStatus(archive.id).rules[0]).toMatchObject({
+      senderAddress: "legacy-vendor@example.test",
+      ruleType: "folder"
+    });
+    database.close();
+  });
+
   it("turns plain text and phrases into safe FTS expressions", () => {
     expect(toFtsQuery("launch plan")).toBe("\"launch\" AND \"plan\"");
     expect(toFtsQuery("\"launch plan\"")).toBe("\"launch plan\"");
@@ -833,6 +892,64 @@ describe("EmailDatabase", () => {
       "sender0@example.test"
     );
     expect(database.getMessage(afterDisableId)?.folderId).toBe(inbox.id);
+    database.close();
+  });
+
+  it("moves every existing sender message to Spam and routes future Inbox mail there", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Spam sender rules",
+      sourceType: "gmail",
+      fingerprint: "spam-sender-rules-fixture",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const archived = database.ensureFolder(archive.id, "Archived", "Archived", null);
+    const firstMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "spam-sender-first",
+      "Persistent Spammer",
+      "SPAMMER@example.test"
+    );
+    insertSenderMessage(
+      database,
+      archive.id,
+      archived.id,
+      "spam-sender-second",
+      "Persistent Spammer",
+      "spammer@example.test"
+    );
+    database.completeArchive(archive.id, 0);
+
+    const result = database.markSenderAsSpam(firstMessageId);
+
+    expect(result).toMatchObject({
+      senderAddress: "spammer@example.test",
+      spamFolderPath: "Spam",
+      movedMessages: 2,
+      message: { id: firstMessageId, folderPath: "Spam" }
+    });
+    expect(database.getSenderFilingStatus(archive.id).rules).toEqual([
+      expect.objectContaining({
+        senderAddress: "spammer@example.test",
+        ruleType: "spam",
+        folderPath: "Spam",
+        messageCount: 2
+      })
+    ]);
+
+    const futureMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "spam-sender-future",
+      "Persistent Spammer",
+      "spammer@example.test"
+    );
+    expect(database.getMessage(futureMessageId)?.folderPath).toBe("Spam");
     database.close();
   });
 

@@ -1197,6 +1197,23 @@ textarea:focus-visible {
   cursor: not-allowed;
 }
 
+.spam-sender-button {
+  border-color: #e0b7b2;
+  color: var(--red);
+  background: #fff8f7;
+}
+
+.spam-sender-button:hover:not(:disabled) {
+  border-color: #c9857e;
+  color: #89352f;
+  background: var(--red-soft);
+}
+
+.spam-sender-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .toolbar-spacer {
   flex: 1;
 }

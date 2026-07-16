@@ -413,6 +413,7 @@ export interface SenderFilingRule {
   archiveId: string;
   senderAddress: string;
   senderName: string | null;
+  ruleType: "folder" | "spam";
   folderId: string;
   folderPath: string;
   messageCount: number;
@@ -428,6 +429,14 @@ export interface SenderFilingStatus {
   lastRunAt: string | null;
   lastRunMovedMessages: number;
   lastRunCreatedFolders: number;
+}
+
+export interface SenderSpamRuleResult {
+  senderAddress: string;
+  spamFolderId: string;
+  spamFolderPath: string;
+  movedMessages: number;
+  message: MessageDetail;
 }
 
 export interface GmailConnection {

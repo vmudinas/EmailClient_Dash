@@ -351,7 +351,10 @@ function SenderFilingPanel({
                 <tr key={rule.id}>
                   <td><strong>{rule.senderName || rule.senderAddress}</strong>{rule.senderName && <small>{rule.senderAddress}</small>}</td>
                   <td>{rule.messageCount.toLocaleString()}</td>
-                  <td><strong>{rule.folderPath}</strong></td>
+                  <td>
+                    <strong>{rule.folderPath}</strong>
+                    {rule.ruleType === "spam" && <small>Always spam</small>}
+                  </td>
                 </tr>
               ))}
             </tbody>

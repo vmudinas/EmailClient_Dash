@@ -54,6 +54,7 @@ import type {
   SearchHit,
   SenderFilingRule,
   SenderFilingStatus,
+  SenderSpamRuleResult,
   SessionRole,
   TodoCreate,
   TodoItem,
@@ -1029,6 +1030,7 @@ export class EmailDatabase {
           archive_id TEXT NOT NULL,
           sender_address TEXT NOT NULL,
           sender_name TEXT,
+          rule_type TEXT NOT NULL DEFAULT 'folder' CHECK(rule_type IN ('folder', 'spam')),
           folder_id TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
@@ -1102,6 +1104,20 @@ export class EmailDatabase {
           ON message_calendar_events(message_id, created_at DESC);
         PRAGMA user_version = 18;
       `);
+    }
+
+    const senderRuleTypeVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (senderRuleTypeVersion < 19) {
+      const senderRuleColumns = new Set(
+        (this.db.pragma("table_info(sender_filing_rules)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!senderRuleColumns.has("rule_type")) {
+        this.db.exec(`
+          ALTER TABLE sender_filing_rules
+          ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'folder' CHECK(rule_type IN ('folder', 'spam'));
+        `);
+      }
+      this.db.pragma("user_version = 19");
     }
   }
 
@@ -2817,6 +2833,7 @@ export class EmailDatabase {
       archiveId: String(row.archive_id),
       senderAddress: String(row.sender_address),
       senderName: row.sender_name ? String(row.sender_name) : null,
+      ruleType: String(row.rule_type) === "spam" ? "spam" : "folder",
       folderId: String(row.folder_id),
       folderPath: String(row.folder_path),
       messageCount: Number(row.live_message_count),
@@ -2851,7 +2868,8 @@ export class EmailDatabase {
       }
 
       const existingRuleCount = Number((this.db.prepare(`
-        SELECT COUNT(*) AS count FROM sender_filing_rules WHERE archive_id = ?
+        SELECT COUNT(*) AS count FROM sender_filing_rules
+        WHERE archive_id = ? AND rule_type = 'folder'
       `).get(archiveId) as Row).count);
       const availableRuleCount = Math.max(0, ruleLimit - existingRuleCount);
       const candidates = availableRuleCount === 0 ? [] : this.db.prepare(`
@@ -2911,8 +2929,8 @@ export class EmailDatabase {
           `).run(folderId, archiveId, rootId, folderName, folderPath);
           this.db.prepare(`
             INSERT INTO sender_filing_rules (
-              id, archive_id, sender_address, sender_name, folder_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              id, archive_id, sender_address, sender_name, rule_type, folder_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'folder', ?, ?, ?)
           `).run(randomUUID(), archiveId, senderAddress, senderName, folderId, now, now);
           usedPaths.add(folderPath.toLowerCase());
           createdFolders += 1;
@@ -2988,6 +3006,85 @@ export class EmailDatabase {
     }
     this.db.prepare("DELETE FROM sender_filing_rules WHERE archive_id = ?").run(archiveId);
     return this.getSenderFilingStatus(archiveId);
+  }
+
+  markSenderAsSpam(messageId: string): SenderSpamRuleResult {
+    const applyRule = this.db.transaction(() => {
+      const source = this.db.prepare(`
+        SELECT m.archive_id, m.sender_name, m.sender_address
+        FROM messages m
+        WHERE m.id = ?
+      `).get(messageId) as Row | undefined;
+      if (!source) throw new Error("Message not found");
+
+      const archiveId = String(source.archive_id);
+      const senderAddress = String(source.sender_address ?? "").trim().toLowerCase();
+      const senderName = source.sender_name ? String(source.sender_name) : null;
+      if (!senderAddress) throw new Error("This message does not have a sender address");
+
+      let spamFolder = this.db.prepare(`
+        SELECT id, path FROM folders
+        WHERE archive_id = ? AND lower(trim(name)) = 'spam'
+        ORDER BY CASE WHEN lower(trim(path)) = 'spam' THEN 0 ELSE 1 END, length(path), path COLLATE NOCASE
+        LIMIT 1
+      `).get(archiveId) as Row | undefined;
+      if (!spamFolder) {
+        const folderId = randomUUID();
+        this.db.prepare(`
+          INSERT INTO folders (id, archive_id, parent_id, name, path)
+          VALUES (?, ?, NULL, 'Spam', 'Spam')
+        `).run(folderId, archiveId);
+        spamFolder = { id: folderId, path: "Spam" };
+      }
+
+      const spamFolderId = String(spamFolder.id);
+      const spamFolderPath = String(spamFolder.path);
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO sender_filing_rules (
+          id, archive_id, sender_address, sender_name, rule_type, folder_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'spam', ?, ?, ?)
+        ON CONFLICT(archive_id, sender_address) DO UPDATE SET
+          sender_name = COALESCE(excluded.sender_name, sender_filing_rules.sender_name),
+          rule_type = 'spam',
+          folder_id = excluded.folder_id,
+          updated_at = excluded.updated_at
+      `).run(randomUUID(), archiveId, senderAddress, senderName, spamFolderId, now, now);
+
+      this.db.prepare(`
+        UPDATE message_fts SET folder = ?
+        WHERE message_id IN (
+          SELECT id FROM messages
+          WHERE archive_id = ?
+            AND lower(trim(sender_address)) = ?
+            AND folder_id != ?
+        )
+      `).run(spamFolderPath, archiveId, senderAddress, spamFolderId);
+      const movedMessages = this.db.prepare(`
+        UPDATE messages SET folder_id = ?
+        WHERE archive_id = ?
+          AND lower(trim(sender_address)) = ?
+          AND folder_id != ?
+      `).run(spamFolderId, archiveId, senderAddress, spamFolderId).changes;
+
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE archive_id = ?
+      `).run(archiveId);
+      this.db.prepare(`
+        UPDATE archives SET folder_count = (
+          SELECT COUNT(*) FROM folders WHERE archive_id = archives.id
+        ) WHERE id = ?
+      `).run(archiveId);
+
+      return { archiveId, senderAddress, spamFolderId, spamFolderPath, movedMessages };
+    });
+
+    const result = applyRule();
+    const message = this.getMessage(messageId);
+    if (!message) throw new Error("Message not found");
+    return { ...result, message };
   }
 
   createGmailConnection(input: GmailConnectionCreateInput): GmailConnection {

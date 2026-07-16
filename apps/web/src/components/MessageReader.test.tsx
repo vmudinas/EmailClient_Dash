@@ -182,6 +182,17 @@ describe("MessageReader reply, forward, and move", () => {
     fireEvent.click(screen.getByRole("button", { name: "Archive message" }));
     expect(onArchive).toHaveBeenCalledWith(MESSAGE);
   });
+
+  it("offers an action to always send the current sender to Spam", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
+    } as unknown as ApiClient;
+    const onSpamSender = vi.fn().mockResolvedValue(undefined);
+    renderReader(api, MESSAGE, { onSpamSender });
+
+    fireEvent.click(screen.getByRole("button", { name: "Always send sender to Spam" }));
+    expect(onSpamSender).toHaveBeenCalledWith(MESSAGE);
+  });
 });
 
 describe("MessageReader attachment preview", () => {
@@ -286,8 +297,10 @@ function renderReader(
       onLoadFolders={vi.fn().mockResolvedValue([])}
       onMove={vi.fn().mockResolvedValue(undefined)}
       onArchive={vi.fn().mockResolvedValue(undefined)}
+      onSpamSender={vi.fn().mockResolvedValue(undefined)}
       onIndicatorsChange={vi.fn()}
       moveBusy={false}
+      spamBusy={false}
       {...overrides}
     />
   );

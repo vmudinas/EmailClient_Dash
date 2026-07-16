@@ -688,6 +688,7 @@ describe("SettingsDialog", () => {
         archiveId: archive.id,
         senderAddress: "vendor@example.test",
         senderName: "Vendor Co",
+        ruleType: "folder",
         folderId: "folder-1",
         folderPath: "Top Senders/Vendor Co",
         messageCount: 42,
