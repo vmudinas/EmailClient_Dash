@@ -782,6 +782,18 @@ describe("Email API authorization", () => {
     expect(local.statusCode).toBe(200);
     expect(local.json()).toMatchObject({ isStarred: true });
 
+    const starred = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages?archiveId=${archive.id}&starred=true`,
+      headers: localHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(starred.statusCode).toBe(200);
+    expect(starred.json()).toMatchObject({
+      items: [{ id: messageId, folderId: folder.id, folderPath: "Inbox", state: { isStarred: true } }]
+    });
+    expect(runtime.database.getArchive(archive.id)).toMatchObject({ starredCount: 1 });
+
     const sent = await runtime.app.inject({
       method: "POST",
       url: "/api/gmail/connections/connection-route/send",

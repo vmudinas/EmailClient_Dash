@@ -15,6 +15,7 @@ import {
   FileSpreadsheet,
   FileText,
   Forward,
+  Folder as FolderIcon,
   FolderInput,
   ImageOff,
   LoaderCircle,
@@ -575,10 +576,16 @@ function MoveToFolderMenu({
                 key={folder.id}
                 className="move-menu-item"
                 role="menuitem"
+                aria-label={folder.path}
+                title={folder.path}
                 disabled={busy}
                 onClick={() => { setOpen(false); void onMove(message.id, folder.id); }}
               >
-                {folder.path}
+                <FolderIcon size={16} aria-hidden="true" />
+                <span className="move-menu-item-copy">
+                  <strong>{folder.name}</strong>
+                  <small>{folder.path}</small>
+                </span>
               </button>
             ))
           )}

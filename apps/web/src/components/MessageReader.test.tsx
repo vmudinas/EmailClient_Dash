@@ -157,7 +157,7 @@ describe("MessageReader reply, forward, and move", () => {
     } as unknown as ApiClient;
     const onLoadFolders = vi.fn().mockResolvedValue([
       { id: "folder-1", archiveId: "archive-1", parentId: null, name: "Inbox", path: "Inbox", messageCount: 1, unreadCount: 0 },
-      { id: "folder-2", archiveId: "archive-1", parentId: null, name: "Archived", path: "Archived", messageCount: 0, unreadCount: 0 }
+      { id: "folder-2", archiveId: "archive-1", parentId: null, name: "Archived", path: "Account Mailboxes/Archived", messageCount: 0, unreadCount: 0 }
     ]);
     const onMove = vi.fn().mockResolvedValue(undefined);
     renderReader(api, MESSAGE, { onLoadFolders, onMove });
@@ -165,10 +165,13 @@ describe("MessageReader reply, forward, and move", () => {
     fireEvent.click(screen.getByRole("button", { name: "Move to folder" }));
     await waitFor(() => expect(onLoadFolders).toHaveBeenCalledWith("archive-1"));
 
-    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Archived" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Account Mailboxes/Archived" })).toBeTruthy());
     expect(screen.queryByRole("menuitem", { name: "Inbox" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("menuitem", { name: "Archived" }));
+    const archivedItem = screen.getByRole("menuitem", { name: "Account Mailboxes/Archived" });
+    expect(archivedItem.textContent).toContain("Archived");
+    expect(archivedItem.textContent).toContain("Account Mailboxes/Archived");
+    fireEvent.click(archivedItem);
     expect(onMove).toHaveBeenCalledWith("message-1", "folder-2");
   });
 

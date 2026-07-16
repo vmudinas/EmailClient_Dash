@@ -1554,6 +1554,16 @@ export class EmailDatabase {
           JOIN message_state s ON s.message_id = m.id
           WHERE m.archive_id = a.id AND s.is_read = 0
         ) AS live_unread_count,
+        (
+          SELECT COUNT(*) FROM messages m
+          JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = a.id AND s.is_starred = 1
+        ) AS live_starred_count,
+        (
+          SELECT COUNT(*) FROM messages m
+          JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = a.id AND s.is_starred = 1 AND s.is_read = 0
+        ) AS live_starred_unread_count,
         (SELECT COUNT(*) FROM folders f WHERE f.archive_id = a.id) AS live_folder_count,
         (
           SELECT COUNT(*) FROM attachments att
@@ -1585,6 +1595,16 @@ export class EmailDatabase {
           JOIN message_state s ON s.message_id = m.id
           WHERE m.archive_id = a.id AND s.is_read = 0
         ) AS live_unread_count,
+        (
+          SELECT COUNT(*) FROM messages m
+          JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = a.id AND s.is_starred = 1
+        ) AS live_starred_count,
+        (
+          SELECT COUNT(*) FROM messages m
+          JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = a.id AND s.is_starred = 1 AND s.is_read = 0
+        ) AS live_starred_unread_count,
         (SELECT COUNT(*) FROM folders f WHERE f.archive_id = a.id) AS live_folder_count,
         (
           SELECT COUNT(*) FROM attachments att
@@ -3593,6 +3613,7 @@ export class EmailDatabase {
   listMessages(options: {
     archiveId?: string;
     folderId?: string;
+    starred?: boolean;
     cursor?: string;
     limit?: number;
   }): CursorPage<MessageSummary> {
@@ -3607,6 +3628,10 @@ export class EmailDatabase {
     if (options.folderId) {
       conditions.push("m.folder_id = ?");
       params.push(options.folderId);
+    }
+    if (options.starred !== undefined) {
+      conditions.push("COALESCE(s.is_starred, 0) = ?");
+      params.push(options.starred ? 1 : 0);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.db.prepare(`
@@ -3736,6 +3761,10 @@ export class EmailDatabase {
     if (options.folderId) {
       filters.push("m.folder_id = ?");
       filterParams.push(options.folderId);
+    }
+    if (options.starred !== undefined) {
+      filters.push("COALESCE(s.is_starred, 0) = ?");
+      filterParams.push(options.starred ? 1 : 0);
     }
     if (options.from) {
       filters.push("lower(m.sender_address || ' ' || COALESCE(m.sender_name, '')) LIKE ?");
@@ -4316,6 +4345,8 @@ export class EmailDatabase {
       sizeBytes: Number(row.size_bytes),
       messageCount: Number(row.live_message_count ?? row.message_count),
       unreadCount: Number(row.live_unread_count ?? 0),
+      starredCount: Number(row.live_starred_count ?? 0),
+      starredUnreadCount: Number(row.live_starred_unread_count ?? 0),
       folderCount: Number(row.live_folder_count ?? row.folder_count),
       attachmentCount: Number(row.live_attachment_count ?? row.attachment_count),
       errorCount: Number(row.error_count),

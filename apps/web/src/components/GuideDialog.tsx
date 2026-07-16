@@ -124,6 +124,7 @@ function GuideContent({ section }: { section: GuideSection }) {
         <h3>Organize local mail</h3>
         <p>Rename changes only the local display name. Archive Mail never rewrites an original PST or MBOX.</p>
         <ul>
+          <li>Starred is a smart mailbox. Starring a message keeps it in its original mailbox while also showing it in Starred.</li>
           <li>Combine archives to move folders, messages, state, search rows, and attachment references into another completed archive.</li>
           <li>Combine mailboxes within one archive to move a mailbox tree into another mailbox.</li>
           <li>Delete removes local mail and unreferenced attachment blobs. It does not delete anything from Gmail.</li>

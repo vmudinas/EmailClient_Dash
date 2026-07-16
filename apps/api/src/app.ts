@@ -610,6 +610,7 @@ export class EmailApiRuntime {
       Querystring: {
         archiveId?: string;
         folderId?: string;
+        starred?: string;
         cursor?: string;
         limit?: string;
       };
@@ -618,6 +619,7 @@ export class EmailApiRuntime {
       return this.database.listMessages({
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
+        starred: optionalBoolean(request.query.starred),
         cursor: request.query.cursor,
         limit: optionalNumber(request.query.limit)
       });
@@ -628,6 +630,7 @@ export class EmailApiRuntime {
         q?: string;
         archiveId?: string;
         folderId?: string;
+        starred?: string;
         from?: string;
         to?: string;
         after?: string;
@@ -648,6 +651,7 @@ export class EmailApiRuntime {
         q: query,
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
+        starred: optionalBoolean(request.query.starred),
         from: request.query.from,
         to: request.query.to,
         after: request.query.after,

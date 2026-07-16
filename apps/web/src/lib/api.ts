@@ -312,6 +312,7 @@ export class ApiClient {
   listMessages(options: {
     archiveId?: string;
     folderId?: string;
+    starred?: boolean;
     cursor?: string;
     limit?: number;
   }): Promise<CursorPage<MessageSummary>> {

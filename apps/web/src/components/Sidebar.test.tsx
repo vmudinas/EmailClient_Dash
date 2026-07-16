@@ -16,6 +16,8 @@ const READY_ARCHIVE: Archive = {
   sizeBytes: 1_024,
   messageCount: 4,
   unreadCount: 3,
+  starredCount: 2,
+  starredUnreadCount: 1,
   folderCount: 1,
   attachmentCount: 0,
   errorCount: 0,
@@ -59,6 +61,19 @@ const DRAGGED_MESSAGE: MessageSummary = {
 };
 
 describe("Sidebar archive and mailbox actions", () => {
+  it("shows a Starred smart mailbox without replacing physical folders", () => {
+    const onSelectSmartMailbox = vi.fn();
+    renderSidebar({ onSelectSmartMailbox });
+
+    const starredRow = screen.getByText("Starred").closest("button")!;
+    expect(starredRow.textContent).toContain("1");
+    expect(starredRow.textContent).toContain("2");
+    fireEvent.click(starredRow);
+
+    expect(onSelectSmartMailbox).toHaveBeenCalledWith("starred");
+    expect(screen.getByTitle("Inbox")).toBeTruthy();
+  });
+
   it("moves a dragged message onto another mailbox", () => {
     const onMoveMessage = vi.fn();
     renderSidebar({
@@ -242,11 +257,13 @@ function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> 
       jobs={[]}
       selectedArchiveId={READY_ARCHIVE.id}
       selectedFolderId={null}
+      selectedSmartMailbox={null}
       readOnly={false}
       draggedMessage={null}
       moveBusy={false}
       onSelectArchive={vi.fn()}
       onSelectFolder={vi.fn()}
+      onSelectSmartMailbox={vi.fn()}
       onImport={vi.fn()}
       onOpenGmail={vi.fn()}
       onCreateFolder={vi.fn()}

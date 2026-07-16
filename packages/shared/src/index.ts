@@ -51,6 +51,8 @@ export interface Archive {
   sizeBytes: number;
   messageCount: number;
   unreadCount: number;
+  starredCount?: number;
+  starredUnreadCount?: number;
   folderCount: number;
   attachmentCount: number;
   errorCount: number;
@@ -616,6 +618,7 @@ export interface CursorPage<T> {
 export interface SearchFilters {
   archiveId?: string;
   folderId?: string;
+  starred?: boolean;
   from?: string;
   to?: string;
   after?: string;

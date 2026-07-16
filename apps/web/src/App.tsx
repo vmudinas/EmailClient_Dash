@@ -73,6 +73,7 @@ import { SettingsDialog } from "./components/SettingsDialog.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
 type MobileView = "folders" | "messages" | "reader";
+type SmartMailbox = "starred";
 type RenameTarget =
   | { kind: "archive"; id: string; name: string }
   | { kind: "mailbox"; id: string; archiveId: string; name: string };
@@ -97,6 +98,7 @@ export function App() {
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [selectedSmartMailbox, setSelectedSmartMailbox] = useState<SmartMailbox | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -371,6 +373,7 @@ export function App() {
         const searchFilters: SearchFilters = {
           archiveId: selectedArchiveId,
           folderId: selectedFolderId ?? undefined,
+          starred: selectedSmartMailbox === "starred" ? true : undefined,
           from: filters.from || undefined,
           to: filters.to || undefined,
           after: filters.after || undefined,
@@ -389,6 +392,7 @@ export function App() {
         const page = await api.listMessages({
           archiveId: selectedArchiveId,
           folderId: selectedFolderId ?? undefined,
+          starred: selectedSmartMailbox === "starred" ? true : undefined,
           cursor: append ? nextCursor ?? undefined : undefined,
           limit: 50
         });
@@ -406,6 +410,7 @@ export function App() {
     api,
     selectedArchiveId,
     selectedFolderId,
+    selectedSmartMailbox,
     searchTerm,
     filters,
     sort,
@@ -419,7 +424,7 @@ export function App() {
     setSelectedMessageId(null);
     setMessage(null);
     void loadMessages(false);
-  }, [api, selectedArchiveId, selectedFolderId, searchTerm, filters, sort]);
+  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort]);
 
   const loadFoldersForGmail = useCallback(async (archiveId: string): Promise<Folder[]> => {
     if (!api) return [];
@@ -528,7 +533,12 @@ export function App() {
     try {
       const state = await api.updateMessageState(message.id, patch);
       mergeMessageState(message.id, state);
-      if (patch.isRead !== undefined) await refreshMailboxCounts();
+      if (patch.isRead !== undefined || patch.isStarred !== undefined) await refreshMailboxCounts();
+      if (patch.isStarred === false && selectedSmartMailbox === "starred") {
+        setSelectedMessageId(null);
+        setMessage(null);
+        await loadMessages(false);
+      }
     } catch (error) {
       showError(error instanceof Error ? error.message : "Message could not be updated");
       throw error;
@@ -538,11 +548,19 @@ export function App() {
   const selectArchive = (id: string) => {
     setSelectedArchiveId(id);
     setSelectedFolderId(null);
+    setSelectedSmartMailbox(null);
     setMobileView("messages");
   };
 
   const selectFolder = (id: string | null) => {
     setSelectedFolderId(id);
+    setSelectedSmartMailbox(null);
+    setMobileView("messages");
+  };
+
+  const selectSmartMailbox = (mailbox: SmartMailbox) => {
+    setSelectedFolderId(null);
+    setSelectedSmartMailbox(mailbox);
     setMobileView("messages");
   };
 
@@ -1138,7 +1156,9 @@ export function App() {
 
   const listTitle = searchTerm
     ? `Search: ${searchTerm}`
-    : selectedFolder?.name ?? (selectedArchive ? "All mail" : "Messages");
+    : selectedSmartMailbox === "starred"
+      ? "Starred"
+      : selectedFolder?.name ?? (selectedArchive ? "All mail" : "Messages");
 
   if (initializing) {
     return (
@@ -1283,11 +1303,13 @@ export function App() {
               jobs={jobs}
               selectedArchiveId={selectedArchiveId}
               selectedFolderId={selectedFolderId}
+              selectedSmartMailbox={selectedSmartMailbox}
               readOnly={readOnly}
               draggedMessage={draggedMessage}
               moveBusy={moveBusy}
               onSelectArchive={selectArchive}
               onSelectFolder={selectFolder}
+              onSelectSmartMailbox={selectSmartMailbox}
               onImport={openImport}
               onOpenGmail={openGmail}
               onCreateFolder={() => setCreateMailboxOpen(true)}

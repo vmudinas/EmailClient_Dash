@@ -14,6 +14,7 @@ import {
   Play,
   Plus,
   Square,
+  Star,
   Trash2
 } from "lucide-react";
 import type {
@@ -39,11 +40,13 @@ interface SidebarProps {
   jobs: ImportJob[];
   selectedArchiveId: string | null;
   selectedFolderId: string | null;
+  selectedSmartMailbox: "starred" | null;
   readOnly: boolean;
   draggedMessage: MessageSummary | null;
   moveBusy: boolean;
   onSelectArchive(id: string): void;
   onSelectFolder(id: string | null): void;
+  onSelectSmartMailbox(mailbox: "starred"): void;
   onImport(): void;
   onOpenGmail(): void;
   onCreateFolder(): void;
@@ -66,11 +69,13 @@ export function Sidebar({
   jobs,
   selectedArchiveId,
   selectedFolderId,
+  selectedSmartMailbox,
   readOnly,
   draggedMessage,
   moveBusy,
   onSelectArchive,
   onSelectFolder,
+  onSelectSmartMailbox,
   onImport,
   onOpenGmail,
   onCreateFolder,
@@ -282,7 +287,7 @@ export function Sidebar({
             </div>
             <nav className="folder-list" aria-label={`${selectedArchive.name} folders`}>
               <button
-                className={`folder-row ${selectedFolderId === null ? "selected" : ""}`}
+                className={`folder-row ${selectedFolderId === null && selectedSmartMailbox === null ? "selected" : ""}`}
                 onClick={() => onSelectFolder(null)}
               >
                 <span className="folder-toggle-spacer" />
@@ -291,6 +296,21 @@ export function Sidebar({
                 <span className="folder-counts" aria-label={`${selectedArchive.unreadCount.toLocaleString()} unread, ${selectedArchive.messageCount.toLocaleString()} total`}>
                   <b>{selectedArchive.unreadCount.toLocaleString()}</b>
                   <small>{selectedArchive.messageCount.toLocaleString()}</small>
+                </span>
+              </button>
+              <button
+                className={`folder-row smart-folder-row ${selectedSmartMailbox === "starred" ? "selected" : ""}`}
+                onClick={() => onSelectSmartMailbox("starred")}
+              >
+                <span className="folder-toggle-spacer" />
+                <Star size={16} fill={selectedSmartMailbox === "starred" ? "currentColor" : "none"} />
+                <span>Starred</span>
+                <span
+                  className="folder-counts"
+                  aria-label={`${(selectedArchive.starredUnreadCount ?? 0).toLocaleString()} unread, ${(selectedArchive.starredCount ?? 0).toLocaleString()} total`}
+                >
+                  <b>{(selectedArchive.starredUnreadCount ?? 0).toLocaleString()}</b>
+                  <small>{(selectedArchive.starredCount ?? 0).toLocaleString()}</small>
                 </span>
               </button>
               {renderFolders(null, 0)}

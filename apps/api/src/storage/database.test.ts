@@ -79,6 +79,15 @@ describe("EmailDatabase", () => {
     });
     expect(database.getArchive(archive.id)?.unreadCount).toBe(0);
     expect(database.getFolder(folder.id)?.unreadCount).toBe(0);
+    expect(database.listMessages({ archiveId: archive.id, starred: true }).items).toEqual([
+      expect.objectContaining({ id: message.id, folderId: folder.id, folderPath: folder.path })
+    ]);
+    expect(database.search({ q: "rollout", archiveId: archive.id, starred: true }).items[0]?.message)
+      .toMatchObject({ id: message.id, folderId: folder.id, folderPath: folder.path });
+    expect(database.getArchive(archive.id)).toMatchObject({
+      starredCount: 1,
+      starredUnreadCount: 0
+    });
     database.close();
   });
 
