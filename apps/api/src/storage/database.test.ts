@@ -688,6 +688,66 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("exposes durable analysis and calendar-event indicators on message summaries", async () => {
+    const dataDir = await temporaryDirectory();
+    let database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Message indicators",
+      sourceType: "mbox",
+      fingerprint: "message-indicators",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = insertDatedMessage(database, archive.id, inbox.id, "indicator-message", "2026-07-16T12:00:00.000Z");
+    database.completeArchive(archive.id, 0);
+    expect(database.listMessages({ folderId: inbox.id }).items[0]).toMatchObject({
+      hasAiAnalysis: false,
+      hasCalendarEvent: false
+    });
+
+    database.upsertMessageAnalysis({
+      messageId,
+      summary: "An interview is scheduled.",
+      categories: ["Recruitment"],
+      priority: "high",
+      actionRequired: true,
+      actionSummary: "Attend the interview",
+      spamProbability: 0,
+      phishingProbability: 0,
+      draftRecommended: false,
+      confidence: 0.95,
+      signals: ["Specific interview time"],
+      model: "test-model",
+      promptVersion: "test-v1",
+      contentHash: "content-hash"
+    });
+    database.linkMessageCalendarEvent(messageId, archive.id, {
+      id: "event-1",
+      connectionId: archive.id,
+      title: "Interview",
+      description: "",
+      location: "",
+      startAt: "2026-07-21T16:00:00.000Z",
+      endAt: "2026-07-21T17:00:00.000Z",
+      allDay: false,
+      htmlLink: null,
+      meetingLink: null,
+      organizer: null,
+      attendees: []
+    });
+    expect(database.listMessages({ folderId: inbox.id }).items[0]).toMatchObject({
+      hasAiAnalysis: true,
+      hasCalendarEvent: true
+    });
+
+    database.close();
+    database = new EmailDatabase(dataDir);
+    expect(database.getMessage(messageId)).toMatchObject({ hasAiAnalysis: true, hasCalendarEvent: true });
+    database.unlinkMessageCalendarEvent(archive.id, "event-1");
+    expect(database.getMessage(messageId)).toMatchObject({ hasAiAnalysis: true, hasCalendarEvent: false });
+    database.close();
+  });
+
   it("files the top 20 Inbox senders, leaves Spam and other senders alone, and routes future mail", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);

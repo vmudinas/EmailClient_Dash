@@ -167,6 +167,16 @@ export function App() {
     window.setTimeout(() => setNotice((current) => current === value ? "" : current), 5_000);
   }, []);
 
+  const updateMessageIndicators = useCallback((
+    messageId: string,
+    patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean }
+  ) => {
+    setItems((current) => current.map((item) => item.message.id === messageId
+      ? { ...item, message: { ...item.message, ...patch } }
+      : item));
+    setMessage((current) => current?.id === messageId ? { ...current, ...patch } : current);
+  }, []);
+
   const loadAuthenticatedData = useCallback(async (client: ApiClient) => {
     const loadedArchives = await client.listArchives();
     void client.flushClientDiagnostics().then(() => {
@@ -1289,6 +1299,7 @@ export function App() {
               onLoadFolders={loadFoldersForGmail}
               onMove={(messageId, folderId) => moveMessage(messageId, folderId)}
               onArchive={archiveMessage}
+              onIndicatorsChange={updateMessageIndicators}
               moveBusy={moveBusy}
             />
           </>

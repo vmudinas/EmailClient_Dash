@@ -259,6 +259,17 @@ export class ApiClient {
     });
   }
 
+  createCalendarEventFromMessage(
+    messageId: string,
+    connectionId: string,
+    input: CalendarEventInput
+  ): Promise<CalendarEvent> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/calendar-events`, {
+      method: "POST",
+      body: JSON.stringify({ connectionId, event: input })
+    });
+  }
+
   updateCalendarEvent(connectionId: string, eventId: string, input: CalendarEventInput): Promise<CalendarEvent> {
     return this.request(`/api/calendar/connections/${encodeURIComponent(connectionId)}/events/${encodeURIComponent(eventId)}`, {
       method: "PATCH",

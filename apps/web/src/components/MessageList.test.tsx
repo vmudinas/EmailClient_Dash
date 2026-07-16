@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageSummary } from "@email-client/shared";
 import { MessageList } from "./MessageList.js";
 
@@ -18,6 +18,8 @@ const MESSAGE: MessageSummary = {
   attachmentCount: 0,
   state: { isRead: false, isStarred: false, tags: [], note: "", updatedAt: null }
 };
+
+afterEach(cleanup);
 
 describe("MessageList drag and drop", () => {
   it("makes writable message rows draggable and exposes their message id", () => {
@@ -47,5 +49,52 @@ describe("MessageList drag and drop", () => {
     expect(onDragStart).toHaveBeenCalledWith(MESSAGE);
     fireEvent.dragEnd(row);
     expect(onDragEnd).toHaveBeenCalledOnce();
+  });
+
+  it("prioritizes event-linked orange, analyzed purple, and read gray row states", () => {
+    const readMessage: MessageSummary = {
+      ...MESSAGE,
+      id: "message-read",
+      subject: "Read message",
+      state: { ...MESSAGE.state, isRead: true }
+    };
+    const analyzedMessage: MessageSummary = {
+      ...readMessage,
+      id: "message-analyzed",
+      subject: "Analyzed message",
+      hasAiAnalysis: true
+    };
+    const calendarMessage: MessageSummary = {
+      ...analyzedMessage,
+      id: "message-calendar",
+      subject: "Calendar message",
+      hasCalendarEvent: true
+    };
+    render(
+      <MessageList
+        items={[readMessage, analyzedMessage, calendarMessage].map((message) => ({ message }))}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+      />
+    );
+
+    const [readRow, analyzedRow, calendarRow] = screen.getAllByRole("option");
+    expect(readRow?.classList.contains("read")).toBe(true);
+    expect(readRow?.classList.contains("analyzed")).toBe(false);
+    expect(analyzedRow?.classList.contains("analyzed")).toBe(true);
+    expect(analyzedRow?.classList.contains("calendar-linked")).toBe(false);
+    expect(calendarRow?.classList.contains("calendar-linked")).toBe(true);
+    expect(calendarRow?.classList.contains("analyzed")).toBe(false);
+    expect(screen.getByText("Analyzed")).toBeTruthy();
+    expect(screen.getByText("Event")).toBeTruthy();
   });
 });

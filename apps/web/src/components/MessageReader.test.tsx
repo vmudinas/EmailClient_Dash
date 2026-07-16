@@ -97,7 +97,7 @@ describe("MessageReader AI analysis", () => {
         provider: "deepseek",
         model: "deepseek-chat"
       }),
-      createCalendarEvent: vi.fn().mockResolvedValue({
+      createCalendarEventFromMessage: vi.fn().mockResolvedValue({
         id: "event-1",
         connectionId: connection.id,
         title: "AWS engineering interview",
@@ -112,7 +112,8 @@ describe("MessageReader AI analysis", () => {
         attendees: []
       })
     } as unknown as ApiClient;
-    renderReader(api, MESSAGE, { connections: [connection] });
+    const onIndicatorsChange = vi.fn();
+    renderReader(api, MESSAGE, { connections: [connection], onIndicatorsChange });
     await waitFor(() => expect(screen.getByRole("button", { name: "Plan event or to-do" })).toBeTruthy());
 
     fireEvent.click(screen.getByRole("button", { name: "Plan event or to-do" }));
@@ -120,7 +121,8 @@ describe("MessageReader AI analysis", () => {
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "AWS engineering interview" } });
     fireEvent.click(screen.getByRole("button", { name: "Create calendar event" }));
 
-    await waitFor(() => expect(api.createCalendarEvent).toHaveBeenCalledWith(
+    await waitFor(() => expect(api.createCalendarEventFromMessage).toHaveBeenCalledWith(
+      MESSAGE.id,
       connection.id,
       expect.objectContaining({
         title: "AWS engineering interview",
@@ -128,6 +130,7 @@ describe("MessageReader AI analysis", () => {
         location: "Google Meet"
       })
     ));
+    expect(onIndicatorsChange).toHaveBeenCalledWith(MESSAGE.id, { hasCalendarEvent: true });
     expect(await screen.findByText('Calendar event "AWS engineering interview" created.')).toBeTruthy();
   });
 });
@@ -283,6 +286,7 @@ function renderReader(
       onLoadFolders={vi.fn().mockResolvedValue([])}
       onMove={vi.fn().mockResolvedValue(undefined)}
       onArchive={vi.fn().mockResolvedValue(undefined)}
+      onIndicatorsChange={vi.fn()}
       moveBusy={false}
       {...overrides}
     />

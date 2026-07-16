@@ -2,6 +2,8 @@ import DOMPurify from "dompurify";
 import { useState } from "react";
 import {
   ArrowLeft,
+  BrainCircuit,
+  CalendarClock,
   ChevronDown,
   Inbox,
   LoaderCircle,
@@ -65,7 +67,7 @@ export function MessageList({
       <div className="message-list" role="listbox" aria-label={title}>
         {items.map(({ message, hit }) => (
           <button
-            className={`message-row ${selectedMessageId === message.id ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${draggingMessageId === message.id ? "dragging" : ""}`}
+            className={`message-row ${selectedMessageId === message.id ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${message.hasCalendarEvent ? "calendar-linked" : message.hasAiAnalysis ? "analyzed" : ""} ${draggingMessageId === message.id ? "dragging" : ""}`}
             key={message.id}
             role="option"
             aria-selected={selectedMessageId === message.id}
@@ -108,6 +110,11 @@ export function MessageList({
               )}
               <span className="message-row-footer">
                 <span className="folder-chip">{message.folderPath.split("/").at(-1)}</span>
+                {message.hasCalendarEvent ? (
+                  <span className="message-status-chip calendar"><CalendarClock size={11} />Event</span>
+                ) : message.hasAiAnalysis ? (
+                  <span className="message-status-chip analyzed"><BrainCircuit size={11} />Analyzed</span>
+                ) : null}
                 {hit?.matchedIn === "attachment" && (
                   <span className="attachment-hit">
                     <Paperclip size={12} />

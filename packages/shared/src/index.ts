@@ -94,6 +94,8 @@ export interface MessageSummary {
   preview: string;
   hasAttachments: boolean;
   attachmentCount: number;
+  hasAiAnalysis?: boolean;
+  hasCalendarEvent?: boolean;
   state: LocalMessageState;
 }
 
@@ -550,6 +552,13 @@ export const messageActionSuggestionRequestSchema = z.object({
 }).strict();
 
 export type MessageActionSuggestionRequest = z.infer<typeof messageActionSuggestionRequestSchema>;
+
+export const messageCalendarEventCreateSchema = z.object({
+  connectionId: z.string().uuid(),
+  event: calendarEventInputSchema
+}).strict();
+
+export type MessageCalendarEventCreate = z.infer<typeof messageCalendarEventCreateSchema>;
 
 export interface TodoItem {
   id: string;

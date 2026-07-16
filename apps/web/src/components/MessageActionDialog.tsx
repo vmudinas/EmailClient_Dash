@@ -27,6 +27,7 @@ interface TodoDraft {
 
 export function MessageActionDialog({
   api,
+  messageId,
   suggestion,
   connections,
   onClose,
@@ -34,10 +35,11 @@ export function MessageActionDialog({
   onError
 }: {
   api: ApiClient;
+  messageId: string;
   suggestion: MessageActionSuggestion;
   connections: GmailConnection[];
   onClose(): void;
-  onCreated(message: string): void;
+  onCreated(message: string, action: ReviewAction): void;
   onError(message: string): void;
 }) {
   const calendarConnections = useMemo(
@@ -75,7 +77,7 @@ export function MessageActionDialog({
     try {
       if (action === "todo") {
         const created = await api.createTodo({ date: todo.date, text: todo.text.trim() });
-        onCreated(`To-do created for ${formatDate(created.date)}.`);
+        onCreated(`To-do created for ${formatDate(created.date)}.`, "todo");
         return;
       }
       if (!connectionId) throw new Error("Choose a calendar-connected Gmail account");
@@ -94,8 +96,8 @@ export function MessageActionDialog({
       if (new Date(payload.endAt).getTime() < new Date(payload.startAt).getTime()) {
         throw new Error("The event end must be after its start");
       }
-      const created = await api.createCalendarEvent(connectionId, payload);
-      onCreated(`Calendar event "${created.title}" created.`);
+      const created = await api.createCalendarEventFromMessage(messageId, connectionId, payload);
+      onCreated(`Calendar event "${created.title}" created.`, "calendar_event");
     } catch (error) {
       onError(error instanceof Error ? error.message : "The suggested action could not be created");
     } finally {

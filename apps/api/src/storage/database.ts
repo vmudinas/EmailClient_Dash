@@ -25,6 +25,7 @@ import type {
   Attachment,
   AuditEvent,
   AuditPage,
+  CalendarEvent,
   CursorPage,
   DiagnosticCategory,
   DiagnosticEvent,
@@ -1082,6 +1083,25 @@ export class EmailDatabase {
       `);
       this.backfillLegacyAiScheduleRuns();
       this.db.pragma("user_version = 17");
+    }
+
+    const messageCalendarLinkVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (messageCalendarLinkVersion < 18) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS message_calendar_events (
+          message_id TEXT NOT NULL,
+          connection_id TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          start_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(connection_id, event_id),
+          FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS message_calendar_events_message_idx
+          ON message_calendar_events(message_id, created_at DESC);
+        PRAGMA user_version = 18;
+      `);
     }
   }
 
@@ -4465,6 +4485,8 @@ export class EmailDatabase {
       preview: previewText(String(row.body_text ?? "")),
       hasAttachments: Boolean(row.has_attachments),
       attachmentCount: Number(row.attachment_count),
+      hasAiAnalysis: Boolean(row.has_ai_analysis),
+      hasCalendarEvent: Boolean(row.has_calendar_event),
       state: this.mapState(row)
     };
   }
@@ -4493,6 +4515,27 @@ export class EmailDatabase {
       disposition: row.disposition === "inline" ? "inline" : "attachment",
       textStatus: row.text_status as Attachment["textStatus"]
     };
+  }
+
+  linkMessageCalendarEvent(messageId: string, connectionId: string, event: CalendarEvent): void {
+    if (!this.db.prepare("SELECT 1 FROM messages WHERE id = ?").get(messageId)) {
+      throw new Error("Message not found");
+    }
+    this.db.prepare(`
+      INSERT INTO message_calendar_events (
+        message_id, connection_id, event_id, title, start_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id, event_id) DO UPDATE SET
+        message_id = excluded.message_id,
+        title = excluded.title,
+        start_at = excluded.start_at
+    `).run(messageId, connectionId, event.id, event.title, event.startAt, new Date().toISOString());
+  }
+
+  unlinkMessageCalendarEvent(connectionId: string, eventId: string): void {
+    this.db.prepare(`
+      DELETE FROM message_calendar_events WHERE connection_id = ? AND event_id = ?
+    `).run(connectionId, eventId);
   }
 
   listTodos(startDate: string, endDate: string): TodoItem[] {
@@ -4571,6 +4614,8 @@ const MESSAGE_SUMMARY_COLUMNS = `
   m.body_text,
   m.has_attachments,
   m.attachment_count,
+  EXISTS(SELECT 1 FROM ai_message_analysis analysis WHERE analysis.message_id = m.id) AS has_ai_analysis,
+  EXISTS(SELECT 1 FROM message_calendar_events linked_event WHERE linked_event.message_id = m.id) AS has_calendar_event,
   COALESCE(s.is_read, 0) AS is_read,
   COALESCE(s.is_starred, 0) AS is_starred,
   COALESCE(s.tags_json, '[]') AS tags_json,

@@ -55,6 +55,7 @@ interface MessageReaderProps {
   onLoadFolders(archiveId: string): Promise<Folder[]>;
   onMove(messageId: string, folderId: string): Promise<void>;
   onArchive(message: MessageDetail): Promise<void>;
+  onIndicatorsChange(messageId: string, patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean }): void;
   moveBusy: boolean;
 }
 
@@ -72,6 +73,7 @@ export function MessageReader({
   onLoadFolders,
   onMove,
   onArchive,
+  onIndicatorsChange,
   moveBusy
 }: MessageReaderProps) {
   const [note, setNote] = useState("");
@@ -135,6 +137,12 @@ export function MessageReader({
       window.clearInterval(interval);
     };
   }, [api, message?.id, aiState.job?.id, aiState.job?.status]);
+
+  useEffect(() => {
+    if (message?.id && aiState.analysis) {
+      onIndicatorsChange(message.id, { hasAiAnalysis: true });
+    }
+  }, [message?.id, aiState.analysis?.id, onIndicatorsChange]);
 
 
   if (loading) {
@@ -359,12 +367,16 @@ export function MessageReader({
         {api && actionSuggestion && (
           <MessageActionDialog
             api={api}
+            messageId={message.id}
             suggestion={actionSuggestion}
             connections={connections}
             onClose={() => setActionSuggestion(null)}
-            onCreated={(notice) => {
+            onCreated={(notice, action) => {
               setActionSuggestion(null);
               setActionNotice(notice);
+              if (action === "calendar_event") {
+                onIndicatorsChange(message.id, { hasCalendarEvent: true });
+              }
             }}
             onError={setAiError}
           />

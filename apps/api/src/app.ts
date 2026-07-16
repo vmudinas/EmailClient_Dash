@@ -32,6 +32,7 @@ import {
   mailboxCreateSchema,
   mailboxMergeSchema,
   messageActionSuggestionRequestSchema,
+  messageCalendarEventCreateSchema,
   messageMoveSchema,
   pinChangeSchema,
   senderFilingArchiveSchema,
@@ -1029,6 +1030,27 @@ export class EmailApiRuntime {
       }
     );
 
+    this.app.post<{ Params: { messageId: string }; Body: unknown }>(
+      "/api/messages/:messageId/calendar-events",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = messageCalendarEventCreateSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
+        }
+        if (!this.database.getMessage(request.params.messageId)) {
+          return reply.code(404).send({ error: "Message not found" });
+        }
+        try {
+          const created = await this.calendar.createEvent(parsed.data.connectionId, parsed.data.event);
+          this.database.linkMessageCalendarEvent(request.params.messageId, parsed.data.connectionId, created);
+          return created;
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
     this.app.post<{ Params: { connectionId: string }; Body: unknown }>(
       "/api/calendar/connections/:connectionId/events",
       async (request, reply) => {
@@ -1067,6 +1089,7 @@ export class EmailApiRuntime {
         if (!this.requireRole(request, reply, ["local", "admin"])) return;
         try {
           await this.calendar.deleteEvent(request.params.connectionId, request.params.eventId);
+          this.database.unlinkMessageCalendarEvent(request.params.connectionId, request.params.eventId);
           return reply.code(204).send();
         } catch (error) {
           return this.calendarErrorReply(reply, error);

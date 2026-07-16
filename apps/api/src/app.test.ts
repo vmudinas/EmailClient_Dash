@@ -138,6 +138,99 @@ describe("Email API message action suggestion route", () => {
   });
 });
 
+describe("Email API message calendar association route", () => {
+  it("links a created calendar event to its source email and unlinks it on deletion", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const archive = runtime.database.createArchive({
+      name: "Calendar source",
+      sourceType: "mbox",
+      fingerprint: "calendar-source",
+      sizeBytes: 10
+    });
+    const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "calendar-source-message",
+      internetMessageId: null,
+      subject: "Interview time",
+      sender: { name: "Recruiter", address: "recruiter@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-16T12:00:00.000Z",
+      receivedAt: "2026-07-16T12:00:00.000Z",
+      bodyText: "Interview July 21 at noon.",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 10,
+      attachments: []
+    });
+    runtime.database.completeArchive(archive.id, 0);
+    vi.spyOn(runtime.calendar, "createEvent").mockResolvedValue({
+      id: "event-linked",
+      connectionId: archive.id,
+      title: "Interview",
+      description: "",
+      location: "",
+      startAt: "2026-07-21T16:00:00.000Z",
+      endAt: "2026-07-21T17:00:00.000Z",
+      allDay: false,
+      htmlLink: null,
+      meetingLink: null,
+      organizer: null,
+      attendees: []
+    });
+    const removeRemote = vi.spyOn(runtime.calendar, "deleteEvent").mockResolvedValue(undefined);
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const created = await runtime.app.inject({
+      method: "POST",
+      url: `/api/messages/${messageId}/calendar-events`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        connectionId: archive.id,
+        event: {
+          title: "Interview",
+          description: "",
+          location: "",
+          startAt: "2026-07-21T16:00:00.000Z",
+          endAt: "2026-07-21T17:00:00.000Z",
+          allDay: false
+        }
+      }
+    });
+    expect(created.statusCode).toBe(200);
+    expect(runtime.database.getMessage(messageId)?.hasCalendarEvent).toBe(true);
+
+    const removed = await runtime.app.inject({
+      method: "DELETE",
+      url: `/api/calendar/connections/${archive.id}/events/event-linked`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(removed.statusCode).toBe(204);
+    expect(removeRemote).toHaveBeenCalledWith(archive.id, "event-linked");
+    expect(runtime.database.getMessage(messageId)?.hasCalendarEvent).toBe(false);
+  });
+});
+
 describe("Email API sender filing routes", () => {
   it("organizes and disables top-sender Inbox rules from the admin API", async () => {
     const dataDir = await temporaryDirectory();
