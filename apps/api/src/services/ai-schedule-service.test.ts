@@ -6,6 +6,7 @@ import { EmailDatabase } from "../storage/database.js";
 import { AiScheduleService } from "./ai-schedule-service.js";
 import { AiService } from "./ai-service.js";
 import { AiSettingsManager } from "./ai-settings.js";
+import { DraftSettingsManager } from "./draft-settings.js";
 
 const directories: string[] = [];
 
@@ -303,22 +304,33 @@ describe("AiScheduleService", () => {
 
     const settings = new AiSettingsManager(dataDir, {});
     settings.update({ apiKey: "sk-test-secret", clearApiKey: false, enabled: true });
+    const draftSettings = new DraftSettingsManager(dataDir);
+    draftSettings.update({
+      defaultFromAddress: "automation@vitas.work",
+      senderName: "Vitas Mudinas"
+    });
     const draftReply = vi.fn().mockResolvedValue({
       draft: {
         workRelated: true,
         developmentOpportunity: true,
         reason: "A recruiter is offering a software development contract.",
         subject: "Senior TypeScript contract",
-        bodyText: "Thank you for reaching out. I would be glad to discuss the role.",
+        bodyText: "Thank you for reaching out. I would be glad to discuss the role.\n\nBest,\n[Name ]",
         confidence: 0.97
       },
       usage: { inputTokens: 40, outputTokens: 25 }
     });
-    const ai = new AiService(database, settings, () => ({
-      analyze: vi.fn(),
-      draftReply,
-      testConnection: vi.fn()
-    }));
+    const ai = new AiService(
+      database,
+      settings,
+      () => ({
+        analyze: vi.fn(),
+        draftReply,
+        testConnection: vi.fn()
+      }),
+      undefined,
+      draftSettings
+    );
     const scheduler = new AiScheduleService(database, ai);
     const schedule = database.createAiSchedule({
       name: "Development reply drafts",
@@ -346,10 +358,12 @@ describe("AiScheduleService", () => {
     );
     expect(database.listEmailDrafts()[0]).toMatchObject({
       source: "ai",
+      fromAddress: "automation@vitas.work",
       sourceMessageId: messageId,
       connectionId: connection.id,
       to: ["sender@example.test"],
       subject: "Re: Senior TypeScript contract",
+      bodyText: expect.stringContaining("Vitas Mudinas"),
       developmentOpportunity: true,
       resumeId: resume.id,
       resumeFilename: "resume.pdf"

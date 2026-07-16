@@ -856,6 +856,32 @@ export function App() {
     }
   };
 
+  const sendSavedDraft = async (draft: EmailDraft) => {
+    if (!api || readOnly) return;
+    const fromAddress = draft.fromAddress || draft.connectionEmail;
+    if (!window.confirm(
+      `Send "${draft.subject || "(No subject)"}" to ${draft.to.join(", ") || "(no recipient)"} from ${fromAddress}?`
+    )) return;
+    setDraftsBusy(true);
+    setDraftsError("");
+    try {
+      const result = await api.sendDraft(draft.id);
+      setDrafts((current) => current.filter((entry) => entry.id !== draft.id));
+      await refreshMailboxCounts();
+      const connection = gmailConnections.find((entry) => entry.id === draft.connectionId);
+      if (connection?.archiveId === selectedArchiveId) await loadMessages(false);
+      showError(result.localCopyImported
+        ? `Draft sent from ${fromAddress}`
+        : "Draft sent, but the local sent copy could not be imported. Open Diagnostics for details.");
+    } catch (error) {
+      const value = error instanceof Error ? error.message : "Draft could not be sent";
+      setDraftsError(value);
+      showError(value);
+    } finally {
+      setDraftsBusy(false);
+    }
+  };
+
   const openReply = (target: MessageDetail, mode: "reply" | "forward") => {
     const quotedLines = target.bodyText.split("\n").map((line) => `> ${line}`).join("\n");
     const quoted = `\n\nOn ${formatDateTime(target.receivedAt ?? target.sentAt)}, ${displayAddress(target.sender)} <${target.sender.address}> wrote:\n${quotedLines}`;
@@ -1468,6 +1494,7 @@ export function App() {
         onClose={() => { if (!draftsBusy) setDraftsOpen(false); }}
         onRefresh={() => void loadDrafts()}
         onEdit={editSavedDraft}
+        onSend={(draft) => void sendSavedDraft(draft)}
         onDelete={(draft) => void deleteSavedDraft(draft)}
       />
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />

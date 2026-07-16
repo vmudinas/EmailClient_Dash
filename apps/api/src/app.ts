@@ -21,6 +21,7 @@ import {
   clientDiagnosticSchema,
   databaseSettingsPatchSchema,
   displayNamePatchSchema,
+  draftSettingsPatchSchema,
   emailDraftCreateSchema,
   emailDraftUpdateSchema,
   gmailAuthRequestSchema,
@@ -68,6 +69,7 @@ import {
   AuthRateLimitError,
   AuthService
 } from "./services/auth-service.js";
+import { DraftSettingsManager } from "./services/draft-settings.js";
 import {
   GmailAuthorizationError,
   GmailConfigurationError,
@@ -137,6 +139,7 @@ export class EmailApiRuntime {
   readonly gmailSettings: GmailSettingsManager;
   readonly calendar: CalendarService;
   readonly resumes: ResumeService;
+  readonly draftSettings: DraftSettingsManager;
   readonly drafts: DraftService;
   readonly ai: AiService;
   readonly aiSettings: AiSettingsManager;
@@ -176,12 +179,13 @@ export class EmailApiRuntime {
     });
     this.calendar = new CalendarService(this.gmail);
     this.resumes = new ResumeService(this.database, this.blobStore);
-    this.drafts = new DraftService(this.database, this.gmail, this.resumes);
+    this.draftSettings = new DraftSettingsManager(config.dataDir);
+    this.drafts = new DraftService(this.database, this.gmail, this.resumes, this.draftSettings);
     this.aiSettings = new AiSettingsManager(config.dataDir, {
       openai: config.openAiApiKey,
       deepseek: config.deepSeekApiKey
     });
-    this.ai = new AiService(this.database, this.aiSettings);
+    this.ai = new AiService(this.database, this.aiSettings, undefined, undefined, this.draftSettings);
     this.aiSchedules = new AiScheduleService(this.database, this.ai);
     this.uploads = new UploadService(config.dataDir, this.database, this.imports);
   }
@@ -1464,6 +1468,34 @@ export class EmailApiRuntime {
       }
     });
 
+    this.app.patch<{ Body: unknown }>("/api/admin/settings/drafts", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = draftSettingsPatchSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: parsed.error.issues[0]?.message ?? "Enter valid draft identity settings"
+        });
+      }
+      try {
+        const updated = this.draftSettings.update(parsed.data);
+        this.database.recordDiagnostic({
+          level: "info",
+          category: "system",
+          message: "Draft identity configuration saved",
+          context: {
+            operation: "draft_identity_update",
+            defaultFromAddress: updated.defaultFromAddress,
+            senderName: updated.senderName
+          }
+        });
+        return this.getAdminSettings();
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Draft identity settings could not be saved"
+        });
+      }
+    });
+
     this.app.patch<{ Body: unknown }>("/api/admin/settings/ai", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
       const parsed = aiSettingsPatchSchema.safeParse(request.body);
@@ -1970,6 +2002,7 @@ export class EmailApiRuntime {
         defaultPinWarning: this.auth.hasDefaultPinWarning()
       },
       gmail: this.gmailSettings.view(),
+      drafts: this.draftSettings.view(),
       ai: this.aiSettings.view(this.database.getAiUsageSummary())
     };
   }

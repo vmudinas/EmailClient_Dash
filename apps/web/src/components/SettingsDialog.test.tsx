@@ -16,6 +16,40 @@ import { SettingsDialog } from "./SettingsDialog.js";
 afterEach(cleanup);
 
 describe("SettingsDialog", () => {
+  it("configures the default draft sender and placeholder name", async () => {
+    const updatedSettings: AdminSettings = {
+      ...SETTINGS,
+      drafts: {
+        ...SETTINGS.drafts,
+        defaultFromAddress: "automation@vitas.work",
+        senderName: "Vitas Mudinas"
+      }
+    };
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      updateDraftSettings: vi.fn().mockResolvedValue(updatedSettings)
+    } as unknown as ApiClient;
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Drafts" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+
+    fireEvent.change(screen.getByRole("textbox", { name: /Default draft send-as address/ }), {
+      target: { value: "automation@vitas.work" }
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Sender name/ }), {
+      target: { value: "Vitas Mudinas" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft identity" }));
+
+    await waitFor(() => expect(api.updateDraftSettings).toHaveBeenCalledWith({
+      defaultFromAddress: "automation@vitas.work",
+      senderName: "Vitas Mudinas"
+    }));
+    expect(await screen.findByText("Draft identity saved.")).toBeTruthy();
+  });
+
   it("shows database, Gmail, AI, users, security, and IP audit settings", async () => {
     const api = {
       adminSettings: vi.fn().mockResolvedValue(SETTINGS),
@@ -816,6 +850,12 @@ const SETTINGS: AdminSettings = {
     configurationError: null,
     syncIntervalMinutes: 5,
     syncIntervalEnvManaged: false
+  },
+  drafts: {
+    defaultFromAddress: "ai@vitas.work",
+    senderName: "Vitas",
+    settingsPath: "/tmp/draft-settings.json",
+    configurationError: null
   },
   ai: {
     activeProvider: "openai",

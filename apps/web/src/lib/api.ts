@@ -19,6 +19,7 @@ import type {
   CalendarEventInput,
   CursorPage,
   DiagnosticsSnapshot,
+  DraftSettingsPatch,
   EmailDraft,
   EmailDraftCreate,
   EmailDraftUpdate,
@@ -637,6 +638,13 @@ export class ApiClient {
 
   clearGmailSettings(): Promise<AdminSettings> {
     return this.request("/api/admin/settings/gmail", { method: "DELETE" });
+  }
+
+  updateDraftSettings(input: DraftSettingsPatch): Promise<AdminSettings> {
+    return this.request("/api/admin/settings/drafts", {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
   }
 
   updateAiSettings(input: AiSettingsPatch): Promise<AdminSettings> {

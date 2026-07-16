@@ -8,31 +8,48 @@ import {
 import type { EmailStore } from "../storage/database.js";
 import type { GmailService } from "./gmail-service.js";
 import type { ResumeService } from "./resume-service.js";
+import { applyDraftSenderName, type DraftSettingsManager } from "./draft-settings.js";
 
 export class DraftService {
   constructor(
     private readonly database: EmailStore,
     private readonly gmail: GmailService,
-    private readonly resumes: ResumeService
+    private readonly resumes: ResumeService,
+    private readonly settings: DraftSettingsManager
   ) {}
 
   list(): EmailDraft[] {
-    return this.database.listEmailDrafts();
+    return this.database.listEmailDrafts().map((draft) => this.applyIdentity(draft));
   }
 
   get(id: string): EmailDraft {
     const draft = this.database.getEmailDraft(id);
     if (!draft) throw new DraftNotFoundError("Draft not found");
-    return draft;
+    return this.applyIdentity(draft);
   }
 
   create(input: EmailDraftCreate): EmailDraft {
-    return this.database.createEmailDraft(input);
+    const identity = this.settings.current();
+    return this.applyIdentity(this.database.createEmailDraft({
+      ...input,
+      fromAddress: input.fromAddress ?? identity.defaultFromAddress,
+      subject: applyDraftSenderName(input.subject, identity.senderName),
+      bodyText: applyDraftSenderName(input.bodyText, identity.senderName)
+    }));
   }
 
   update(id: string, input: EmailDraftUpdate): EmailDraft {
     if (!this.database.getEmailDraft(id)) throw new DraftNotFoundError("Draft not found");
-    return this.database.updateEmailDraft(id, input);
+    const identity = this.settings.current();
+    return this.applyIdentity(this.database.updateEmailDraft(id, {
+      ...input,
+      ...(input.subject !== undefined
+        ? { subject: applyDraftSenderName(input.subject, identity.senderName) }
+        : {}),
+      ...(input.bodyText !== undefined
+        ? { bodyText: applyDraftSenderName(input.bodyText, identity.senderName) }
+        : {})
+    }));
   }
 
   remove(id: string): void {
@@ -74,6 +91,16 @@ export class DraftService {
       }
     });
     return result;
+  }
+
+  private applyIdentity(draft: EmailDraft): EmailDraft {
+    const identity = this.settings.current();
+    return {
+      ...draft,
+      fromAddress: draft.fromAddress ?? identity.defaultFromAddress,
+      subject: applyDraftSenderName(draft.subject, identity.senderName),
+      bodyText: applyDraftSenderName(draft.bodyText, identity.senderName)
+    };
   }
 }
 

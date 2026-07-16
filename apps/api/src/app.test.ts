@@ -72,6 +72,56 @@ describe("Email API AI provider routes", () => {
   });
 });
 
+describe("Email API draft identity settings", () => {
+  it("returns defaults and saves an Admin-configured sender identity", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const initial = await runtime.app.inject({
+      method: "GET",
+      url: "/api/admin/settings",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({
+      drafts: { defaultFromAddress: "ai@vitas.work", senderName: "Vitas" }
+    });
+
+    const updated = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/drafts",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { defaultFromAddress: "automation@vitas.work", senderName: "Vitas Mudinas" }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      drafts: { defaultFromAddress: "automation@vitas.work", senderName: "Vitas Mudinas" }
+    });
+    expect(runtime.draftSettings.current()).toEqual({
+      defaultFromAddress: "automation@vitas.work",
+      senderName: "Vitas Mudinas"
+    });
+  });
+});
+
 describe("Email API message action suggestion route", () => {
   it("requires authentication, validates time context, and returns the AI suggestion", async () => {
     const dataDir = await temporaryDirectory();

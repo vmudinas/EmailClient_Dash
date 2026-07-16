@@ -379,6 +379,11 @@ export interface EmailDraft {
   updatedAt: string;
 }
 
+export interface DraftIdentitySettings {
+  defaultFromAddress: string;
+  senderName: string;
+}
+
 export interface MailboxEndpoints {
   oldest: { id: string; subject: string; senderName: string | null; senderAddress: string; date: string } | null;
   newest: { id: string; subject: string; senderName: string | null; senderAddress: string; date: string } | null;
@@ -721,6 +726,10 @@ export interface AdminSettings {
     syncIntervalMinutes: number;
     syncIntervalEnvManaged: boolean;
   };
+  drafts: DraftIdentitySettings & {
+    settingsPath: string;
+    configurationError: string | null;
+  };
   ai: {
     activeProvider: AiProviderId;
     enabled: boolean;
@@ -870,6 +879,13 @@ export const emailDraftUpdateSchema = z.object({
   "At least one draft field is required"
 );
 export type EmailDraftUpdate = z.infer<typeof emailDraftUpdateSchema>;
+
+export const draftSettingsPatchSchema = z.object({
+  defaultFromAddress: gmailRecipientSchema,
+  senderName: z.string().trim().min(1).max(120)
+}).strict();
+
+export type DraftSettingsPatch = z.infer<typeof draftSettingsPatchSchema>;
 
 export const uploadSessionCreateSchema = z.object({
   filename: z.string().trim().min(1).max(240),

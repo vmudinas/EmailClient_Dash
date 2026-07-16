@@ -21,6 +21,11 @@ import {
   type AiProviderFactory
 } from "./ai-provider.js";
 import { AI_PROVIDER_INFO, type AiSettingsManager } from "./ai-settings.js";
+import {
+  applyDraftSenderName,
+  DEFAULT_DRAFT_IDENTITY,
+  type DraftSettingsManager
+} from "./draft-settings.js";
 
 export class AiService {
   private processing: Promise<void> | null = null;
@@ -31,7 +36,8 @@ export class AiService {
     private readonly database: EmailStore,
     private readonly settings: AiSettingsManager,
     private readonly providerFactory: AiProviderFactory = createAiProvider,
-    private readonly fetcher: typeof fetch = fetch
+    private readonly fetcher: typeof fetch = fetch,
+    private readonly draftSettings?: Pick<DraftSettingsManager, "current">
   ) {}
 
   initialize(): void {
@@ -361,15 +367,20 @@ export class AiService {
         this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
         let draft: EmailDraft | null = null;
         if (result.draft.workRelated) {
+          const identity = this.draftSettings?.current() ?? DEFAULT_DRAFT_IDENTITY;
           draft = this.database.createAutomatedDraft({
             connectionId: job.gmailConnectionId,
             sourceMessageId: job.messageId,
             scheduleId: job.scheduleId,
+            fromAddress: identity.defaultFromAddress,
             to: [message.sender.address],
             cc: [],
             bcc: [],
-            subject: replySubject(result.draft.subject || message.subject),
-            bodyText: result.draft.bodyText,
+            subject: applyDraftSenderName(
+              replySubject(result.draft.subject || message.subject),
+              identity.senderName
+            ),
+            bodyText: applyDraftSenderName(result.draft.bodyText, identity.senderName),
             resumeId: result.draft.developmentOpportunity ? job.resumeId : null,
             workRelated: true,
             developmentOpportunity: result.draft.developmentOpportunity,

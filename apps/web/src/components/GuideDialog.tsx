@@ -145,6 +145,8 @@ function GuideContent({ section }: { section: GuideSection }) {
         <div className="guide-assurance"><ShieldCheck size={18} /><span>Only the selected message fields and attachment names are sent. Requests use <code>store: false</code>; API keys and message bodies are excluded from diagnostics.</span></div>
         <h4>Jobs and limits</h4>
         <p>Analysis runs as a durable background job. Queued, running, failed, cancelled, and completed states remain visible in Diagnostics. Daily and monthly request limits are enforced before a request is sent.</p>
+        <h4>Draft identity</h4>
+        <p>Admin settings and Drafts controls the default verified send-as address and the name that replaces <code>[Name]</code> placeholders. Saved drafts can be reviewed or sent directly from the Drafts list after confirmation.</p>
         <h4>Safety boundary</h4>
         <p>AI results are suggestions and can be wrong. This version does not automatically send, delete, move, label, or rewrite email.</p>
       </>

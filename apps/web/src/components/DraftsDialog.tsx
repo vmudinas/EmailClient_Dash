@@ -1,4 +1,4 @@
-import { FileEdit, LoaderCircle, Paperclip, Pencil, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
+import { FileEdit, LoaderCircle, Paperclip, Pencil, RefreshCw, Send, Sparkles, Trash2, X } from "lucide-react";
 import type { EmailDraft } from "@email-client/shared";
 import { formatDateTime } from "../lib/format.js";
 
@@ -11,6 +11,7 @@ interface DraftsDialogProps {
   onClose(): void;
   onRefresh(): void;
   onEdit(draft: EmailDraft): void;
+  onSend(draft: EmailDraft): void;
   onDelete(draft: EmailDraft): void;
 }
 
@@ -23,6 +24,7 @@ export function DraftsDialog({
   onClose,
   onRefresh,
   onEdit,
+  onSend,
   onDelete
 }: DraftsDialogProps) {
   if (!open) return null;
@@ -51,7 +53,7 @@ export function DraftsDialog({
                       {draft.source === "ai" && <Sparkles size={14} />}
                       <strong>{draft.subject || "(No subject)"}</strong>
                     </span>
-                    <span>To {draft.to.join(", ") || "(no recipient)"} · From {draft.connectionEmail}</span>
+                    <span>To {draft.to.join(", ") || "(no recipient)"} · From {draft.fromAddress || draft.connectionEmail}</span>
                     <small>
                       {draft.source === "ai" ? `AI draft${draft.scheduleName ? ` · ${draft.scheduleName}` : ""}` : "Saved draft"}
                       {draft.resumeFilename ? ` · Resume: ${draft.resumeFilename}` : ""}
@@ -61,6 +63,13 @@ export function DraftsDialog({
                   </button>
                   <div className="draft-actions">
                     {draft.resumeId && <Paperclip size={15} aria-label="Resume attached" />}
+                    <button
+                      className="draft-send-button"
+                      disabled={busy || draft.to.length === 0 || (!draft.subject.trim() && !draft.bodyText.trim())}
+                      onClick={() => onSend(draft)}
+                      title="Send draft now"
+                      aria-label={`Send ${draft.subject || "draft"}`}
+                    ><Send size={14} /><span>Send</span></button>
                     <button className="icon-button" disabled={busy} onClick={() => onEdit(draft)} title="Edit draft" aria-label={`Edit ${draft.subject || "draft"}`}><Pencil size={15} /></button>
                     <button className="icon-button" disabled={busy} onClick={() => onDelete(draft)} title="Delete draft" aria-label={`Delete ${draft.subject || "draft"}`}><Trash2 size={15} /></button>
                   </div>

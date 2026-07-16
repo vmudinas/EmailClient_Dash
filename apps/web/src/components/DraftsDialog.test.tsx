@@ -12,7 +12,7 @@ const DRAFT: EmailDraft = {
   scheduleId: "schedule-1",
   scheduleName: "Development replies",
   source: "ai",
-  fromAddress: null,
+  fromAddress: "ai@vitas.work",
   to: ["recruiter@example.test"],
   cc: [],
   bcc: [],
@@ -32,6 +32,7 @@ const DRAFT: EmailDraft = {
 describe("DraftsDialog", () => {
   it("shows AI and resume context and opens the selected draft for review", () => {
     const onEdit = vi.fn();
+    const onSend = vi.fn();
     render(
       <DraftsDialog
         open
@@ -42,6 +43,7 @@ describe("DraftsDialog", () => {
         onClose={vi.fn()}
         onRefresh={vi.fn()}
         onEdit={onEdit}
+        onSend={onSend}
         onDelete={vi.fn()}
       />
     );
@@ -49,6 +51,9 @@ describe("DraftsDialog", () => {
     expect(screen.getByText(/AI draft · Development replies/)).toBeTruthy();
     expect(screen.getByText(/Resume: resume.pdf/)).toBeTruthy();
     expect(screen.getByText(DRAFT.aiReason!)).toBeTruthy();
+    expect(screen.getByText(/From ai@vitas.work/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send Re: Engineering opportunity" }));
+    expect(onSend).toHaveBeenCalledWith(DRAFT);
     fireEvent.click(screen.getByRole("button", { name: "Edit Re: Engineering opportunity" }));
     expect(onEdit).toHaveBeenCalledWith(DRAFT);
   });

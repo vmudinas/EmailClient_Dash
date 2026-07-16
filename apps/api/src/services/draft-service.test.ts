@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BlobStore } from "../storage/blob-store.js";
 import { EmailDatabase } from "../storage/database.js";
 import { DraftService } from "./draft-service.js";
+import { DraftSettingsManager } from "./draft-settings.js";
 import type { GmailService } from "./gmail-service.js";
 import { ResumeService } from "./resume-service.js";
 
@@ -50,7 +51,8 @@ describe("DraftService", () => {
     const service = new DraftService(
       database,
       { sendMessage } as unknown as GmailService,
-      resumes
+      resumes,
+      new DraftSettingsManager(dataDir)
     );
     const draft = service.create({
       connectionId: connection.id,
@@ -58,16 +60,26 @@ describe("DraftService", () => {
       cc: [],
       bcc: [],
       subject: "Re: TypeScript role",
-      bodyText: "Thank you for reaching out.",
+      bodyText: "Thank you for reaching out.\n\nBest,\n[Name ]",
       fromAddress: null,
       sourceMessageId: null,
       resumeId: resume.id
     });
 
+    expect(draft).toMatchObject({
+      fromAddress: "ai@vitas.work",
+      bodyText: "Thank you for reaching out.\n\nBest,\nVitas"
+    });
+
     await expect(service.send(draft.id)).resolves.toMatchObject({ id: "gmail-message-id" });
     expect(sendMessage).toHaveBeenCalledWith(
       connection.id,
-      expect.objectContaining({ to: ["recruiter@example.test"], subject: "Re: TypeScript role" }),
+      expect.objectContaining({
+        to: ["recruiter@example.test"],
+        subject: "Re: TypeScript role",
+        bodyText: "Thank you for reaching out.\n\nBest,\nVitas",
+        fromAddress: "ai@vitas.work"
+      }),
       [{ filename: "resume.pdf", contentType: "application/pdf", content: resumeContent }]
     );
     expect(service.list()).toEqual([]);

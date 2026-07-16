@@ -15,6 +15,7 @@ import {
   CloudDownload,
   Database,
   Download,
+  FileEdit,
   FileJson,
   ListFilter,
   KeyRound,
@@ -60,7 +61,7 @@ import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS } from "@email-cli
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "sender-filing" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "database" | "gmail" | "drafts" | "sender-filing" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -76,6 +77,7 @@ interface SettingsDialogProps {
 const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
   { id: "database", label: "Database", icon: Database },
   { id: "gmail", label: "Gmail", icon: MailCheck },
+  { id: "drafts", label: "Drafts", icon: FileEdit },
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
   { id: "ai", label: "AI", icon: BrainCircuit },
   { id: "resumes", label: "Resumes", icon: Paperclip },
@@ -163,6 +165,17 @@ export function SettingsDialog({
                 )}
                 {section === "gmail" && settings && (
                   <GmailPanel
+                    api={api!}
+                    settings={settings}
+                    busy={busy}
+                    onBusy={setBusy}
+                    onSettings={setSettings}
+                    onError={setError}
+                    onNotice={showNotice}
+                  />
+                )}
+                {section === "drafts" && settings && (
+                  <DraftSettingsPanel
                     api={api!}
                     settings={settings}
                     busy={busy}
@@ -835,6 +848,95 @@ function InsightsPanel({ api, onError }: { api: ApiClient; onError(value: string
           </>
         )}
       </section>
+    </>
+  );
+}
+
+function DraftSettingsPanel({
+  api,
+  settings,
+  busy,
+  onBusy,
+  onSettings,
+  onError,
+  onNotice
+}: {
+  api: ApiClient;
+  settings: AdminSettings;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onSettings(value: AdminSettings): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+}) {
+  const [defaultFromAddress, setDefaultFromAddress] = useState(settings.drafts.defaultFromAddress);
+  const [senderName, setSenderName] = useState(settings.drafts.senderName);
+
+  useEffect(() => {
+    setDefaultFromAddress(settings.drafts.defaultFromAddress);
+    setSenderName(settings.drafts.senderName);
+  }, [settings.drafts.defaultFromAddress, settings.drafts.senderName]);
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    onBusy(true);
+    onError("");
+    try {
+      const updated = await api.updateDraftSettings({ defaultFromAddress, senderName });
+      onSettings(updated);
+      onNotice("Draft identity saved.");
+    } catch (saveError) {
+      onError(errorText(saveError));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3>Drafts</h3>
+      <p>Choose the default verified Gmail send-as address for saved and AI-generated drafts, plus the name used to replace <code>[Name]</code> placeholders.</p>
+      {settings.drafts.configurationError && (
+        <div className="settings-warning"><AlertTriangle size={17} /><span>{settings.drafts.configurationError}</span></div>
+      )}
+      <div className="settings-warning neutral">
+        <ShieldCheck size={17} />
+        <span>The send-as address must be configured and verified in the selected Gmail account. Otherwise Gmail will reject the send request.</span>
+      </div>
+      <form className="settings-form" onSubmit={(event) => void save(event)}>
+        <div className="settings-form-grid">
+          <label>
+            Default draft send-as address
+            <input
+              type="email"
+              value={defaultFromAddress}
+              onChange={(event) => setDefaultFromAddress(event.target.value)}
+              placeholder="ai@vitas.work"
+              disabled={busy}
+            />
+            <small>Used when a draft does not explicitly select another verified alias.</small>
+          </label>
+          <label>
+            Sender name
+            <input
+              value={senderName}
+              onChange={(event) => setSenderName(event.target.value)}
+              placeholder="Vitas"
+              maxLength={120}
+              disabled={busy}
+            />
+            <small>Replaces <code>[Name]</code>, including variants such as <code>[Name ]</code>, in draft subjects and bodies.</small>
+          </label>
+        </div>
+        <div className="settings-button-row">
+          <button className="primary-button compact" disabled={busy || !defaultFromAddress.trim() || !senderName.trim()}>
+            {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save draft identity
+          </button>
+        </div>
+      </form>
+      <dl className="settings-definitions">
+        <div><dt>Settings file</dt><dd><code>{settings.drafts.settingsPath}</code></dd></div>
+      </dl>
     </>
   );
 }
