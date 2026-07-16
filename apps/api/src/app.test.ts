@@ -188,6 +188,93 @@ describe("Email API message action suggestion route", () => {
   });
 });
 
+describe("Email API on-demand draft reply route", () => {
+  it("requires authentication, validates targets, and returns a reviewable draft", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const startDraft = vi.spyOn(runtime.ai, "startMessageDraftReply").mockReturnValue({
+      job: null,
+      draft: {
+        id: "00000000-0000-4000-8000-000000000003",
+        connectionId: "00000000-0000-4000-8000-000000000001",
+        connectionEmail: "owner@example.test",
+        sourceMessageId: "message-1",
+        sourceMessageSubject: "Contract review",
+        scheduleId: null,
+        scheduleName: null,
+        source: "ai",
+        fromAddress: "ai@vitas.work",
+        to: ["customer@example.test"],
+        cc: [],
+        bcc: [],
+        subject: "Re: Contract review",
+        bodyText: "Thanks for sending this.",
+        resumeId: null,
+        resumeName: null,
+        resumeFilename: null,
+        workRelated: true,
+        developmentOpportunity: false,
+        aiReason: "A reply is recommended.",
+        aiConfidence: 0.9,
+        createdAt: "2026-07-16T12:00:00.000Z",
+        updatedAt: "2026-07-16T12:00:00.000Z"
+      }
+    });
+
+    const unauthorized = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/draft-reply",
+      remoteAddress: "127.0.0.1",
+      payload: { gmailConnectionId: "00000000-0000-4000-8000-000000000001" }
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const invalid = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/draft-reply",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { gmailConnectionId: "not-a-uuid" }
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    const response = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/draft-reply",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        gmailConnectionId: "00000000-0000-4000-8000-000000000001",
+        resumeId: null
+      }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      job: null,
+      draft: { source: "ai", subject: "Re: Contract review" }
+    });
+    expect(startDraft).toHaveBeenCalledWith("message-1", {
+      gmailConnectionId: "00000000-0000-4000-8000-000000000001",
+      resumeId: null
+    });
+  });
+});
+
 describe("Email API message calendar association route", () => {
   it("links a created calendar event to its source email and unlinks it on deletion", async () => {
     const dataDir = await temporaryDirectory();

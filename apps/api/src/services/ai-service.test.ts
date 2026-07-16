@@ -150,6 +150,76 @@ describe("AiService", () => {
     database.close();
   });
 
+  it("creates an on-demand reviewable reply draft and reuses it for the conversation", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const messageId = insertMessage(database);
+    const message = database.getMessage(messageId)!;
+    const connection = database.createGmailConnection({
+      email: "owner@example.test",
+      archiveId: message.archiveId,
+      folderId: message.folderId,
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canManageCalendar: false,
+      refreshToken: "refresh-token"
+    });
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "draft-model",
+      dailyRequestLimit: 10,
+      monthlyRequestLimit: 100
+    });
+    const draftReply = vi.fn().mockResolvedValue({
+      draft: {
+        workRelated: false,
+        developmentOpportunity: false,
+        reason: "The user explicitly requested a reply draft.",
+        subject: "Contract review",
+        bodyText: "Thanks for sending this. I will review the contract.",
+        confidence: 0.91
+      },
+      usage: { inputTokens: 80, outputTokens: 30 }
+    });
+    const service = new AiService(database, settings, () => ({
+      analyze: vi.fn(),
+      draftReply,
+      testConnection: vi.fn()
+    }));
+
+    const started = service.startMessageDraftReply(messageId, {
+      gmailConnectionId: connection.id,
+      resumeId: null
+    });
+    expect(started).toMatchObject({ job: { task: "draft_reply", scheduleId: null }, draft: null });
+    await waitForJob(database, started.job!.id, "completed");
+
+    const drafts = database.listEmailDrafts();
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]).toMatchObject({
+      source: "ai",
+      sourceMessageId: messageId,
+      scheduleId: null,
+      connectionId: connection.id,
+      subject: "Re: Contract review",
+      workRelated: false
+    });
+
+    const reused = service.startMessageDraftReply(messageId, {
+      gmailConnectionId: connection.id,
+      resumeId: null
+    });
+    expect(reused).toEqual({ job: null, draft: drafts[0] });
+    expect(draftReply).toHaveBeenCalledTimes(1);
+
+    await service.close();
+    database.close();
+  });
+
   it("tests a specific provider's connection without switching which one is active", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);

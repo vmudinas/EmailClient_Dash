@@ -290,7 +290,7 @@ export interface ResumeAssetRecord extends ResumeAsset {
 export interface AutomatedDraftCreateInput {
   connectionId: string;
   sourceMessageId: string;
-  scheduleId: string;
+  scheduleId: string | null;
   fromAddress?: string | null;
   to: string[];
   cc: string[];
@@ -2834,7 +2834,7 @@ export class EmailDatabase {
     this.validateEmailDraftTargets(input.connectionId, input.sourceMessageId, input.resumeId ?? null);
     const id = randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT OR IGNORE INTO email_drafts (
         id, connection_id, source_message_id, schedule_id, source, from_address,
         to_json, cc_json, bcc_json, subject, body_text, resume_id,
@@ -2859,7 +2859,11 @@ export class EmailDatabase {
       now,
       now
     );
-    const draft = this.getAutomatedDraft(input.scheduleId, input.sourceMessageId);
+    const draft = result.changes > 0
+      ? this.getEmailDraft(id)
+      : input.scheduleId
+        ? this.getAutomatedDraft(input.scheduleId, input.sourceMessageId)
+        : null;
     if (!draft) throw new Error("Automated draft could not be created");
     return draft;
   }

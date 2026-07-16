@@ -38,6 +38,8 @@ import type {
   MessageDetail,
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
+  MessageDraftReplyRequest,
+  MessageDraftReplyStart,
   MessageSummary,
   RuntimeConfig,
   ResumeAsset,
@@ -348,6 +350,16 @@ export class ApiClient {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/ai/action-suggestion`, {
       method: "POST",
       body: JSON.stringify(context)
+    });
+  }
+
+  startMessageDraftReply(
+    messageId: string,
+    input: MessageDraftReplyRequest
+  ): Promise<MessageDraftReplyStart> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/ai/draft-reply`, {
+      method: "POST",
+      body: JSON.stringify(input)
     });
   }
 
@@ -683,6 +695,10 @@ export class ApiClient {
 
   listResumes(): Promise<ResumeAsset[]> {
     return this.request("/api/admin/resumes");
+  }
+
+  listAvailableResumes(): Promise<ResumeAsset[]> {
+    return this.request("/api/resumes");
   }
 
   uploadResume(file: File, name?: string): Promise<ResumeAsset> {

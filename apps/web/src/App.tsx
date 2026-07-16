@@ -842,6 +842,13 @@ export function App() {
     });
   };
 
+  const openGeneratedDraft = (draft: EmailDraft) => {
+    setDrafts((current) => current.some((entry) => entry.id === draft.id)
+      ? current.map((entry) => entry.id === draft.id ? draft : entry)
+      : [draft, ...current]);
+    editSavedDraft(draft);
+  };
+
   const deleteSavedDraft = async (draft: EmailDraft) => {
     if (!api || !window.confirm(`Delete the draft "${draft.subject || "(No subject)"}"?`)) return;
     setDraftsBusy(true);
@@ -1382,6 +1389,7 @@ export function App() {
               onMove={(messageId, folderId) => moveMessage(messageId, folderId)}
               onArchive={archiveMessage}
               onSpamSender={spamSender}
+              onOpenDraft={openGeneratedDraft}
               onIndicatorsChange={updateMessageIndicators}
               moveBusy={moveBusy}
               spamBusy={spamBusy}

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AiMessageState, MessageDetail } from "@email-client/shared";
+import type { AiMessageState, EmailDraft, MessageDetail } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { MessageReader } from "./MessageReader.js";
 
@@ -132,6 +132,78 @@ describe("MessageReader AI analysis", () => {
     ));
     expect(onIndicatorsChange).toHaveBeenCalledWith(MESSAGE.id, { hasCalendarEvent: true });
     expect(await screen.findByText('Calendar event "AWS engineering interview" created.')).toBeTruthy();
+  });
+
+  it("creates an AI draft with a selected account and resume, then opens it for review", async () => {
+    const connection = calendarConnection();
+    const queuedJob = {
+      ...analysisState().job!,
+      id: "draft-job-1",
+      task: "draft_reply" as const,
+      status: "queued" as const,
+      gmailConnectionId: connection.id
+    };
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue(analysisState()),
+      listAvailableResumes: vi.fn().mockResolvedValue([{
+        id: "00000000-0000-4000-8000-000000000002",
+        name: "Engineering résumé",
+        filename: "resume.pdf",
+        contentType: "application/pdf",
+        sizeBytes: 100,
+        createdAt: "2026-07-16T12:00:00.000Z",
+        updatedAt: "2026-07-16T12:00:00.000Z"
+      }]),
+      startMessageDraftReply: vi.fn().mockResolvedValue({ job: queuedJob, draft: null }),
+      getAiJob: vi.fn().mockResolvedValue({
+        ...queuedJob,
+        status: "completed",
+        completedAt: "2026-07-16T12:00:01.000Z"
+      }),
+      listDrafts: vi.fn().mockResolvedValue([AI_DRAFT])
+    } as unknown as ApiClient;
+    const onOpenDraft = vi.fn();
+    renderReader(api, MESSAGE, { connections: [connection], onOpenDraft });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Draft reply" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Draft reply" }));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Create AI reply draft" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByLabelText("Optional résumé").textContent).toContain("Engineering résumé"));
+    fireEvent.change(screen.getByLabelText("Optional résumé"), {
+      target: { value: "00000000-0000-4000-8000-000000000002" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Generate reviewable draft" }));
+
+    await waitFor(() => expect(api.startMessageDraftReply).toHaveBeenCalledWith(MESSAGE.id, {
+      gmailConnectionId: connection.id,
+      resumeId: "00000000-0000-4000-8000-000000000002"
+    }));
+    await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(AI_DRAFT));
+  });
+
+  it("offers contextual review-safe actions under More", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue(analysisState())
+    } as unknown as ApiClient;
+    const onReply = vi.fn();
+    renderReader(api, {
+      ...MESSAGE,
+      headers: { "list-unsubscribe": "<https://example.test/unsubscribe>" }
+    }, { onReply });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /More/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /More/ }));
+    expect(screen.getByRole("menuitem", { name: /Reply manually/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Create follow-up/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Copy summary/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Add sender to contacts/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Unsubscribe/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Move to folder/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Archive/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Always send sender to Spam/ })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /Reply manually/ }));
+    expect(onReply).toHaveBeenCalledWith(expect.objectContaining({ id: MESSAGE.id }));
   });
 });
 
@@ -301,6 +373,7 @@ function renderReader(
       onMove={vi.fn().mockResolvedValue(undefined)}
       onArchive={vi.fn().mockResolvedValue(undefined)}
       onSpamSender={vi.fn().mockResolvedValue(undefined)}
+      onOpenDraft={vi.fn()}
       onIndicatorsChange={vi.fn()}
       moveBusy={false}
       spamBusy={false}
@@ -383,6 +456,32 @@ const MESSAGE: MessageDetail = {
     note: "",
     updatedAt: null
   }
+};
+
+const AI_DRAFT: EmailDraft = {
+  id: "00000000-0000-4000-8000-000000000003",
+  connectionId: "connection-calendar",
+  connectionEmail: "owner@example.test",
+  sourceMessageId: MESSAGE.id,
+  sourceMessageSubject: MESSAGE.subject,
+  scheduleId: null,
+  scheduleName: null,
+  source: "ai",
+  fromAddress: "ai@vitas.work",
+  to: ["customer@example.test"],
+  cc: [],
+  bcc: [],
+  subject: "Re: Contract review",
+  bodyText: "Thanks for sending this. I will review it.",
+  resumeId: null,
+  resumeName: null,
+  resumeFilename: null,
+  workRelated: true,
+  developmentOpportunity: false,
+  aiReason: "A reply is recommended.",
+  aiConfidence: 0.9,
+  createdAt: "2026-07-16T12:00:00.000Z",
+  updatedAt: "2026-07-16T12:00:00.000Z"
 };
 
 function calendarConnection() {

@@ -379,6 +379,11 @@ export interface EmailDraft {
   updatedAt: string;
 }
 
+export interface MessageDraftReplyStart {
+  job: AiJob | null;
+  draft: EmailDraft | null;
+}
+
 export interface DraftIdentitySettings {
   defaultFromAddress: string;
   senderName: string;
@@ -569,6 +574,13 @@ export const messageActionSuggestionRequestSchema = z.object({
 }).strict();
 
 export type MessageActionSuggestionRequest = z.infer<typeof messageActionSuggestionRequestSchema>;
+
+export const messageDraftReplyRequestSchema = z.object({
+  gmailConnectionId: z.string().uuid(),
+  resumeId: z.string().uuid().nullable().optional()
+}).strict();
+
+export type MessageDraftReplyRequest = z.infer<typeof messageDraftReplyRequestSchema>;
 
 export const messageCalendarEventCreateSchema = z.object({
   connectionId: z.string().uuid(),

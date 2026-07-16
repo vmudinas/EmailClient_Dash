@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import DOMPurify from "dompurify";
 import {
   ArrowLeft,
@@ -6,7 +6,11 @@ import {
   BrainCircuit,
   CalendarPlus,
   Check,
+  ChevronDown,
+  ChevronLeft,
   CircleAlert,
+  ClipboardCopy,
+  ContactRound,
   Download,
   Eye,
   File,
@@ -14,6 +18,7 @@ import {
   FileImage,
   FileSpreadsheet,
   FileText,
+  FileDown,
   Forward,
   Folder as FolderIcon,
   FolderInput,
@@ -21,6 +26,7 @@ import {
   LoaderCircle,
   Mail,
   MailOpen,
+  MoreHorizontal,
   Paperclip,
   Reply,
   Save,
@@ -31,17 +37,21 @@ import {
   X
 } from "lucide-react";
 import type {
+  AiJob,
   AiMessageState,
   Attachment,
+  EmailDraft,
   Folder,
   GmailConnection,
   LocalMessageStatePatch,
   MessageActionSuggestion,
+  MessageAnalysis,
   MessageDetail
 } from "@email-client/shared";
 import { displayAddress, formatBytes, formatDate, formatTimeOfDay, initials } from "../lib/format.js";
 import type { ApiClient } from "../lib/api.js";
 import { MessageActionDialog } from "./MessageActionDialog.js";
+import { AiDraftReplyDialog } from "./AiDraftReplyDialog.js";
 
 interface MessageReaderProps {
   message: MessageDetail | null;
@@ -58,6 +68,7 @@ interface MessageReaderProps {
   onMove(messageId: string, folderId: string): Promise<void>;
   onArchive(message: MessageDetail): Promise<void>;
   onSpamSender(message: MessageDetail): Promise<void>;
+  onOpenDraft(draft: EmailDraft): void;
   onIndicatorsChange(messageId: string, patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean }): void;
   moveBusy: boolean;
   spamBusy: boolean;
@@ -78,6 +89,7 @@ export function MessageReader({
   onMove,
   onArchive,
   onSpamSender,
+  onOpenDraft,
   onIndicatorsChange,
   moveBusy,
   spamBusy
@@ -92,8 +104,11 @@ export function MessageReader({
   const [actionSuggestion, setActionSuggestion] = useState<MessageActionSuggestion | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [actionNotice, setActionNotice] = useState("");
+  const [draftDialogOpen, setDraftDialogOpen] = useState(false);
+  const [draftJob, setDraftJob] = useState<AiJob | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const handledDraftJobRef = useRef<string | null>(null);
 
   useEffect(() => {
     setNote(message?.state.note ?? "");
@@ -116,10 +131,24 @@ export function MessageReader({
     setAiError("");
     setActionSuggestion(null);
     setActionNotice("");
+    setDraftDialogOpen(false);
+    setDraftJob(null);
+    handledDraftJobRef.current = null;
     if (!api || !message?.id) return () => { active = false; };
     setAiLoading(true);
     void api.getMessageAiState(message.id)
-      .then((state) => { if (active) setAiState(state); })
+      .then((state) => {
+        if (!active) return;
+        const activeDraft = state.job?.task === "draft_reply"
+          && (state.job.status === "queued" || state.job.status === "running")
+          ? state.job
+          : null;
+        if (activeDraft) setDraftJob(activeDraft);
+        setAiState({
+          ...state,
+          job: state.job?.task === "analyze" ? state.job : null
+        });
+      })
       .catch((error) => { if (active) setAiError(errorText(error)); })
       .finally(() => { if (active) setAiLoading(false); });
     return () => { active = false; };
@@ -149,6 +178,56 @@ export function MessageReader({
       onIndicatorsChange(message.id, { hasAiAnalysis: true });
     }
   }, [message?.id, aiState.analysis?.id, onIndicatorsChange]);
+
+  useEffect(() => {
+    if (!api || !draftJob || !message?.id) return;
+    let active = true;
+
+    const handleJob = async (job: AiJob) => {
+      if (!active) return;
+      setDraftJob(job);
+      if (job.status === "queued" || job.status === "running") return;
+      if (handledDraftJobRef.current === job.id) return;
+      handledDraftJobRef.current = job.id;
+      if (job.status === "completed") {
+        const drafts = await api.listDrafts();
+        if (!active) return;
+        const draft = drafts.find((entry) => entry.sourceMessageId === job.messageId) ?? null;
+        if (draft) {
+          setActionNotice("AI reply draft created. Review it before sending.");
+          onOpenDraft(draft);
+        } else {
+          setActionNotice("AI finished, but no reply draft was created.");
+        }
+      } else if (job.status === "failed") {
+        setAiError(job.error || "AI draft generation failed");
+      } else {
+        setActionNotice("AI draft generation was cancelled.");
+      }
+      setDraftJob(null);
+    };
+
+    const refresh = async () => {
+      try {
+        await handleJob(await api.getAiJob(draftJob.id));
+      } catch (error) {
+        if (active) {
+          setAiError(errorText(error));
+          setDraftJob(null);
+        }
+      }
+    };
+
+    void refresh();
+    if (draftJob.status !== "queued" && draftJob.status !== "running") {
+      return () => { active = false; };
+    }
+    const interval = window.setInterval(() => void refresh(), 1_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [api, draftJob?.id, draftJob?.status, message?.id, onOpenDraft]);
 
 
   if (loading) {
@@ -227,7 +306,22 @@ export function MessageReader({
     }
   };
 
+  const startDraft = (result: { job: AiJob | null; draft: EmailDraft | null }) => {
+    setAiError("");
+    handledDraftJobRef.current = null;
+    if (result.draft) {
+      setActionNotice("A reply draft already exists for this conversation.");
+      onOpenDraft(result.draft);
+      return;
+    }
+    if (result.job) {
+      setDraftJob(result.job);
+      setActionNotice("AI reply draft queued. It will open for review when ready.");
+    }
+  };
+
   const analysisActive = aiState.job?.status === "queued" || aiState.job?.status === "running";
+  const draftActive = draftJob?.status === "queued" || draftJob?.status === "running";
   const archived = /^(archive|archived)$/i.test(message.folderPath.split("/").at(-1) ?? "");
 
   return (
@@ -337,8 +431,32 @@ export function MessageReader({
             error={aiError}
             readOnly={readOnly}
             onCancel={() => void cancelAnalysis()}
-            onPlan={() => void suggestAction()}
-            planning={actionLoading}
+            actions={!readOnly && aiState.analysis ? (
+              <AiMessageActions
+                api={api}
+                message={message}
+                analysis={aiState.analysis}
+                connections={connections}
+                drafting={draftActive}
+                planning={actionLoading}
+                analysisBusy={analysisActive}
+                moveBusy={moveBusy}
+                spamBusy={spamBusy}
+                onDraft={() => {
+                  if (connections.some((connection) => connection.canSend)) setDraftDialogOpen(true);
+                  else onError("Connect or reauthorize Gmail with send permission to create a draft.");
+                }}
+                onPlan={() => void suggestAction()}
+                onReply={() => onReply(message)}
+                onForward={() => onForward(message)}
+                onLoadFolders={onLoadFolders}
+                onMove={onMove}
+                onArchive={() => void onArchive(message)}
+                onSpam={() => void onSpamSender(message)}
+                onNotice={setActionNotice}
+                onError={onError}
+              />
+            ) : null}
           />
         )}
 
@@ -397,6 +515,18 @@ export function MessageReader({
           />
         )}
 
+        {api && (
+          <AiDraftReplyDialog
+            open={draftDialogOpen}
+            api={api}
+            messageId={message.id}
+            archiveId={message.archiveId}
+            connections={connections}
+            onClose={() => setDraftDialogOpen(false)}
+            onStarted={startDraft}
+          />
+        )}
+
         {!readOnly && (
           <section className="local-notes">
             <div className="notes-heading">
@@ -451,16 +581,14 @@ function AiAnalysisPanel({
   error,
   readOnly,
   onCancel,
-  onPlan,
-  planning
+  actions
 }: {
   state: AiMessageState;
   loading: boolean;
   error: string;
   readOnly: boolean;
   onCancel(): void;
-  onPlan(): void;
-  planning: boolean;
+  actions: ReactNode;
 }) {
   const { analysis, job } = state;
   const active = job?.status === "queued" || job?.status === "running";
@@ -501,18 +629,260 @@ function AiAnalysisPanel({
           {analysis.signals.length > 0 && (
             <div className="ai-signals"><strong>Signals</strong><ul>{analysis.signals.map((signal) => <li key={signal}>{signal}</li>)}</ul></div>
           )}
+          {actions}
           <footer>
             <span>{analysis.model} · AI output can be incorrect</span>
-            {!readOnly && (
-              <button type="button" className="secondary-button compact" disabled={planning || active} onClick={onPlan}>
-                {planning ? <LoaderCircle className="spin" size={14} /> : <CalendarPlus size={14} />}
-                {planning ? "Finding dates" : "Plan event or to-do"}
-              </button>
-            )}
           </footer>
         </div>
       )}
     </section>
+  );
+}
+
+function AiMessageActions({
+  api,
+  message,
+  analysis,
+  connections,
+  drafting,
+  planning,
+  analysisBusy,
+  moveBusy,
+  spamBusy,
+  onDraft,
+  onPlan,
+  onReply,
+  onForward,
+  onLoadFolders,
+  onMove,
+  onArchive,
+  onSpam,
+  onNotice,
+  onError
+}: {
+  api: ApiClient | null;
+  message: MessageDetail;
+  analysis: MessageAnalysis;
+  connections: GmailConnection[];
+  drafting: boolean;
+  planning: boolean;
+  analysisBusy: boolean;
+  moveBusy: boolean;
+  spamBusy: boolean;
+  onDraft(): void;
+  onPlan(): void;
+  onReply(): void;
+  onForward(): void;
+  onLoadFolders(archiveId: string): Promise<Folder[]>;
+  onMove(messageId: string, folderId: string): Promise<void>;
+  onArchive(): void;
+  onSpam(): void;
+  onNotice(message: string): void;
+  onError(message: string): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<"actions" | "folders">("actions");
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [foldersLoading, setFoldersLoading] = useState(false);
+  const [attachmentsBusy, setAttachmentsBusy] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const visibleAttachments = message.attachments.filter(
+    (attachment) => attachment.disposition !== "inline" || !attachment.contentId
+  );
+  const unsubscribeUrl = extractUnsubscribeUrl(message.headers);
+  const archived = /^(archive|archived)$/i.test(message.folderPath.split("/").at(-1) ?? "");
+  const canSend = connections.some((connection) => connection.canSend);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  const close = () => {
+    setOpen(false);
+    setView("actions");
+  };
+
+  const copy = async (value: string, notice: string) => {
+    try {
+      await copyText(value);
+      onNotice(notice);
+      close();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Text could not be copied");
+    }
+  };
+
+  const showFolders = async () => {
+    setView("folders");
+    setFoldersLoading(true);
+    try {
+      setFolders(await onLoadFolders(message.archiveId));
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Mailboxes could not be loaded");
+      setView("actions");
+    } finally {
+      setFoldersLoading(false);
+    }
+  };
+
+  const saveAllAttachments = async () => {
+    if (!api || visibleAttachments.length === 0) return;
+    setAttachmentsBusy(true);
+    try {
+      for (const attachment of visibleAttachments) {
+        downloadBlob(await api.attachmentBlob(attachment.id), attachment.filename);
+        await new Promise((resolve) => window.setTimeout(resolve, 75));
+      }
+      onNotice(`Saved ${visibleAttachments.length} attachment${visibleAttachments.length === 1 ? "" : "s"}.`);
+      close();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Attachments could not be saved");
+    } finally {
+      setAttachmentsBusy(false);
+    }
+  };
+
+  const addContact = () => {
+    const name = message.sender.name?.trim() || message.sender.address;
+    const card = [
+      "BEGIN:VCARD",
+      "VERSION:3.0",
+      `FN:${escapeVcard(name)}`,
+      `EMAIL;TYPE=INTERNET:${escapeVcard(message.sender.address)}`,
+      "END:VCARD",
+      ""
+    ].join("\r\n");
+    downloadBlob(new Blob([card], { type: "text/vcard;charset=utf-8" }), `${safeContactFilename(name)}.vcf`);
+    onNotice(`Contact card created for ${name}.`);
+    close();
+  };
+
+  const openUnsubscribe = () => {
+    if (!unsubscribeUrl || !window.confirm("Open the sender's unsubscribe link for review?")) return;
+    window.open(unsubscribeUrl, "_blank", "noopener,noreferrer");
+    onNotice("Unsubscribe link opened. Review the destination before confirming.");
+    close();
+  };
+
+  return (
+    <div className="ai-message-actions" aria-label="AI suggested actions">
+      <button
+        type="button"
+        className={`${analysis.draftRecommended ? "primary-button" : "secondary-button"} compact`}
+        disabled={drafting || analysisBusy}
+        onClick={onDraft}
+        title={canSend ? "Generate a reviewable AI reply draft" : "Connect Gmail with send permission first"}
+      >
+        {drafting ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+        {drafting ? "Drafting" : "Draft reply"}
+      </button>
+      <button
+        type="button"
+        className="secondary-button compact"
+        aria-label="Plan event or to-do"
+        disabled={planning || analysisBusy}
+        onClick={onPlan}
+      >
+        {planning ? <LoaderCircle className="spin" size={15} /> : <CalendarPlus size={15} />}
+        {planning ? "Finding dates" : "Plan"}
+      </button>
+      <div className="ai-more-menu" ref={containerRef}>
+        <button
+          type="button"
+          className="secondary-button compact"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => {
+            setView("actions");
+            setOpen((current) => !current);
+          }}
+        >
+          <MoreHorizontal size={15} /> More <ChevronDown size={13} />
+        </button>
+        {open && (
+          <div className="ai-more-panel" role="menu">
+            {view === "folders" ? (
+              <>
+                <button className="ai-more-back" role="menuitem" onClick={() => setView("actions")}>
+                  <ChevronLeft size={15} /> Back to actions
+                </button>
+                {foldersLoading ? (
+                  <div className="move-menu-loading"><LoaderCircle className="spin" size={16} /></div>
+                ) : folders.filter((folder) => folder.id !== message.folderId).length === 0 ? (
+                  <div className="move-menu-empty">No other mailboxes</div>
+                ) : folders.filter((folder) => folder.id !== message.folderId).map((folder) => (
+                  <button
+                    key={folder.id}
+                    className="ai-more-item folder"
+                    role="menuitem"
+                    disabled={moveBusy}
+                    onClick={() => {
+                      close();
+                      void onMove(message.id, folder.id);
+                    }}
+                  >
+                    <FolderIcon size={16} />
+                    <span><strong>{folder.name}</strong><small>{folder.path}</small></span>
+                  </button>
+                ))}
+              </>
+            ) : (
+              <>
+                <button className="ai-more-item" role="menuitem" onClick={() => { close(); onReply(); }}>
+                  <Reply size={16} /><span><strong>Reply manually</strong><small>Open an editable reply</small></span>
+                </button>
+                <button className="ai-more-item" role="menuitem" onClick={() => { close(); onForward(); }}>
+                  <Forward size={16} /><span><strong>Forward</strong><small>Add context before sending</small></span>
+                </button>
+                <button className="ai-more-item" role="menuitem" disabled={planning || analysisBusy} onClick={() => { close(); onPlan(); }}>
+                  <CalendarPlus size={16} /><span><strong>Create follow-up</strong><small>Review an event or reminder</small></span>
+                </button>
+                <button className="ai-more-item" role="menuitem" onClick={() => void copy(analysis.summary, "AI summary copied.")}>
+                  <ClipboardCopy size={16} /><span><strong>Copy summary</strong><small>Copy the AI synopsis</small></span>
+                </button>
+                {analysis.actionRequired && analysis.actionSummary && (
+                  <button className="ai-more-item" role="menuitem" onClick={() => void copy(analysis.actionSummary!, "Recommended action copied.")}>
+                    <Check size={16} /><span><strong>Copy action item</strong><small>{analysis.actionSummary}</small></span>
+                  </button>
+                )}
+                {visibleAttachments.length > 0 && (
+                  <button className="ai-more-item" role="menuitem" disabled={attachmentsBusy} onClick={() => void saveAllAttachments()}>
+                    {attachmentsBusy ? <LoaderCircle className="spin" size={16} /> : <FileDown size={16} />}
+                    <span><strong>Save all attachments</strong><small>{visibleAttachments.length} file{visibleAttachments.length === 1 ? "" : "s"}</small></span>
+                  </button>
+                )}
+                {message.sender.address.includes("@") && (
+                  <button className="ai-more-item" role="menuitem" onClick={addContact}>
+                    <ContactRound size={16} /><span><strong>Add sender to contacts</strong><small>Download a vCard</small></span>
+                  </button>
+                )}
+                {unsubscribeUrl && (
+                  <button className="ai-more-item" role="menuitem" onClick={openUnsubscribe}>
+                    <MailOpen size={16} /><span><strong>Unsubscribe</strong><small>Open the sender-provided link</small></span>
+                  </button>
+                )}
+                <button className="ai-more-item" role="menuitem" onClick={() => void showFolders()}>
+                  <FolderInput size={16} /><span><strong>Move to folder</strong><small>Choose a local mailbox</small></span>
+                </button>
+                {!archived && (
+                  <button className="ai-more-item" role="menuitem" disabled={moveBusy} onClick={() => { close(); onArchive(); }}>
+                    <ArchiveIcon size={16} /><span><strong>Archive</strong><small>Move out of Inbox</small></span>
+                  </button>
+                )}
+                <button className="ai-more-item danger" role="menuitem" disabled={spamBusy} onClick={() => { close(); onSpam(); }}>
+                  <ShieldBan size={16} /><span><strong>Always send sender to Spam</strong><small>Apply the persistent sender rule</small></span>
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -864,6 +1234,53 @@ function attachmentIcon(attachment: Attachment) {
   if (type.includes("zip") || /\.(zip|7z|rar|gz)$/.test(name)) return FileArchive;
   if (type.startsWith("text/") || /\.(pdf|docx?|rtf|md)$/.test(name)) return FileText;
   return File;
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand?.("copy") ?? false;
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard access is unavailable");
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+function extractUnsubscribeUrl(headers: Record<string, string>): string | null {
+  const value = Object.entries(headers).find(([name]) => name.toLowerCase() === "list-unsubscribe")?.[1];
+  if (!value) return null;
+  const candidates = [...value.matchAll(/<([^>]+)>/g)].map((match) => match[1]!.trim());
+  if (candidates.length === 0) candidates.push(...value.split(",").map((entry) => entry.trim()));
+  return candidates.find((candidate) => /^https:\/\//i.test(candidate))
+    ?? candidates.find((candidate) => /^mailto:/i.test(candidate))
+    ?? null;
+}
+
+function escapeVcard(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll(";", "\\;").replaceAll(",", "\\,").replace(/\r?\n/g, "\\n");
+}
+
+function safeContactFilename(value: string): string {
+  const safe = value.trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "");
+  return safe || "contact";
 }
 
 function percent(value: number): string {

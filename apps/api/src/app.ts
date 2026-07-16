@@ -34,6 +34,7 @@ import {
   mailboxMergeSchema,
   messageActionSuggestionRequestSchema,
   messageCalendarEventCreateSchema,
+  messageDraftReplyRequestSchema,
   messageMoveSchema,
   pinChangeSchema,
   senderFilingArchiveSchema,
@@ -89,6 +90,8 @@ import {
 import {
   AiConfigurationError,
   AiBudgetError,
+  AiDraftSkippedError,
+  AiDraftTargetError,
   AiJobNotFoundError,
   AiMessageNotFoundError,
   AiService
@@ -789,6 +792,30 @@ export class EmailApiRuntime {
       }
     );
 
+    this.app.post<{ Params: { messageId: string }; Body: unknown }>(
+      "/api/messages/:messageId/ai/draft-reply",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = messageDraftReplyRequestSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose a sending account" });
+        }
+        try {
+          const result = this.ai.startMessageDraftReply(request.params.messageId, {
+            gmailConnectionId: parsed.data.gmailConnectionId,
+            resumeId: parsed.data.resumeId ?? null
+          });
+          return reply.code(result.draft ? 200 : 202).send(result);
+        } catch (error) {
+          if (error instanceof AiMessageNotFoundError) return reply.code(404).send({ error: error.message });
+          if (error instanceof AiDraftSkippedError) return reply.code(409).send({ error: error.message });
+          if (error instanceof AiDraftTargetError) return reply.code(400).send({ error: error.message });
+          if (error instanceof AiConfigurationError) return reply.code(503).send({ error: error.message });
+          throw error;
+        }
+      }
+    );
+
     this.app.get<{ Params: { jobId: string } }>(
       "/api/ai/jobs/:jobId",
       async (request, reply) => {
@@ -989,6 +1016,11 @@ export class EmailApiRuntime {
     this.app.get("/api/drafts", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
       return this.drafts.list();
+    });
+
+    this.app.get("/api/resumes", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      return this.resumes.list();
     });
 
     this.app.post<{ Body: unknown }>("/api/drafts", async (request, reply) => {

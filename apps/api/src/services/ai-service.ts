@@ -7,6 +7,7 @@ import type {
   AiMessageState,
   AiModelOption,
   AiProviderId,
+  MessageDraftReplyStart,
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
   MessageDetail
@@ -127,8 +128,8 @@ export class AiService {
   }
 
   startDraftReply(messageId: string, options: {
-    scheduleId: string;
-    scheduleRunId: string;
+    scheduleId: string | null;
+    scheduleRunId: string | null;
     gmailConnectionId: string;
     resumeId: string | null;
     agent: AiAgentConfig;
@@ -149,8 +150,14 @@ export class AiService {
     this.requireConfiguredFor(agent.provider, true);
     const contentHash = messageContentHash(message);
     const promptVersion = configuredPromptVersion(agent, "draft-reply-v1");
-    const existingDraft = this.database.getAutomatedDraft(options.scheduleId, messageId);
-    const latest = this.database.getLatestAiJob(messageId, "draft_reply", options.scheduleId);
+    const existingDraft = options.scheduleId
+      ? this.database.getAutomatedDraft(options.scheduleId, messageId)
+      : null;
+    const latest = this.database.getLatestAiJob(
+      messageId,
+      "draft_reply",
+      options.scheduleId ?? undefined
+    );
     if (latest?.status === "completed"
       && latest.contentHash === contentHash
       && latest.model === agent.model
@@ -206,6 +213,43 @@ export class AiService {
     });
     this.kick();
     return { job, draft: existingDraft };
+  }
+
+  startMessageDraftReply(messageId: string, input: {
+    gmailConnectionId: string;
+    resumeId: string | null;
+  }): MessageDraftReplyStart {
+    const message = this.database.getMessage(messageId);
+    if (!message) throw new AiMessageNotFoundError("Message not found");
+    const blocker = this.database.getDraftReplyBlocker(messageId);
+    if (blocker?.reason === "existing_draft" && blocker.draftId) {
+      return { job: null, draft: this.database.getEmailDraft(blocker.draftId) };
+    }
+    if (blocker?.reason === "active_conversation_job" && blocker.jobId) {
+      return { job: this.database.getAiJob(blocker.jobId), draft: null };
+    }
+    if (blocker) throw new AiDraftSkippedError(draftBlockerMessage(blocker.reason));
+
+    const connection = this.database.getGmailConnection(input.gmailConnectionId);
+    if (!connection) throw new AiDraftTargetError("Gmail connection not found");
+    if (!connection.canSend) throw new AiDraftTargetError("The selected Gmail account cannot send email");
+    if (input.resumeId && !this.database.getResumeAsset(input.resumeId)) {
+      throw new AiDraftTargetError("Resume not found");
+    }
+
+    const current = this.settings.current();
+    return this.startDraftReply(messageId, {
+      scheduleId: null,
+      scheduleRunId: null,
+      gmailConnectionId: input.gmailConnectionId,
+      resumeId: input.resumeId,
+      agent: {
+        provider: current.provider,
+        model: current.model,
+        skills: [...AI_AGENT_SKILL_IDS],
+        prompt: ""
+      }
+    });
   }
 
   getMessageState(messageId: string): AiMessageState {
@@ -364,8 +408,8 @@ export class AiService {
       }
       const provider = this.providerFactory(job.provider, current.apiKey!, job.model);
       if (job.task === "draft_reply") {
-        if (!job.scheduleId || !job.gmailConnectionId) {
-          throw new AiConfigurationError("Draft job is missing its schedule or Gmail account");
+        if (!job.gmailConnectionId) {
+          throw new AiConfigurationError("Draft job is missing its Gmail account");
         }
         if (!provider.draftReply) throw new AiConfigurationError("The AI provider does not support draft tasks");
         const result = await provider.draftReply(
@@ -376,7 +420,7 @@ export class AiService {
         if (this.database.getAiJob(job.id)?.status === "cancelled") return;
         this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
         let draft: EmailDraft | null = null;
-        if (result.draft.workRelated) {
+        if (result.draft.workRelated || !job.scheduleId) {
           const completionBlocker = this.database.getDraftReplyBlocker(job.messageId, job.id);
           if (completionBlocker) {
             this.database.recordDiagnostic({
@@ -409,7 +453,7 @@ export class AiService {
               ),
               bodyText: applyDraftSenderName(result.draft.bodyText, identity.senderName),
               resumeId: result.draft.developmentOpportunity ? job.resumeId : null,
-              workRelated: true,
+              workRelated: result.draft.workRelated,
               developmentOpportunity: result.draft.developmentOpportunity,
               aiReason: result.draft.reason,
               aiConfidence: result.draft.confidence
@@ -510,6 +554,7 @@ export class AiConfigurationError extends Error {}
 export class AiBudgetError extends Error {}
 export class AiMessageNotFoundError extends Error {}
 export class AiDraftSkippedError extends Error {}
+export class AiDraftTargetError extends Error {}
 export class AiJobNotFoundError extends Error {}
 
 function messageContentHash(message: MessageDetail): string {
