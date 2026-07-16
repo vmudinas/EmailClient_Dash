@@ -904,7 +904,7 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
-  it("moves every existing sender message to Spam and routes future Inbox mail there", async () => {
+  it("moves every matching Inbox message to Spam regardless of page size and preserves other folders", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
     const archive = database.createArchive({
@@ -923,13 +923,29 @@ describe("EmailDatabase", () => {
       "Persistent Spammer",
       "SPAMMER@example.test"
     );
-    insertSenderMessage(
+    const additionalInboxMessageIds = Array.from({ length: 124 }, (_, index) => insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      `spam-sender-inbox-${index}`,
+      "Persistent Spammer",
+      index % 2 === 0 ? "spammer@example.test" : " SPAMMER@example.test "
+    ));
+    const archivedMessageId = insertSenderMessage(
       database,
       archive.id,
       archived.id,
       "spam-sender-second",
       "Persistent Spammer",
       "spammer@example.test"
+    );
+    insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "different-sender-inbox",
+      "Different Sender",
+      "different@example.test"
     );
     database.completeArchive(archive.id, 0);
 
@@ -938,15 +954,20 @@ describe("EmailDatabase", () => {
     expect(result).toMatchObject({
       senderAddress: "spammer@example.test",
       spamFolderPath: "Spam",
-      movedMessages: 2,
+      movedMessages: 125,
       message: { id: firstMessageId, folderPath: "Spam" }
     });
+    expect(additionalInboxMessageIds.every((id) => database.getMessage(id)?.folderPath === "Spam")).toBe(true);
+    expect(database.getMessage(archivedMessageId)?.folderPath).toBe("Archived");
+    expect(database.listMessages({ folderId: inbox.id }).items).toEqual([
+      expect.objectContaining({ sender: expect.objectContaining({ address: "different@example.test" }) })
+    ]);
     expect(database.getSenderFilingStatus(archive.id).rules).toEqual([
       expect.objectContaining({
         senderAddress: "spammer@example.test",
         ruleType: "spam",
         folderPath: "Spam",
-        messageCount: 2
+        messageCount: 125
       })
     ]);
 

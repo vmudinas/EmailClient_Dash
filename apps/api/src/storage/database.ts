@@ -3308,18 +3308,25 @@ export class EmailDatabase {
       this.db.prepare(`
         UPDATE message_fts SET folder = ?
         WHERE message_id IN (
-          SELECT id FROM messages
-          WHERE archive_id = ?
-            AND lower(trim(sender_address)) = ?
-            AND folder_id != ?
+          SELECT m.id FROM messages m
+          JOIN folders source_folder ON source_folder.id = m.folder_id
+          WHERE m.archive_id = ?
+            AND lower(trim(m.sender_address)) = ?
+            AND m.folder_id != ?
+            AND (m.id = ? OR lower(trim(source_folder.name)) = 'inbox')
         )
-      `).run(spamFolderPath, archiveId, senderAddress, spamFolderId);
+      `).run(spamFolderPath, archiveId, senderAddress, spamFolderId, messageId);
       const movedMessages = this.db.prepare(`
         UPDATE messages SET folder_id = ?
         WHERE archive_id = ?
           AND lower(trim(sender_address)) = ?
           AND folder_id != ?
-      `).run(spamFolderId, archiveId, senderAddress, spamFolderId).changes;
+          AND (
+            id = ? OR folder_id IN (
+              SELECT id FROM folders WHERE archive_id = ? AND lower(trim(name)) = 'inbox'
+            )
+          )
+      `).run(spamFolderId, archiveId, senderAddress, spamFolderId, messageId, archiveId).changes;
 
       this.db.prepare(`
         UPDATE folders SET message_count = (

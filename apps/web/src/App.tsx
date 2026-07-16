@@ -954,7 +954,7 @@ export function App() {
       return;
     }
     if (!window.confirm(
-      `Move all messages from ${senderAddress} to Spam locally and automatically file future imported Inbox messages from this sender there?`
+      `Move this message and every Inbox message from ${senderAddress} to Spam locally, including messages not currently loaded, and automatically file future imported Inbox messages from this sender there? Other messages outside Inbox will remain unchanged.`
     )) return;
 
     setSpamBusy(true);
@@ -969,7 +969,7 @@ export function App() {
           : Promise.resolve()
       ]);
       showError(
-        `${senderAddress} will now go to ${result.spamFolderPath}. Moved ${result.movedMessages.toLocaleString()} existing message${result.movedMessages === 1 ? "" : "s"}.`
+        `${senderAddress} will now go to ${result.spamFolderPath}. Moved ${result.movedMessages.toLocaleString()} matching message${result.movedMessages === 1 ? "" : "s"}, including every Inbox match outside the current list.`
       );
     } catch (error) {
       showError(error instanceof Error ? error.message : "Sender could not be marked as spam");
