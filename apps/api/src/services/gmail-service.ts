@@ -5,6 +5,7 @@ import type {
   GmailAuthRequest,
   GmailAuthStart,
   GmailConnection,
+  GmailSendAsAlias,
   GmailSendRequest,
   GmailSendResult
 } from "@email-client/shared";
@@ -18,7 +19,9 @@ import { ImportService } from "./import-service.js";
 
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
-const GMAIL_SCOPES = [GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE];
+const GMAIL_SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic";
+const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+const GMAIL_SCOPES = [GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE, GMAIL_SETTINGS_SCOPE, CALENDAR_EVENTS_SCOPE];
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
@@ -59,16 +62,53 @@ interface GmailProfile {
   emailAddress: string;
 }
 
+interface GmailLabel {
+  id: string;
+  name: string;
+  type: "system" | "user";
+}
+
+interface GmailLabelsResponse {
+  labels?: GmailLabel[];
+}
+
+interface GmailSendAsEntry {
+  sendAsEmail: string;
+  displayName?: string;
+  isPrimary?: boolean;
+  isDefault?: boolean;
+  verificationStatus?: string;
+}
+
+interface GmailSendAsResponse {
+  sendAs?: GmailSendAsEntry[];
+}
+
+const SYSTEM_FOLDER_LABELS: Array<{ id: string; folder: string }> = [
+  { id: "TRASH", folder: "Trash" },
+  { id: "SPAM", folder: "Spam" },
+  { id: "DRAFT", folder: "Drafts" },
+  { id: "SENT", folder: "Sent" },
+  { id: "INBOX", folder: "Inbox" }
+];
+
 export interface GmailServiceOptions {
   clientId: string | null;
   clientSecret: string | null;
   redirectUri(): string;
   fetcher?: typeof fetch;
+  syncIntervalMinutes?: number;
 }
 
 export class GmailConfigurationError extends Error {}
 export class GmailAuthorizationError extends Error {}
 export class GmailPermissionError extends Error {}
+
+export interface GmailOutgoingAttachment {
+  filename: string;
+  contentType: string;
+  content: Buffer;
+}
 
 export class GmailService {
   private readonly pending = new Map<string, PendingAuthorization>();
@@ -77,6 +117,8 @@ export class GmailService {
   private readonly fetcher: typeof fetch;
   private clientId: string | null;
   private clientSecret: string | null;
+  private syncTimer: ReturnType<typeof setInterval> | null = null;
+  private syncIntervalMinutes = 0;
 
   constructor(
     private readonly database: EmailStore,
@@ -86,6 +128,7 @@ export class GmailService {
     this.fetcher = options.fetcher ?? fetch;
     this.clientId = options.clientId;
     this.clientSecret = options.clientSecret;
+    this.configureSyncInterval(options.syncIntervalMinutes ?? 0);
   }
 
   configureCredentials(clientId: string | null, clientSecret: string | null): void {
@@ -96,8 +139,48 @@ export class GmailService {
     this.clientSecret = clientSecret;
   }
 
+  configureSyncInterval(minutes: number): void {
+    this.syncIntervalMinutes = Math.max(0, minutes);
+    if (this.syncTimer) {
+      clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
+    if (this.syncIntervalMinutes <= 0) return;
+    this.syncTimer = setInterval(() => this.runScheduledSyncs(), this.syncIntervalMinutes * 60_000);
+    this.syncTimer.unref?.();
+  }
+
+  private runScheduledSyncs(): void {
+    if (!this.clientId) return;
+    for (const connection of this.database.listGmailConnections()) {
+      if (connection.status === "syncing") continue;
+      try {
+        this.startSync(connection.id);
+      } catch (error) {
+        this.database.recordDiagnostic({
+          level: "warning",
+          category: "gmail",
+          message: `Scheduled Gmail sync could not start: ${errorMessage(error)}`,
+          archiveId: connection.archiveId,
+          sourceName: connection.email,
+          context: { connectionId: connection.id, trigger: "scheduled" }
+        });
+      }
+    }
+  }
+
   listConnections(): GmailConnection[] {
     return this.database.listGmailConnections();
+  }
+
+  async accessTokenForConnection(connectionId: string, signal: AbortSignal): Promise<string> {
+    const connection = this.requireConnection(connectionId);
+    if (!connection.canManageCalendar) {
+      throw new GmailPermissionError(
+        "Reconnect this Gmail account to grant calendar access. Existing connections authorized before Calendar support was added do not have it."
+      );
+    }
+    return this.accessToken(connection, signal);
   }
 
   startAuthorization(request: GmailAuthRequest): GmailAuthStart {
@@ -162,6 +245,7 @@ export class GmailService {
         query: pending.request.query,
         ocrEnabled: pending.request.ocrEnabled,
         canSend: tokenGrantsScope(token, GMAIL_SEND_SCOPE),
+        canManageCalendar: tokenGrantsScope(token, CALENDAR_EVENTS_SCOPE),
         refreshToken: token.refresh_token,
         accessToken: token.access_token,
         accessTokenExpiresAt: tokenExpiry(token.expires_in)
@@ -187,18 +271,22 @@ export class GmailService {
     }
   }
 
-  startSync(connectionId: string): GmailConnection {
+  startSync(connectionId: string, options: { full?: boolean } = {}): GmailConnection {
     const existing = this.database.getGmailConnection(connectionId);
     if (!existing) throw new Error("Gmail connection not found");
     if (this.runs.has(connectionId)) return existing;
+    const full = options.full ?? false;
     const connection = this.database.updateGmailSync(connectionId, {
       status: "syncing",
       processedItems: 0,
       totalItems: null,
       importedItems: 0,
-      lastError: null
+      lastError: null,
+      // A full sync drops any date restriction from the original connect-time search,
+      // both for this run and for every incremental sync afterward.
+      ...(full ? { query: "" } : {})
     });
-    const run = this.runSync(connectionId);
+    const run = this.runSync(connectionId, full);
     this.runs.set(connectionId, run);
     void run.finally(() => {
       if (this.runs.get(connectionId) === run) this.runs.delete(connectionId);
@@ -216,7 +304,143 @@ export class GmailService {
     });
   }
 
-  async sendMessage(connectionId: string, message: GmailSendRequest): Promise<GmailSendResult> {
+  /**
+   * Backfills messages imported before label mirroring existed (or before a given custom
+   * label was created) into their correct local sub-folder, by re-checking each Gmail
+   * label's current membership. Anything left in the connection's own root folder
+   * afterward — messages with none of the scanned labels — is filed under Archived.
+   */
+  reorganizeFolders(connectionId: string): GmailConnection {
+    const existing = this.database.getGmailConnection(connectionId);
+    if (!existing) throw new Error("Gmail connection not found");
+    if (this.runs.has(connectionId)) return existing;
+    const connection = this.database.updateGmailSync(connectionId, {
+      status: "syncing",
+      processedItems: 0,
+      totalItems: null,
+      lastError: null
+    });
+    const run = this.runReorganize(connectionId);
+    this.runs.set(connectionId, run);
+    void run.finally(() => {
+      if (this.runs.get(connectionId) === run) this.runs.delete(connectionId);
+    }).catch(() => undefined);
+    return connection;
+  }
+
+  private async runReorganize(connectionId: string): Promise<void> {
+    const controller = new AbortController();
+    this.controllers.set(connectionId, controller);
+    let movedTotal = 0;
+    try {
+      const connection = this.requireConnection(connectionId);
+      this.database.recordDiagnostic({
+        level: "info",
+        category: "gmail",
+        message: `Gmail folder reorganize started: ${connection.email}`,
+        archiveId: connection.archiveId,
+        sourceName: connection.email,
+        context: { connectionId }
+      });
+      const accessToken = await this.accessToken(connection, controller.signal);
+      const labelsById = await this.listLabels(connection, accessToken, controller.signal);
+      const userLabels = [...labelsById.values()].filter((label) => label.type === "user");
+      const orderedLabelIds = [
+        ...SYSTEM_FOLDER_LABELS.map((entry) => entry.id),
+        ...userLabels.map((label) => label.id)
+      ];
+
+      const processedGmailIds = new Set<string>();
+      for (const [index, labelId] of orderedLabelIds.entries()) {
+        throwIfAborted(controller.signal);
+        this.database.updateGmailSync(connectionId, {
+          processedItems: index + 1,
+          totalItems: orderedLabelIds.length + 1
+        });
+        const gmailIds = await this.listMessageIdsForLabel(accessToken, labelId, controller.signal);
+        const newIds = gmailIds.filter((id) => !processedGmailIds.has(id));
+        if (newIds.length === 0) continue;
+        newIds.forEach((id) => processedGmailIds.add(id));
+        const targetPath = resolveMessageFolderPath(connection.folderPath, [labelId], labelsById);
+        const targetFolderId = this.imports.ensureFolderPath(connection.archiveId, targetPath);
+        const sourceKeys = newIds.map((id) => gmailSourceKey(connection.email, id));
+        movedTotal += this.database.reassignMessagesToFolder(connection.archiveId, sourceKeys, targetFolderId);
+      }
+
+      throwIfAborted(controller.signal);
+      const archivedFolderId = this.imports.ensureFolderPath(connection.archiveId, `${connection.folderPath}/Archived`);
+      movedTotal += this.database.reassignAllMessagesInFolder(connection.folderId, archivedFolderId);
+
+      this.database.refreshArchiveStatistics(connection.archiveId);
+      this.database.updateGmailSync(connectionId, {
+        status: "connected",
+        processedItems: orderedLabelIds.length + 1,
+        totalItems: orderedLabelIds.length + 1,
+        lastError: null
+      });
+      this.database.recordDiagnostic({
+        level: "info",
+        category: "gmail",
+        message: `Gmail folder reorganize completed: ${movedTotal} message${movedTotal === 1 ? "" : "s"} moved`,
+        archiveId: connection.archiveId,
+        sourceName: connection.email,
+        context: { connectionId, movedMessages: movedTotal }
+      });
+    } catch (error) {
+      const connection = this.database.getGmailConnection(connectionId);
+      if (!connection) return;
+      if (isAbortError(error)) {
+        this.database.updateGmailSync(connectionId, { status: "connected", lastError: null });
+        this.database.recordDiagnostic({
+          level: "warning",
+          category: "gmail",
+          message: "Gmail folder reorganize cancelled",
+          archiveId: connection.archiveId,
+          sourceName: connection.email,
+          context: { connectionId, movedMessages: movedTotal }
+        });
+      } else {
+        this.database.updateGmailSync(connectionId, { status: "error", lastError: errorMessage(error) });
+        this.database.recordDiagnostic({
+          level: "error",
+          category: "gmail",
+          message: `Gmail folder reorganize failed: ${errorMessage(error)}`,
+          stack: error instanceof Error ? error.stack : null,
+          archiveId: connection.archiveId,
+          sourceName: connection.email,
+          context: { connectionId, movedMessages: movedTotal }
+        });
+      }
+    } finally {
+      this.controllers.delete(connectionId);
+    }
+  }
+
+  private async listMessageIdsForLabel(
+    accessToken: string,
+    labelId: string,
+    signal: AbortSignal
+  ): Promise<string[]> {
+    const ids: string[] = [];
+    let pageToken: string | undefined;
+    do {
+      throwIfAborted(signal);
+      const url = new URL(`${GMAIL_API}/users/me/messages`);
+      url.searchParams.set("maxResults", "500");
+      url.searchParams.set("labelIds", labelId);
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const page = await this.gmailJson<GmailListResponse>(url.toString(), accessToken, signal);
+      ids.push(...(page.messages ?? []).map((message) => message.id));
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+    return [...new Set(ids)];
+  }
+
+  async sendMessage(
+    connectionId: string,
+    message: GmailSendRequest,
+    attachments: GmailOutgoingAttachment[] = []
+  ): Promise<GmailSendResult> {
     const connection = this.requireConnection(connectionId);
     if (!connection.canSend) {
       throw new GmailPermissionError(
@@ -227,17 +451,23 @@ export class GmailService {
     const signal = AbortSignal.timeout(60_000);
     try {
       const accessToken = await this.accessToken(connection, signal);
+      const fromAddress = await this.resolveSendFromAddress(connection, accessToken, signal, message.fromAddress);
       const compiled = await nodemailer.createTransport({
         streamTransport: true,
         buffer: true,
         newline: "unix"
       }).sendMail({
-        from: connection.email,
+        from: fromAddress,
         to: message.to,
         cc: message.cc.length > 0 ? message.cc : undefined,
         bcc: message.bcc.length > 0 ? message.bcc : undefined,
         subject: message.subject,
-        text: message.bodyText
+        text: message.bodyText,
+        attachments: attachments.map((attachment) => ({
+          filename: attachment.filename,
+          contentType: attachment.contentType,
+          content: attachment.content
+        }))
       });
       if (!Buffer.isBuffer(compiled.message)) {
         throw new Error("Email MIME compiler did not return a message buffer");
@@ -265,6 +495,7 @@ export class GmailService {
           connection,
           rawMessage,
           signal,
+          new Map(),
           (error, attachment) => this.recordAttachmentError(connection, sent.id, attachment, error)
         );
         this.database.refreshArchiveStatistics(connection.archiveId);
@@ -309,6 +540,19 @@ export class GmailService {
         context: { connectionId, operation: "send" }
       });
       throw error;
+    }
+  }
+
+  async listSendAsAliases(connectionId: string): Promise<GmailSendAsAlias[]> {
+    const connection = this.requireConnection(connectionId);
+    const signal = AbortSignal.timeout(15_000);
+    const accessToken = await this.accessToken(connection, signal);
+    try {
+      return await this.fetchSendAsAliases(accessToken, signal);
+    } catch (error) {
+      throw new GmailPermissionError(
+        `Custom send-as addresses are unavailable: ${errorMessage(error)}. Reconnect this Gmail account to grant access to its send-as settings.`
+      );
     }
   }
 
@@ -363,11 +607,15 @@ export class GmailService {
   }
 
   async close(): Promise<void> {
+    if (this.syncTimer) {
+      clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
     for (const controller of this.controllers.values()) controller.abort();
     await Promise.allSettled(this.runs.values());
   }
 
-  private async runSync(connectionId: string): Promise<void> {
+  private async runSync(connectionId: string, full = false): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(connectionId, controller);
     const startedAt = new Date().toISOString();
@@ -378,19 +626,21 @@ export class GmailService {
 
     try {
       let connection = this.requireConnection(connectionId);
+      const effectiveLastSyncedAt = full ? null : connection.lastSyncedAt;
       this.database.recordDiagnostic({
         level: "info",
         category: "gmail",
-        message: `Gmail sync started: ${connection.email}`,
+        message: full ? `Gmail full sync started: ${connection.email}` : `Gmail sync started: ${connection.email}`,
         archiveId: connection.archiveId,
         sourceName: connection.email,
-        context: { connectionId, query: buildIncrementalQuery(connection.query, connection.lastSyncedAt) }
+        context: { connectionId, full, query: buildIncrementalQuery(connection.query, effectiveLastSyncedAt) }
       });
       const accessToken = await this.accessToken(connection, controller.signal);
       connection = this.requireConnection(connectionId);
+      const labelsById = await this.listLabels(connection, accessToken, controller.signal);
       const messageIds = await this.listMessageIds(
         accessToken,
-        buildIncrementalQuery(connection.query, connection.lastSyncedAt),
+        buildIncrementalQuery(connection.query, effectiveLastSyncedAt),
         connectionId,
         controller.signal
       );
@@ -411,6 +661,7 @@ export class GmailService {
               connection,
               rawMessage,
               controller.signal,
+              labelsById,
               (error, attachment) => {
                 itemErrors += 1;
                 this.recordAttachmentError(connection, messageId, attachment, error);
@@ -527,6 +778,75 @@ export class GmailService {
     return [...new Set(ids)];
   }
 
+  private async listLabels(
+    connection: GmailConnection,
+    accessToken: string,
+    signal: AbortSignal
+  ): Promise<Map<string, GmailLabel>> {
+    try {
+      const response = await this.gmailJson<GmailLabelsResponse>(
+        `${GMAIL_API}/users/me/labels`,
+        accessToken,
+        signal
+      );
+      return new Map((response.labels ?? []).map((label) => [label.id, label]));
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      this.database.recordDiagnostic({
+        level: "warning",
+        category: "gmail",
+        message: `Gmail labels could not be loaded; custom labels will be filed under Archived: ${errorMessage(error)}`,
+        archiveId: connection.archiveId,
+        sourceName: connection.email,
+        context: { connectionId: connection.id }
+      });
+      return new Map();
+    }
+  }
+
+  private async fetchSendAsAliases(accessToken: string, signal: AbortSignal): Promise<GmailSendAsAlias[]> {
+    const response = await this.gmailJson<GmailSendAsResponse>(
+      `${GMAIL_API}/users/me/settings/sendAs`,
+      accessToken,
+      signal
+    );
+    return (response.sendAs ?? [])
+      .filter((alias) => alias.isPrimary || alias.verificationStatus === "accepted")
+      .map((alias) => ({
+        email: alias.sendAsEmail,
+        displayName: alias.displayName ?? "",
+        isPrimary: Boolean(alias.isPrimary),
+        isDefault: Boolean(alias.isDefault)
+      }));
+  }
+
+  private async resolveSendFromAddress(
+    connection: GmailConnectionRecord,
+    accessToken: string,
+    signal: AbortSignal,
+    requested: string | undefined
+  ): Promise<string> {
+    const normalizedRequested = requested?.trim().toLowerCase();
+    if (!normalizedRequested || normalizedRequested === connection.email.trim().toLowerCase()) {
+      return connection.email;
+    }
+    let aliases: GmailSendAsAlias[];
+    try {
+      aliases = await this.fetchSendAsAliases(accessToken, signal);
+    } catch (error) {
+      throw new GmailPermissionError(
+        `${requested} could not be verified as a send-as address: ${errorMessage(error)}. Reconnect this Gmail account to grant access to its send-as settings.`
+      );
+    }
+    const match = aliases.find((alias) => alias.email.toLowerCase() === normalizedRequested);
+    if (!match) {
+      throw new GmailPermissionError(
+        `${requested} is not a verified "Send mail as" address on ${connection.email}. Add and verify it in Gmail settings first.`
+      );
+    }
+    return match.email;
+  }
+
   private async accessToken(
     connection: GmailConnectionRecord,
     signal: AbortSignal
@@ -563,6 +883,7 @@ export class GmailService {
     connection: GmailConnection,
     rawMessage: GmailRawMessage,
     signal: AbortSignal,
+    labelsById: ReadonlyMap<string, GmailLabel>,
     onAttachmentError: (error: unknown, attachment: RawAttachment) => void
   ): Promise<boolean> {
     if (!rawMessage.raw) throw new Error("Gmail returned a message without raw MIME content");
@@ -572,11 +893,12 @@ export class GmailService {
       skipImageLinks: true,
       keepCidLinks: true
     });
+    const folderPath = resolveMessageFolderPath(connection.folderPath, rawMessage.labelIds ?? [], labelsById);
     const normalized = normalizeRfc822Message(
       parsed,
       raw,
       sourceKey,
-      connection.folderPath
+      folderPath
     );
     const inserted = await this.imports.persistNormalizedMessage({
       archiveId: connection.archiveId,
@@ -747,13 +1069,33 @@ function gmailSourceKey(email: string, messageId: string): string {
 }
 
 function buildIncrementalQuery(baseQuery: string, lastSyncedAt: string | null): string {
-  const base = baseQuery.trim();
+  // "in:anywhere" widens Gmail's default message list, which otherwise excludes Spam and Trash,
+  // so those labels can be mirrored into local folders alongside Inbox/Sent/Drafts.
+  const base = [baseQuery.trim(), "in:anywhere"].filter(Boolean).join(" ");
   if (!lastSyncedAt) return base;
   const overlap = new Date(new Date(lastSyncedAt).getTime() - 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10)
     .replaceAll("-", "/");
   return [base, `after:${overlap}`].filter(Boolean).join(" ");
+}
+
+function resolveMessageFolderPath(
+  baseFolderPath: string,
+  labelIds: string[],
+  labelsById: ReadonlyMap<string, GmailLabel>
+): string {
+  for (const { id, folder } of SYSTEM_FOLDER_LABELS) {
+    if (labelIds.includes(id)) return `${baseFolderPath}/${folder}`;
+  }
+  const userLabel = labelIds
+    .map((id) => labelsById.get(id))
+    .find((label): label is GmailLabel => label?.type === "user");
+  if (userLabel) {
+    const labelPath = userLabel.name.split("/").map((part) => part.trim()).filter(Boolean).join("/");
+    if (labelPath) return `${baseFolderPath}/${labelPath}`;
+  }
+  return `${baseFolderPath}/Archived`;
 }
 
 function tokenExpiry(expiresIn: number): string {

@@ -2,7 +2,7 @@
 
 Archive Mail is a local React and Electron email archive reader. PST and MBOX inputs are read-only. Messages, search indexes, local message state, diagnostics, and attachment blobs are stored in managed local storage.
 
-Manual OpenAI-powered message analysis is available as the first implementation phase. Draft generation, automated review queues, spam actions, and deduplication remain planned for later phases. A ChatGPT subscription cannot be used directly as API credit.
+AI-powered message analysis (OpenAI or DeepSeek) is available manually and through configurable scheduled agents. The client also stores manual drafts and can schedule work-related reply drafts, with an optional resume attachment for development opportunities. Every generated draft remains local until a user reviews and sends it. A ChatGPT or DeepSeek chat subscription cannot be used directly as API credit.
 
 ## Run it
 
@@ -74,10 +74,14 @@ Electron passes the selected local path directly to the import service, so it do
 - Use the plus button beside **Folders** to create a top-level or child mailbox.
 - Use the combine button beside an archive to move it into another completed archive. Folder paths with the same name are combined; message IDs, read/star/tag/note state, attachment references, and search entries are retained. The source archive is removed only after the SQLite transaction commits.
 - Use the combine button beside a mailbox to move all messages from it and its child mailboxes into another mailbox in the same archive. Gmail destinations follow the messages, search paths are refreshed, and the source mailbox tree is removed only inside the committed SQLite transaction.
+- Open an email and click **Archive** to move it into a sibling **Archived** mailbox. If that mailbox does not exist, Archive Mail creates it automatically. The adjacent folder button can move the email to any other local mailbox.
+- On desktop, drag an email row from the message list onto any visible mailbox in the sidebar. The destination highlights before drop; read-only viewer sessions cannot drag messages.
 - Renames affect local display and search metadata only. PST and MBOX sources are never rewritten.
 - Use the trash button to remove an archive or a completed mailbox. Mailbox deletion includes its child mailboxes, messages, search rows, and unreferenced attachment blobs.
 - Removing an active archive first stops its import and then removes any managed temporary source copy. Directly selected original files are never deleted.
 - Read, star, tags, and notes are stored in SQLite.
+
+Archive and folder moves reorganize the local Archive Mail copy only. They do not remove Gmail's `INBOX` label or change any remote Gmail label because the app deliberately uses read-only Gmail synchronization scopes.
 
 ## Login, users, and audit
 
@@ -110,7 +114,7 @@ Changing the SQLite connection string takes effect after restart and does not mi
 
 ## Gmail authorization, sync, and send
 
-Gmail uses the [Gmail API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list), a desktop OAuth client with PKCE, and a loopback callback. Archive Mail never asks for a Gmail password. Authorization requests only the granular `gmail.readonly` and `gmail.send` scopes. It does not request `gmail.modify` or the broad `mail.google.com` scope.
+Gmail uses the [Gmail API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list), a desktop OAuth client with PKCE, and a loopback callback. Archive Mail never asks for a Gmail password. Authorization requests the granular `gmail.readonly` and `gmail.send` scopes, plus `gmail.settings.basic` (read-only access to send-as aliases) and `calendar.events` (read/write access to primary-calendar events only). It does not request `gmail.modify`, the broad `mail.google.com` scope, or full `calendar` access to calendar settings.
 
 POP, IMAP, and SMTP are intentionally not used. Google requires the broad `https://mail.google.com/` scope for those protocols, which includes permanent-delete capability. The granular API scopes enforce pull-only synchronization plus sending without permission to delete, move, label, or mark remote Gmail messages.
 
@@ -123,14 +127,27 @@ Managed installations can use environment variables instead. Environment setting
 ```bash
 GMAIL_CLIENT_ID="your-client-id.apps.googleusercontent.com" \
 GMAIL_CLIENT_SECRET="your-desktop-client-secret" \
+GMAIL_SYNC_INTERVAL_MINUTES="5" \
 npm start
 ```
 
+`GMAIL_SYNC_INTERVAL_MINUTES` is optional and independent of the OAuth client variables; when set, it overrides the admin-configured auto-sync interval and the Admin settings control becomes read-only.
+
 For Electron development, pass the same variables to `npm run dev:desktop`.
 
-Open the Gmail button beside **Archives** and choose **New archive**, **New mailbox**, or **Existing mailbox**. Existing mailbox mode merges that account's imported messages into the selected local mailbox without merging account credentials or send identities. Google shows its account chooser for every authorization, so the same Desktop OAuth configuration can connect multiple Gmail accounts. Each account has its own refresh token, progress, sync action, and sending identity; multiple accounts may share one destination mailbox. The initial query defaults to `newer_than:30d` and accepts Gmail search syntax. Later **Sync now** pulls an overlapping date window and deduplicates by Gmail account plus message ID, so a retry does not duplicate mail.
+Open the Gmail button beside **Archives** and choose **New archive**, **New mailbox**, or **Existing mailbox**. Existing mailbox mode merges that account's imported messages into the selected local mailbox without merging account credentials or send identities. Google shows its account chooser for every authorization, so the same Desktop OAuth configuration can connect multiple Gmail accounts. Each account has its own refresh token, progress, sync action, and sending identity; multiple accounts may share one destination mailbox. The initial query defaults to `newer_than:30d` and accepts Gmail search syntax.
+
+Each connected account is synced automatically on an interval (5 minutes by default; configurable under **Admin settings > Gmail > Auto-sync every**, or set to Off for manual sync only), in addition to the **Sync now** button on each connection. Automatic sync runs in the API process itself, so it keeps pulling mail even while no browser tab is open. A sync pulls an overlapping date window and deduplicates by Gmail account plus message ID, so a retry or an overlapping automatic sync never duplicates mail.
+
+To backfill an account beyond its original recent-mail query, open **Admin settings > Gmail > Connected account pulls** and choose **Pull all email**. This walks every Gmail API result page, includes Spam and Trash, removes the original date restriction for future syncs, and shows checked-message count, newly imported count, percentage, completion time, errors, and a Stop action. The same full-history action is also available from the Gmail accounts dialog.
+
+Gmail's own folder/label structure is mirrored locally underneath the account's local folder: **Inbox**, **Sent**, **Drafts**, **Spam**, and **Trash** each become their own local sub-folder, and custom Gmail labels (including `Parent/Child`-style nested labels) become nested local folders under the same name. A message with no matching label — for example mail archived out of the Inbox without any other label — is filed under **Archived**. To make this possible, sync queries widen to include Spam and Trash, which Gmail's API excludes by default.
 
 Use **Compose** in the top toolbar or the send button beside a connected Gmail account to send a plain-text email. Gmail creates the remote Sent copy, and Archive Mail immediately imports that server-provided copy into the connection's local destination. Existing connections created before send support was added remain read-only until the same account is authorized again.
+
+Compose includes **Save draft**. Open the Drafts button in the top toolbar to review, edit, delete, or send saved and AI-generated drafts. Drafts are stored locally; sending uses the selected Gmail account. If an AI development draft has a resume selected, the resume is attached to the MIME message only when the reviewed draft is sent.
+
+If a connected account has verified "Send mail as" aliases in Gmail (**Settings > Accounts > Send mail as**) — for example a custom domain address — Compose shows a **Send as** dropdown once more than one verified address is available, so a message can go out from `you@yourdomain.com` instead of the primary Gmail address. An address is rejected if it is not one of the account's verified aliases. Connections authorized before this feature was added need to be reconnected once to grant the `gmail.settings.basic` scope.
 
 Unread counts are local. A newly imported Gmail message initially follows Gmail's `UNREAD` label, but opening or marking it in Archive Mail does not modify its remote Gmail state.
 
@@ -140,15 +157,28 @@ Attachment parsing and OCR run in an isolated worker with a 60-second deadline p
 
 The Gmail refresh token is stored in the app's local SQLite database so background pulls can run while Archive Mail is open. **Disconnect Gmail** revokes the token; already imported messages and attachments remain local. Gmail operations are blocked for LAN read-only viewers.
 
-## OpenAI message analysis
+## Calendar and to-do lists
 
-AI analysis is optional and disabled by default. It uses the OpenAI API, whose project keys and billing are separate from ChatGPT subscriptions.
+The calendar icon in the top toolbar switches between Mail and a day-focused **Calendar** view. It reuses the same Gmail OAuth connection — no separate authorization step — and reads and writes events directly on each connected account's primary Google Calendar. Connections authorized before this feature was added need to be reconnected once to grant the `calendar.events` scope; until then that account is left out of the Calendar view.
 
-1. Create an OpenAI API project, API key, and billing configuration.
+- Use the day navigator (previous/next/Today) to move between days. Events from every calendar-capable connected account appear together, each labeled with its account.
+- **New event** creates a timed or all-day event with a title, location, description, and start/end time. Selecting an existing event's edit icon updates it; the trash icon deletes it from Google Calendar after confirmation.
+- Changes are written straight to Google Calendar through the API — there is no local copy of calendar events to keep in sync.
+
+Alongside the day's events, a **To-do** panel holds a simple local checklist for that date: add an item, check it off, or delete it. To-do items are stored only in the local SQLite database — they are never sent to Gmail or Google Calendar, and there is currently no action to turn a to-do list into a calendar event.
+
+## AI message analysis (OpenAI or DeepSeek)
+
+AI analysis is optional and disabled by default. It can use the OpenAI API and/or the DeepSeek API — each has its own card in Admin settings, so both can be connected (key, model, tested) at the same time without either overwriting the other. Whichever card is marked **Active** is the provider actually used when you click Analyze; switching which one is active is instant and doesn't touch the other's saved key or model.
+
+1. Create an API project, API key, and billing configuration with your chosen provider(s) (OpenAI and/or DeepSeek).
 2. Open **Admin settings > AI**.
-3. Enter the API key, select the model, set daily and monthly request limits, enable AI, and save.
-4. Use **Test connection** to verify the saved key and model.
-5. Open a message and choose **Analyze**.
+3. In a provider's card, enter its API key and model, then save. For DeepSeek, use **Load DeepSeek models** to fetch the live list of currently available model ids and pick one from the dropdown — each option shows reference pricing where known (see note below). OpenAI's model field is free text.
+4. Click **Make active** on whichever provider should handle analysis, toggle **Enable AI analysis** in the shared section above the cards, and set daily/monthly request limits there.
+5. Use each card's **Test** button to verify that provider's saved key and model independently.
+6. Open a message and choose **Analyze** — it runs against the active provider.
+
+DeepSeek's model lineup changes over time; `deepseek-chat` and `deepseek-reasoner` retire on 2026-07-24 in favor of `deepseek-v4-flash` and `deepseek-v4-pro`, which is why the model list is fetched live from DeepSeek rather than hardcoded. Pricing shown next to each model is a reference snapshot baked into the app, not a live quote — check [platform.deepseek.com/api-docs/pricing](https://api-docs.deepseek.com/quick_start/pricing) for current rates before relying on it for cost decisions.
 
 The first phase returns a structured local result with a summary, categories, priority, action recommendation, spam and phishing probabilities, draft recommendation, confidence, and supporting signals. Analysis is a suggestion and can be wrong. It never automatically sends, deletes, moves, labels, or rewrites email.
 
@@ -156,13 +186,35 @@ Analysis runs through a persistent SQLite job queue. Jobs survive restarts, tran
 
 For each selected message, Archive Mail sends the subject, sender, recipients, dates, up to 40,000 characters of plain-text body, attachment filenames, and a small allowlist of headers. Attachment bytes and extracted attachment text are not sent in this phase. OpenAI requests use `store: false`. Email bodies, prompts, and API keys are excluded from audit and diagnostic records.
 
-The admin-managed key is stored in `~/.archive-mail/ai-settings.json` with permissions restricted to the current operating-system user and is never returned by the API. A managed installation can instead provide an environment key, which takes precedence:
+The admin-managed keys are stored in `~/.archive-mail/ai-settings.json` with permissions restricted to the current operating-system user and are never returned by the API. A managed installation can also provide an environment key per provider:
 
 ```bash
 OPENAI_API_KEY="sk-proj-..." npm start
+# or
+DEEPSEEK_API_KEY="sk-..." npm start
 ```
 
-Environment-managed keys cannot be replaced or removed through the Admin panel. Model, enablement, and request limits remain editable there.
+An environment key is a fallback, not a UI lock. You can enter and save a different key in the provider's Admin card; the saved Admin key takes precedence immediately. Removing the saved key restores the environment value without requiring a restart. Model, provider selection, enablement, and request limits remain editable in either case.
+
+### Scheduled AI agents
+
+Below the provider cards, **Admin settings > AI > Scheduled AI agents** lets you set up recurring analysis or draft tasks:
+
+1. Click **Add schedule**, name it, choose **Analyze email** or **Create work-related reply drafts**, and pick an archive and mailbox.
+2. Target the full mailbox (new/unread or everything) or one specific email from the 100 most recent messages shown in the picker.
+3. Set an interval in minutes (e.g. `60` for hourly, `1440` for daily).
+4. Choose the agent's provider and model. This selection is pinned to the schedule and does not change when the manual-analysis Active provider changes.
+5. Select one or more agent skills (summary, categorization, priority, action extraction, spam/phishing checks, and reply recommendation), then optionally add a schedule-specific prompt.
+6. For a draft task, choose the Gmail sending account and optionally a resume uploaded under **Admin settings > Resumes**. The resume is selected only for development opportunities.
+7. Save. The schedule runs with that exact agent configuration, respects the same daily/monthly request limits, and skips messages already processed with the same content and configuration.
+
+Draft tasks classify each email as work-related and development-related. Work-related email produces a local reply draft; non-work email produces no draft. Development drafts reference the selected resume. Schedules never send email or resumes automatically: use the top-bar Drafts panel to review and send.
+
+Each schedule can be edited, toggled on/off, triggered immediately with **Run now**, or deleted. The list shows its task, target, provider, model, skills, prompt, sending account/resume when applicable, last-run time, and status summary.
+
+## Insights
+
+**Admin settings > Insights** is a read-only snapshot of everything imported and analyzed so far: total messages and attachments, the oldest and newest message by date, the top 10 senders and top 10 recipients by message count, and — once at least one message has been analyzed — an AI analysis summary (priority breakdown, top categories, action-required and draft-recommended counts, and spam/phishing flag rates). It has a **Refresh** button and otherwise recomputes from the database each time the tab is opened.
 
 ## Diagnostics
 
@@ -183,7 +235,7 @@ Use **Clear logs** to permanently remove stored diagnostic events. Import and up
 - Delete an archive in the sidebar to stop its active import and remove its messages, mailboxes, search rows, managed upload copy, Gmail connection, and unreferenced attachment blobs.
 - Delete individual mailboxes when only part of an archive should be removed.
 - Use **Diagnostics > Clear logs** to remove recorded events without deleting mail.
-- For a complete reset, stop Archive Mail and remove its data directory. The default is `~/.archive-mail`; a custom run uses the directory named by `EMAIL_CLIENT_DATA_DIR`. This permanently removes every imported message, attachment, upload, job, Gmail token, OpenAI key, AI result, and diagnostic event.
+- For a complete reset, stop Archive Mail and remove its data directory. The default is `~/.archive-mail`; a custom run uses the directory named by `EMAIL_CLIENT_DATA_DIR`. This permanently removes every imported message, attachment, upload, job, Gmail token, OpenAI/DeepSeek key, AI result, diagnostic event, and local to-do item. It has no effect on Google Calendar; events created there remain until deleted in Calendar itself.
 
 ## Verification
 

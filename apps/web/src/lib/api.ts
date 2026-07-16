@@ -1,20 +1,32 @@
 import type {
+  AdminInsights,
   AdminSettings,
   AiAnalysisStart,
   AiJob,
   AiMessageState,
+  AiModelOption,
+  AiProviderId,
+  AiSchedule,
+  AiScheduleCreate,
+  AiScheduleUpdate,
   AiSettingsPatch,
   Archive,
   ArchiveMergeResult,
   AuditPage,
   AuthLoginResult,
   AuthSessionInfo,
+  CalendarEvent,
+  CalendarEventInput,
   CursorPage,
   DiagnosticsSnapshot,
+  EmailDraft,
+  EmailDraftCreate,
+  EmailDraftUpdate,
   Folder,
   GmailAuthRequest,
   GmailAuthStart,
   GmailConnection,
+  GmailSendAsAlias,
   GmailSendRequest,
   GmailSendResult,
   GmailSettingsPatch,
@@ -25,9 +37,14 @@ import type {
   MessageDetail,
   MessageSummary,
   RuntimeConfig,
+  ResumeAsset,
   SearchFilters,
   SearchHit,
+  SenderFilingStatus,
   SharingState,
+  TodoCreate,
+  TodoItem,
+  TodoPatch,
   UploadSession,
   UserCreate,
   UserSummary,
@@ -164,14 +181,21 @@ export class ApiClient {
     });
   }
 
-  syncGmail(connectionId: string): Promise<GmailConnection> {
+  syncGmail(connectionId: string, options: { full?: boolean } = {}): Promise<GmailConnection> {
     return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/sync`, {
-      method: "POST"
+      method: "POST",
+      body: JSON.stringify(options)
     });
   }
 
   cancelGmailSync(connectionId: string): Promise<GmailConnection> {
     return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/cancel`, {
+      method: "POST"
+    });
+  }
+
+  reorganizeGmailFolders(connectionId: string): Promise<GmailConnection> {
+    return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/reorganize`, {
       method: "POST"
     });
   }
@@ -186,6 +210,83 @@ export class ApiClient {
     return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/send`, {
       method: "POST",
       body: JSON.stringify(message)
+    });
+  }
+
+  listDrafts(): Promise<EmailDraft[]> {
+    return this.request("/api/drafts");
+  }
+
+  createDraft(input: EmailDraftCreate): Promise<EmailDraft> {
+    return this.request("/api/drafts", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateDraft(id: string, input: EmailDraftUpdate): Promise<EmailDraft> {
+    return this.request(`/api/drafts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  deleteDraft(id: string): Promise<void> {
+    return this.request(`/api/drafts/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  sendDraft(id: string): Promise<GmailSendResult> {
+    return this.request(`/api/drafts/${encodeURIComponent(id)}/send`, { method: "POST" });
+  }
+
+  listGmailSendAsAliases(connectionId: string): Promise<GmailSendAsAlias[]> {
+    return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/send-as`);
+  }
+
+  listCalendarEvents(connectionId: string, timeMinISO: string, timeMaxISO: string): Promise<CalendarEvent[]> {
+    const params = new URLSearchParams({ timeMin: timeMinISO, timeMax: timeMaxISO });
+    return this.request(`/api/calendar/connections/${encodeURIComponent(connectionId)}/events?${params}`);
+  }
+
+  createCalendarEvent(connectionId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+    return this.request(`/api/calendar/connections/${encodeURIComponent(connectionId)}/events`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  updateCalendarEvent(connectionId: string, eventId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+    return this.request(`/api/calendar/connections/${encodeURIComponent(connectionId)}/events/${encodeURIComponent(eventId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  deleteCalendarEvent(connectionId: string, eventId: string): Promise<void> {
+    return this.request(`/api/calendar/connections/${encodeURIComponent(connectionId)}/events/${encodeURIComponent(eventId)}`, {
+      method: "DELETE"
+    });
+  }
+
+  listTodos(start: string, end: string): Promise<TodoItem[]> {
+    const params = new URLSearchParams({ start, end });
+    return this.request(`/api/todos?${params}`);
+  }
+
+  createTodo(input: TodoCreate): Promise<TodoItem> {
+    return this.request("/api/todos", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  updateTodo(id: string, patch: TodoPatch): Promise<TodoItem> {
+    return this.request(`/api/todos/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+  }
+
+  deleteTodo(id: string): Promise<void> {
+    return this.request(`/api/todos/${encodeURIComponent(id)}`, {
+      method: "DELETE"
     });
   }
 
@@ -236,6 +337,13 @@ export class ApiClient {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/state`, {
       method: "PATCH",
       body: JSON.stringify(patch)
+    });
+  }
+
+  moveMessage(messageId: string, folderId: string): Promise<MessageDetail> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/move`, {
+      method: "POST",
+      body: JSON.stringify({ folderId })
     });
   }
 
@@ -502,12 +610,105 @@ export class ApiClient {
     });
   }
 
-  clearAiApiKey(): Promise<AdminSettings> {
-    return this.request("/api/admin/settings/ai/key", { method: "DELETE" });
+  setActiveAiProvider(provider: AiProviderId): Promise<AdminSettings> {
+    return this.request("/api/admin/settings/ai/active", {
+      method: "POST",
+      body: JSON.stringify({ provider })
+    });
   }
 
-  testAiConnection(): Promise<{ ok: true }> {
-    return this.request("/api/admin/settings/ai/test", { method: "POST" });
+  clearAiApiKey(provider?: AiProviderId): Promise<AdminSettings> {
+    return this.request(`/api/admin/settings/ai/key${provider ? `?provider=${encodeURIComponent(provider)}` : ""}`, {
+      method: "DELETE"
+    });
+  }
+
+  testAiConnection(provider?: AiProviderId): Promise<{ ok: true }> {
+    return this.request(`/api/admin/settings/ai/test${provider ? `?provider=${encodeURIComponent(provider)}` : ""}`, {
+      method: "POST"
+    });
+  }
+
+  listAiModels(provider: AiProviderId): Promise<AiModelOption[]> {
+    return this.request(`/api/admin/settings/ai/models?provider=${encodeURIComponent(provider)}`);
+  }
+
+  listAiSchedules(): Promise<AiSchedule[]> {
+    return this.request("/api/admin/ai-schedules");
+  }
+
+  listResumes(): Promise<ResumeAsset[]> {
+    return this.request("/api/admin/resumes");
+  }
+
+  uploadResume(file: File, name?: string): Promise<ResumeAsset> {
+    const params = new URLSearchParams({ filename: file.name });
+    if (name?.trim()) params.set("name", name.trim());
+    return this.request(`/api/admin/resumes?${params}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file
+    });
+  }
+
+  deleteResume(id: string): Promise<void> {
+    return this.request(`/api/admin/resumes/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  async downloadResume(asset: ResumeAsset): Promise<void> {
+    const response = await fetch(
+      `${this.config.apiBaseUrl}/api/admin/resumes/${encodeURIComponent(asset.id)}/download`,
+      { headers: this.headers(undefined, false) }
+    );
+    if (!response.ok) throw await responseError(response);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = asset.filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  createAiSchedule(input: AiScheduleCreate): Promise<AiSchedule> {
+    return this.request("/api/admin/ai-schedules", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  updateAiSchedule(id: string, input: AiScheduleUpdate): Promise<AiSchedule> {
+    return this.request(`/api/admin/ai-schedules/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  deleteAiSchedule(id: string): Promise<void> {
+    return this.request(`/api/admin/ai-schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  runAiScheduleNow(id: string): Promise<AiSchedule> {
+    return this.request(`/api/admin/ai-schedules/${encodeURIComponent(id)}/run`, { method: "POST" });
+  }
+
+  senderFilingStatus(archiveId: string): Promise<SenderFilingStatus> {
+    return this.request(`/api/admin/sender-filing?${queryString({ archiveId })}`);
+  }
+
+  organizeTopSenders(archiveId: string): Promise<SenderFilingStatus> {
+    return this.request("/api/admin/sender-filing/organize", {
+      method: "POST",
+      body: JSON.stringify({ archiveId })
+    });
+  }
+
+  disableSenderFiling(archiveId: string): Promise<SenderFilingStatus> {
+    return this.request(`/api/admin/sender-filing?${queryString({ archiveId })}`, { method: "DELETE" });
+  }
+
+  adminInsights(): Promise<AdminInsights> {
+    return this.request("/api/admin/insights");
   }
 
   listUsers(): Promise<UserSummary[]> {

@@ -19,6 +19,14 @@ export function formatDateTime(value: string | null): string {
   }).format(new Date(value));
 }
 
+export function formatTimeOfDay(value: string | null): string {
+  if (!value) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
 export function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   const units = ["KB", "MB", "GB", "TB"];

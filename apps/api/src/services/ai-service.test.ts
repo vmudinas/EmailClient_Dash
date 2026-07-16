@@ -18,7 +18,7 @@ describe("AiService", () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
     const messageId = insertMessage(database);
-    const settings = new AiSettingsManager(dataDir, null);
+    const settings = new AiSettingsManager(dataDir, {});
     settings.update({
       apiKey: "sk-proj-test-secret-value",
       clearApiKey: false,
@@ -79,7 +79,7 @@ describe("AiService", () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
     const messageId = insertMessage(database);
-    const settings = new AiSettingsManager(dataDir, null);
+    const settings = new AiSettingsManager(dataDir, {});
     const service = new AiService(database, settings, () => ({
       analyze: vi.fn(),
       testConnection: vi.fn()
@@ -87,6 +87,57 @@ describe("AiService", () => {
 
     expect(() => service.startAnalysis(messageId)).toThrow(AiConfigurationError);
     expect(database.listAiJobs()).toEqual([]);
+    await service.close();
+    database.close();
+  });
+
+  it("tests a specific provider's connection without switching which one is active", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({ apiKey: "sk-openai-secret", clearApiKey: false });
+    settings.update({ provider: "deepseek", apiKey: "sk-deepseek-secret", clearApiKey: false });
+
+    const calls: Array<{ provider: string; apiKey: string }> = [];
+    const testConnection = vi.fn().mockResolvedValue(undefined);
+    const service = new AiService(database, settings, (provider, apiKey) => {
+      calls.push({ provider, apiKey });
+      return { analyze: vi.fn(), testConnection };
+    });
+
+    await service.testConnection("deepseek");
+    expect(calls).toEqual([{ provider: "deepseek", apiKey: "sk-deepseek-secret" }]);
+    expect(settings.current().provider).toBe("openai");
+
+    await service.close();
+    database.close();
+  });
+
+  it("lists live DeepSeek models merged with pricing metadata, but refuses to for OpenAI", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({ provider: "deepseek", apiKey: "sk-deepseek-secret", clearApiKey: false });
+    settings.update({ provider: "openai", apiKey: "sk-openai-secret", clearApiKey: false });
+
+    const fetcher: typeof fetch = async (input) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      expect(url.pathname).toBe("/models");
+      return new Response(JSON.stringify({
+        object: "list",
+        data: [{ id: "deepseek-v4-flash", object: "model" }, { id: "some-future-model", object: "model" }]
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    const service = new AiService(database, settings, undefined, fetcher);
+
+    const models = await service.listModels("deepseek");
+    expect(models).toEqual([
+      expect.objectContaining({ id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", pricing: expect.stringContaining("per 1M") }),
+      expect.objectContaining({ id: "some-future-model", label: "some-future-model", pricing: null })
+    ]);
+
+    await expect(service.listModels("openai")).rejects.toThrow(AiConfigurationError);
+
     await service.close();
     database.close();
   });

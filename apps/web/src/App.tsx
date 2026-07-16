@@ -9,6 +9,8 @@ import {
   Archive,
   Activity,
   BookOpen,
+  CalendarDays,
+  FileEdit,
   Filter,
   FolderOpen,
   Import,
@@ -28,6 +30,7 @@ import type {
   Archive as ArchiveModel,
   AuthSessionInfo,
   DiagnosticsSnapshot,
+  EmailDraft,
   Folder,
   GmailAuthRequest,
   GmailConnection,
@@ -47,6 +50,7 @@ import {
   type MessageListItem
 } from "./components/MessageList.js";
 import { MessageReader } from "./components/MessageReader.js";
+import { CalendarView } from "./components/CalendarView.js";
 import {
   EMPTY_FILTERS,
   CombineArchiveDialog,
@@ -61,10 +65,12 @@ import {
   type UiSearchFilters
 } from "./components/Dialogs.js";
 import { ApiClient, resolveRuntimeConfig, type UploadProgress } from "./lib/api.js";
-import { ComposeDialog } from "./components/ComposeDialog.js";
+import { ComposeDialog, type ComposeDraft } from "./components/ComposeDialog.js";
+import { DraftsDialog } from "./components/DraftsDialog.js";
 import { GuideDialog } from "./components/GuideDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
+import { displayAddress, formatDateTime } from "./lib/format.js";
 
 type MobileView = "folders" | "messages" | "reader";
 type RenameTarget =
@@ -104,6 +110,7 @@ export function App() {
   const [startupError, setStartupError] = useState("");
   const [notice, setNotice] = useState("");
   const [mobileView, setMobileView] = useState<MobileView>("folders");
+  const [viewMode, setViewMode] = useState<"mail" | "calendar">("mail");
   const [importOpen, setImportOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importProgress, setImportProgress] = useState<UploadProgress | null>(null);
@@ -123,8 +130,16 @@ export function App() {
   const [gmailError, setGmailError] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeConnectionId, setComposeConnectionId] = useState<string | null>(null);
+  const [composeDraft, setComposeDraft] = useState<ComposeDraft | null>(null);
   const [composeBusy, setComposeBusy] = useState(false);
   const [composeError, setComposeError] = useState("");
+  const [draftsOpen, setDraftsOpen] = useState(false);
+  const [drafts, setDrafts] = useState<EmailDraft[]>([]);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [draftsBusy, setDraftsBusy] = useState(false);
+  const [draftsError, setDraftsError] = useState("");
+  const [moveBusy, setMoveBusy] = useState(false);
+  const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -391,6 +406,15 @@ export function App() {
   const loadFoldersForGmail = useCallback(async (archiveId: string): Promise<Folder[]> => {
     if (!api) return [];
     return api.listFolders(archiveId);
+  }, [api]);
+
+  const loadSendAsAliases = useCallback(async (connectionId: string) => {
+    if (!api) return [];
+    try {
+      return await api.listGmailSendAsAliases(connectionId);
+    } catch {
+      return [];
+    }
   }, [api]);
 
   const refreshGmailConnections = useCallback(async (showLoading = false) => {
@@ -740,10 +764,128 @@ export function App() {
     setGmailOpen(true);
   };
 
-  const openCompose = (connection: GmailConnection | null = null) => {
+  const openCompose = (connection: GmailConnection | null = null, draft: ComposeDraft | null = null) => {
     setComposeConnectionId(connection?.id ?? gmailConnections.find((item) => item.canSend)?.id ?? null);
+    setComposeDraft(draft);
     setComposeError("");
     setComposeOpen(true);
+  };
+
+  const loadDrafts = async () => {
+    if (!api || readOnly) return;
+    setDraftsLoading(true);
+    setDraftsError("");
+    try {
+      setDrafts(await api.listDrafts());
+    } catch (error) {
+      setDraftsError(error instanceof Error ? error.message : "Drafts could not be loaded");
+    } finally {
+      setDraftsLoading(false);
+    }
+  };
+
+  const openDrafts = () => {
+    setDraftsOpen(true);
+    void loadDrafts();
+  };
+
+  const editSavedDraft = (draft: EmailDraft) => {
+    setDraftsOpen(false);
+    openCompose(gmailConnections.find((connection) => connection.id === draft.connectionId) ?? null, {
+      id: draft.id,
+      source: draft.source,
+      sourceMessageId: draft.sourceMessageId,
+      to: draft.to,
+      cc: draft.cc,
+      bcc: draft.bcc,
+      subject: draft.subject,
+      bodyText: draft.bodyText,
+      fromAddress: draft.fromAddress,
+      resumeId: draft.resumeId,
+      resumeFilename: draft.resumeFilename
+    });
+  };
+
+  const deleteSavedDraft = async (draft: EmailDraft) => {
+    if (!api || !window.confirm(`Delete the draft "${draft.subject || "(No subject)"}"?`)) return;
+    setDraftsBusy(true);
+    setDraftsError("");
+    try {
+      await api.deleteDraft(draft.id);
+      setDrafts((current) => current.filter((entry) => entry.id !== draft.id));
+    } catch (error) {
+      setDraftsError(error instanceof Error ? error.message : "Draft could not be deleted");
+    } finally {
+      setDraftsBusy(false);
+    }
+  };
+
+  const openReply = (target: MessageDetail, mode: "reply" | "forward") => {
+    const quotedLines = target.bodyText.split("\n").map((line) => `> ${line}`).join("\n");
+    const quoted = `\n\nOn ${formatDateTime(target.receivedAt ?? target.sentAt)}, ${displayAddress(target.sender)} <${target.sender.address}> wrote:\n${quotedLines}`;
+    const prefix = mode === "reply" ? "Re: " : "Fwd: ";
+    const subject = target.subject.toLowerCase().startsWith(prefix.trim().toLowerCase())
+      ? target.subject
+      : `${prefix}${target.subject}`;
+    openCompose(null, {
+      to: mode === "reply" ? target.sender.address : "",
+      subject,
+      bodyText: quoted
+    });
+  };
+
+  const moveMessage = async (messageId: string, folderId: string) => {
+    if (!api || readOnly) return;
+    setMoveBusy(true);
+    try {
+      const moved = await api.moveMessage(messageId, folderId);
+      if (message?.id === messageId) setMessage(moved);
+      await Promise.all([refreshArchives(), loadMessages(false)]);
+      showError(`Moved to ${moved.folderPath}`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Message could not be moved");
+    } finally {
+      setMoveBusy(false);
+    }
+  };
+
+  const archiveMessage = async (target: MessageDetail) => {
+    if (!api || readOnly) return;
+    setMoveBusy(true);
+    try {
+      let availableFolders = target.archiveId === selectedArchiveId
+        ? folders
+        : await api.listFolders(target.archiveId);
+      let currentFolder = availableFolders.find((folder) => folder.id === target.folderId) ?? null;
+      if (!currentFolder) {
+        availableFolders = await api.listFolders(target.archiveId);
+        currentFolder = availableFolders.find((folder) => folder.id === target.folderId) ?? null;
+      }
+      const archiveNames = new Set(["archive", "archived"]);
+      let destination = availableFolders.find((folder) => (
+        folder.parentId === currentFolder?.parentId
+        && archiveNames.has(folder.name.trim().toLowerCase())
+      )) ?? availableFolders.find((folder) => archiveNames.has(folder.name.trim().toLowerCase()));
+      if (!destination) {
+        destination = await api.createFolder(target.archiveId, "Archived", currentFolder?.parentId ?? null);
+        if (target.archiveId === selectedArchiveId) {
+          setFolders(await api.listFolders(target.archiveId));
+        }
+      }
+      const moved = await api.moveMessage(target.id, destination.id);
+      if (message?.id === target.id) setMessage(moved);
+      await Promise.all([refreshArchives(), loadMessages(false)]);
+      showError(`Moved to ${moved.folderPath}`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Message could not be archived");
+    } finally {
+      setMoveBusy(false);
+    }
+  };
+
+  const dropMessageIntoFolder = (messageId: string, folderId: string) => {
+    setDraggedMessage(null);
+    void moveMessage(messageId, folderId);
   };
 
   const connectGmail = async (request: GmailAuthRequest) => {
@@ -767,11 +909,22 @@ export function App() {
     }
   };
 
-  const syncGmail = async (connectionId: string) => {
+  const reauthorizeGmail = (connection: GmailConnection) => {
+    void connectGmail({
+      archiveId: connection.archiveId,
+      folderId: connection.folderId,
+      archiveName: connection.archiveName,
+      folderName: connection.folderPath.split("/").at(-1) || "Gmail",
+      query: connection.query,
+      ocrEnabled: connection.ocrEnabled
+    });
+  };
+
+  const syncGmail = async (connectionId: string, options: { full?: boolean } = {}) => {
     if (!api || readOnly) return;
     setGmailError("");
     try {
-      const connection = await api.syncGmail(connectionId);
+      const connection = await api.syncGmail(connectionId, options);
       setGmailConnections((current) => current.map((item) => item.id === connection.id ? connection : item));
     } catch (error) {
       setGmailError(error instanceof Error ? error.message : "Gmail sync could not start");
@@ -785,6 +938,17 @@ export function App() {
       setGmailConnections((current) => current.map((item) => item.id === connection.id ? connection : item));
     } catch (error) {
       setGmailError(error instanceof Error ? error.message : "Gmail sync could not be stopped");
+    }
+  };
+
+  const reorganizeGmail = async (connectionId: string) => {
+    if (!api || readOnly) return;
+    setGmailError("");
+    try {
+      const connection = await api.reorganizeGmailFolders(connectionId);
+      setGmailConnections((current) => current.map((item) => item.id === connection.id ? connection : item));
+    } catch (error) {
+      setGmailError(error instanceof Error ? error.message : "Gmail folder reorganize could not start");
     }
   };
 
@@ -807,7 +971,23 @@ export function App() {
     setComposeError("");
     const connection = gmailConnections.find((item) => item.id === connectionId) ?? null;
     try {
-      const result = await api.sendGmailMessage(connectionId, message);
+      let result;
+      if (composeDraft?.id) {
+        await api.updateDraft(composeDraft.id, {
+          connectionId,
+          to: message.to,
+          cc: message.cc,
+          bcc: message.bcc,
+          subject: message.subject,
+          bodyText: message.bodyText,
+          fromAddress: message.fromAddress ?? null,
+          resumeId: composeDraft.resumeId ?? null
+        });
+        result = await api.sendDraft(composeDraft.id);
+        setDrafts((current) => current.filter((entry) => entry.id !== composeDraft.id));
+      } else {
+        result = await api.sendGmailMessage(connectionId, message);
+      }
       setComposeOpen(false);
       await refreshMailboxCounts();
       if (connection?.archiveId === selectedArchiveId) await loadMessages(false);
@@ -816,6 +996,41 @@ export function App() {
         : "Email sent, but the local sent copy could not be imported. Open Diagnostics for details.");
     } catch (error) {
       const value = error instanceof Error ? error.message : "Email could not be sent";
+      setComposeError(value);
+      showError(value);
+    } finally {
+      setComposeBusy(false);
+    }
+  };
+
+  const saveComposeDraft = async (connectionId: string, message: GmailSendRequest) => {
+    if (!api || readOnly) return;
+    setComposeBusy(true);
+    setComposeError("");
+    try {
+      const input = {
+        connectionId,
+        to: message.to,
+        cc: message.cc,
+        bcc: message.bcc,
+        subject: message.subject,
+        bodyText: message.bodyText,
+        fromAddress: message.fromAddress ?? null,
+        resumeId: composeDraft?.resumeId ?? null
+      };
+      const saved = composeDraft?.id
+        ? await api.updateDraft(composeDraft.id, input)
+        : await api.createDraft({
+            ...input,
+            sourceMessageId: composeDraft?.sourceMessageId ?? null
+          });
+      setDrafts((current) => current.some((entry) => entry.id === saved.id)
+        ? current.map((entry) => entry.id === saved.id ? saved : entry)
+        : [saved, ...current]);
+      setComposeOpen(false);
+      showError("Draft saved");
+    } catch (error) {
+      const value = error instanceof Error ? error.message : "Draft could not be saved";
       setComposeError(value);
       showError(value);
     } finally {
@@ -957,9 +1172,22 @@ export function App() {
               onClose={() => setFilterOpen(false)}
             />
           </div>
+          <button
+            className={`icon-button calendar-trigger ${viewMode === "calendar" ? "active" : ""}`}
+            onClick={() => setViewMode((current) => (current === "calendar" ? "mail" : "calendar"))}
+            title={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
+            aria-label={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
+          >
+            {viewMode === "calendar" ? <Mail size={18} /> : <CalendarDays size={18} />}
+          </button>
           {electron && isAdmin && (
             <button className="icon-button sharing-trigger" onClick={() => void openSharing()} title="Open iPhone viewer" aria-label="Open iPhone viewer">
               <MonitorSmartphone size={18} />
+            </button>
+          )}
+          {!readOnly && (
+            <button className="icon-button drafts-trigger" onClick={openDrafts} title="Open drafts" aria-label="Open drafts">
+              <FileEdit size={18} />
             </button>
           )}
           {!readOnly && (
@@ -995,50 +1223,68 @@ export function App() {
       </header>
 
       <main className="workspace">
-        <Sidebar
-          archives={archives}
-          folders={folders}
-          jobs={jobs}
-          selectedArchiveId={selectedArchiveId}
-          selectedFolderId={selectedFolderId}
-          readOnly={readOnly}
-          onSelectArchive={selectArchive}
-          onSelectFolder={selectFolder}
-          onImport={openImport}
-          onOpenGmail={openGmail}
-          onCreateFolder={() => setCreateMailboxOpen(true)}
-          onCombineArchive={setCombineSource}
-          onCombineFolder={setCombineMailboxSource}
-          onCancelJob={(id) => void cancelJob(id)}
-          onResumeJob={(id) => void resumeJob(id)}
-          onClearJob={(id) => void clearJob(id)}
-          onRemoveArchive={(id) => void removeArchive(id)}
-          onRemoveFolder={(folder) => void removeFolder(folder)}
-          onRenameArchive={(archive) => setRenameTarget({ kind: "archive", id: archive.id, name: archive.name })}
-          onRenameFolder={(folder) => setRenameTarget({ kind: "mailbox", id: folder.id, archiveId: folder.archiveId, name: folder.name })}
-          onOpenDiagnostics={openDiagnostics}
-        />
-        <MessageList
-          items={items}
-          selectedMessageId={selectedMessageId}
-          title={listTitle}
-          loading={loadingMessages}
-          searching={Boolean(searchTerm)}
-          hasMore={Boolean(nextCursor)}
-          onSelect={(selected) => void openMessage(selected)}
-          onLoadMore={() => void loadMessages(true)}
-          onMobileBack={() => setMobileView("folders")}
-        />
-        <MessageReader
-          key={message?.id ?? "empty-reader"}
-          message={message}
-          loading={loadingMessage}
-          readOnly={readOnly}
-          api={api}
-          onMobileBack={() => setMobileView("messages")}
-          onUpdateState={updateState}
-          onError={showError}
-        />
+        {viewMode === "calendar" ? (
+          api && <CalendarView api={api} connections={gmailConnections} onReauthorize={reauthorizeGmail} onError={showError} />
+        ) : (
+          <>
+            <Sidebar
+              archives={archives}
+              folders={folders}
+              jobs={jobs}
+              selectedArchiveId={selectedArchiveId}
+              selectedFolderId={selectedFolderId}
+              readOnly={readOnly}
+              draggedMessage={draggedMessage}
+              moveBusy={moveBusy}
+              onSelectArchive={selectArchive}
+              onSelectFolder={selectFolder}
+              onImport={openImport}
+              onOpenGmail={openGmail}
+              onCreateFolder={() => setCreateMailboxOpen(true)}
+              onCombineArchive={setCombineSource}
+              onCombineFolder={setCombineMailboxSource}
+              onCancelJob={(id) => void cancelJob(id)}
+              onResumeJob={(id) => void resumeJob(id)}
+              onClearJob={(id) => void clearJob(id)}
+              onRemoveArchive={(id) => void removeArchive(id)}
+              onRemoveFolder={(folder) => void removeFolder(folder)}
+              onRenameArchive={(archive) => setRenameTarget({ kind: "archive", id: archive.id, name: archive.name })}
+              onRenameFolder={(folder) => setRenameTarget({ kind: "mailbox", id: folder.id, archiveId: folder.archiveId, name: folder.name })}
+              onMoveMessage={dropMessageIntoFolder}
+              onOpenDiagnostics={openDiagnostics}
+            />
+            <MessageList
+              items={items}
+              selectedMessageId={selectedMessageId}
+              title={listTitle}
+              loading={loadingMessages}
+              searching={Boolean(searchTerm)}
+              hasMore={Boolean(nextCursor)}
+              readOnly={readOnly}
+              onSelect={(selected) => void openMessage(selected)}
+              onDragStart={setDraggedMessage}
+              onDragEnd={() => setDraggedMessage(null)}
+              onLoadMore={() => void loadMessages(true)}
+              onMobileBack={() => setMobileView("folders")}
+            />
+            <MessageReader
+              key={message?.id ?? "empty-reader"}
+              message={message}
+              loading={loadingMessage}
+              readOnly={readOnly}
+              api={api}
+              onMobileBack={() => setMobileView("messages")}
+              onUpdateState={updateState}
+              onError={showError}
+              onReply={(target) => openReply(target, "reply")}
+              onForward={(target) => openReply(target, "forward")}
+              onLoadFolders={loadFoldersForGmail}
+              onMove={(messageId, folderId) => moveMessage(messageId, folderId)}
+              onArchive={archiveMessage}
+              moveBusy={moveBusy}
+            />
+          </>
+        )}
       </main>
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
@@ -1111,17 +1357,21 @@ export function App() {
         onLoadFolders={loadFoldersForGmail}
         onConnect={(request) => void connectGmail(request)}
         onSync={(connectionId) => void syncGmail(connectionId)}
+        onFullSync={(connectionId) => void syncGmail(connectionId, { full: true })}
         onCancel={(connectionId) => void cancelGmail(connectionId)}
+        onReorganize={(connectionId) => void reorganizeGmail(connectionId)}
         onCompose={(connection) => {
           setGmailOpen(false);
           openCompose(connection);
         }}
+        onReauthorize={reauthorizeGmail}
         onDisconnect={(connection) => void disconnectGmail(connection)}
       />
       <ComposeDialog
         open={composeOpen}
         connections={gmailConnections}
         initialConnectionId={composeConnectionId}
+        initialDraft={composeDraft}
         busy={composeBusy}
         error={composeError}
         onClose={() => { if (!composeBusy) setComposeOpen(false); }}
@@ -1129,7 +1379,20 @@ export function App() {
           setComposeOpen(false);
           openGmail();
         }}
+        onLoadSendAsAliases={loadSendAsAliases}
+        onSave={(connectionId, outgoing) => void saveComposeDraft(connectionId, outgoing)}
         onSend={(connectionId, outgoing) => void sendGmailMessage(connectionId, outgoing)}
+      />
+      <DraftsDialog
+        open={draftsOpen}
+        drafts={drafts}
+        loading={draftsLoading}
+        busy={draftsBusy}
+        error={draftsError}
+        onClose={() => { if (!draftsBusy) setDraftsOpen(false); }}
+        onRefresh={() => void loadDrafts()}
+        onEdit={editSavedDraft}
+        onDelete={(draft) => void deleteSavedDraft(draft)}
       />
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
       {isAdmin && (

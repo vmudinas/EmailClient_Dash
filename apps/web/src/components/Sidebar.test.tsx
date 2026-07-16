@@ -1,9 +1,12 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Archive, Folder } from "@email-client/shared";
+import type { Archive, Folder, MessageSummary } from "@email-client/shared";
 import { Sidebar } from "./Sidebar.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 const READY_ARCHIVE: Archive = {
   id: "archive-ready",
@@ -39,7 +42,35 @@ const SAVED: Folder = {
   unreadCount: 0
 };
 
+const DRAGGED_MESSAGE: MessageSummary = {
+  id: "message-1",
+  archiveId: READY_ARCHIVE.id,
+  folderId: INBOX.id,
+  folderPath: INBOX.path,
+  subject: "Move me",
+  sender: { name: null, address: "sender@example.test" },
+  recipients: [],
+  sentAt: null,
+  receivedAt: "2026-07-15T00:00:00.000Z",
+  preview: "Move me",
+  hasAttachments: false,
+  attachmentCount: 0,
+  state: { isRead: false, isStarred: false, tags: [], note: "", updatedAt: null }
+};
+
 describe("Sidebar archive and mailbox actions", () => {
+  it("moves a dragged message onto another mailbox", () => {
+    const onMoveMessage = vi.fn();
+    renderSidebar({
+      folders: [INBOX, SAVED],
+      draggedMessage: DRAGGED_MESSAGE,
+      onMoveMessage
+    });
+
+    fireEvent.drop(screen.getByTitle("Saved").closest("button")!);
+    expect(onMoveMessage).toHaveBeenCalledWith(DRAGGED_MESSAGE.id, SAVED.id);
+  });
+
   it("exposes working rename and delete controls for completed local archives", () => {
     const onRemoveArchive = vi.fn();
     const onRemoveFolder = vi.fn();
@@ -147,6 +178,28 @@ describe("Sidebar archive and mailbox actions", () => {
     expect(screen.getByRole("progressbar", { name: "Inbox.mbox import progress" }).getAttribute("aria-valuenow")).toBe("32");
   });
 
+  it("collapses and expands nested mailboxes, remembering the state after remount", () => {
+    const CHILD: Folder = {
+      ...INBOX,
+      id: "folder-inbox-alerts",
+      parentId: INBOX.id,
+      name: "Alerts",
+      path: "Inbox/Alerts"
+    };
+    const view = renderSidebar({ folders: [INBOX, CHILD] });
+
+    expect(screen.getByText("Alerts")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse Inbox" }));
+    expect(screen.queryByText("Alerts")).toBeNull();
+
+    view.unmount();
+    renderSidebar({ folders: [INBOX, CHILD] });
+    expect(screen.queryByText("Alerts")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Inbox" }));
+    expect(screen.getByText("Alerts")).toBeTruthy();
+  });
+
   it("restarts stopped imports from their checkpoint or clears them", () => {
     const onResumeJob = vi.fn();
     const onClearJob = vi.fn();
@@ -181,8 +234,8 @@ describe("Sidebar archive and mailbox actions", () => {
   });
 });
 
-function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> = {}): void {
-  render(
+function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> = {}) {
+  return render(
     <Sidebar
       archives={[READY_ARCHIVE]}
       folders={[INBOX]}
@@ -190,6 +243,8 @@ function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> 
       selectedArchiveId={READY_ARCHIVE.id}
       selectedFolderId={null}
       readOnly={false}
+      draggedMessage={null}
+      moveBusy={false}
       onSelectArchive={vi.fn()}
       onSelectFolder={vi.fn()}
       onImport={vi.fn()}
@@ -204,6 +259,7 @@ function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> 
       onRemoveFolder={vi.fn()}
       onRenameArchive={vi.fn()}
       onRenameFolder={vi.fn()}
+      onMoveMessage={vi.fn()}
       onOpenDiagnostics={vi.fn()}
       {...overrides}
     />

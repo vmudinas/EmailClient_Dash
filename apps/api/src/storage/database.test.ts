@@ -290,6 +290,7 @@ describe("EmailDatabase", () => {
       query: "newer_than:30d",
       ocrEnabled: false,
       canSend: true,
+      canManageCalendar: false,
       refreshToken: "refresh-token"
     });
 
@@ -361,6 +362,7 @@ describe("EmailDatabase", () => {
       query: "newer_than:30d",
       ocrEnabled: false,
       canSend: true,
+      canManageCalendar: false,
       refreshToken: "mailbox-refresh-token"
     });
 
@@ -415,6 +417,7 @@ describe("EmailDatabase", () => {
       query: "newer_than:30d",
       ocrEnabled: false,
       canSend: true,
+      canManageCalendar: false,
       refreshToken: "first-refresh-token"
     });
     const second = database.createGmailConnection({
@@ -424,6 +427,7 @@ describe("EmailDatabase", () => {
       query: "newer_than:30d",
       ocrEnabled: false,
       canSend: true,
+      canManageCalendar: false,
       refreshToken: "second-refresh-token"
     });
 
@@ -440,6 +444,7 @@ describe("EmailDatabase", () => {
       query: "newer_than:90d",
       ocrEnabled: true,
       canSend: true,
+      canManageCalendar: false,
       refreshToken: "replacement-refresh-token"
     });
     expect(reauthorized.id).toBe(first.id);
@@ -467,13 +472,19 @@ describe("EmailDatabase", () => {
 
     const job = database.createAiJob({
       messageId,
+      provider: "openai",
       model: "test-model",
+      skills: ["summarize", "extract-actions"],
+      prompt: "Focus on contract obligations.",
       promptVersion: "test-v1",
       contentHash: "content-hash"
     });
     expect(() => database.createAiJob({
       messageId,
+      provider: "openai",
       model: "test-model",
+      skills: ["summarize"],
+      prompt: "",
       promptVersion: "test-v1",
       contentHash: "content-hash"
     })).toThrow();
@@ -512,7 +523,10 @@ describe("EmailDatabase", () => {
 
     const interrupted = database.createAiJob({
       messageId,
+      provider: "deepseek",
       model: "test-model",
+      skills: ["detect-phishing"],
+      prompt: "Flag requests for credentials.",
       promptVersion: "test-v1",
       contentHash: "new-content-hash"
     });
@@ -567,6 +581,374 @@ describe("EmailDatabase", () => {
     expect(database.clearDiagnostics()).toBe(1);
     expect(database.listDiagnostics()).toEqual([]);
     expect(database.getImportJob(job.id)?.errorCount).toBe(1);
+    database.close();
+  });
+
+  it("moves a single message between mailboxes in the same archive and keeps counts and search current", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Move test",
+      sourceType: "mbox",
+      fingerprint: "move-message-fixture",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const archived = database.ensureFolder(archive.id, "Archived", "Archived", null);
+    const messageId = insertDatedMessage(database, archive.id, inbox.id, "move-me", "2026-07-01T00:00:00.000Z");
+    database.completeArchive(archive.id, 0);
+
+    expect(database.getFolder(inbox.id)?.messageCount).toBe(1);
+    expect(database.getFolder(archived.id)?.messageCount).toBe(0);
+
+    database.moveMessage(messageId, archived.id);
+
+    expect(database.getMessage(messageId)?.folderId).toBe(archived.id);
+    expect(database.getMessage(messageId)?.folderPath).toBe("Archived");
+    expect(database.getFolder(inbox.id)?.messageCount).toBe(0);
+    expect(database.getFolder(archived.id)?.messageCount).toBe(1);
+    expect(database.search({ q: "ordering-marker", folderId: archived.id }).items).toHaveLength(1);
+
+    const otherArchive = database.createArchive({
+      name: "Other archive",
+      sourceType: "mbox",
+      fingerprint: "move-message-other",
+      sizeBytes: 50
+    });
+    const otherFolder = database.ensureFolder(otherArchive.id, "Somewhere else", "Somewhere else", null);
+    database.completeArchive(otherArchive.id, 0);
+    expect(() => database.moveMessage(messageId, otherFolder.id))
+      .toThrow("Messages can only be moved within the same archive");
+
+    database.close();
+  });
+
+  it("files the top 20 Inbox senders, leaves Spam and other senders alone, and routes future mail", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Sender rules",
+      sourceType: "gmail",
+      fingerprint: "sender-rules-fixture",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Account/Inbox", "Inbox", null);
+    const spam = database.ensureFolder(archive.id, "Account/Spam", "Spam", null);
+
+    for (let senderIndex = 0; senderIndex < 21; senderIndex += 1) {
+      const messageCount = 21 - senderIndex;
+      for (let messageIndex = 0; messageIndex < messageCount; messageIndex += 1) {
+        insertSenderMessage(
+          database,
+          archive.id,
+          inbox.id,
+          `sender-${senderIndex}-message-${messageIndex}`,
+          `Sender ${senderIndex}`,
+          `sender${senderIndex}@example.test`
+        );
+      }
+    }
+    const spamMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      spam.id,
+      "top-sender-spam",
+      "Sender 0",
+      "sender0@example.test"
+    );
+    database.completeArchive(archive.id, 0);
+
+    const organized = database.organizeTopSenderFolders(archive.id);
+
+    expect(organized.enabled).toBe(true);
+    expect(organized.rules).toHaveLength(20);
+    expect(organized.lastRunMovedMessages).toBe(230);
+    expect(organized.lastRunCreatedFolders).toBe(21);
+    expect(organized.rules[0]).toMatchObject({
+      senderAddress: "sender0@example.test",
+      messageCount: 21,
+      folderPath: "Top Senders/Sender 0"
+    });
+    expect(database.listMessages({ folderId: inbox.id, limit: 100 }).items).toHaveLength(1);
+    expect(database.listMessages({ folderId: inbox.id, limit: 100 }).items[0]?.sender.address)
+      .toBe("sender20@example.test");
+    expect(database.getMessage(spamMessageId)?.folderId).toBe(spam.id);
+
+    const futureFiledId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "future-top-sender",
+      "Sender 0",
+      "SENDER0@EXAMPLE.TEST"
+    );
+    const futureInboxId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "future-other-sender",
+      "Other Sender",
+      "other@example.test"
+    );
+    expect(database.getMessage(futureFiledId)?.folderPath).toBe("Top Senders/Sender 0");
+    expect(database.getMessage(futureInboxId)?.folderId).toBe(inbox.id);
+
+    const rerun = database.organizeTopSenderFolders(archive.id);
+    expect(rerun.rules).toHaveLength(20);
+    expect(rerun.lastRunMovedMessages).toBe(0);
+    expect(rerun.lastRunCreatedFolders).toBe(0);
+
+    expect(database.clearSenderFilingRules(archive.id).enabled).toBe(false);
+    const afterDisableId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "after-disable",
+      "Sender 0",
+      "sender0@example.test"
+    );
+    expect(database.getMessage(afterDisableId)?.folderId).toBe(inbox.id);
+    database.close();
+  });
+
+  it("stores per-day to-do items ordered by position and supports editing and removal", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+
+    const first = database.createTodo({ date: "2026-07-15", text: "Write the report" });
+    const second = database.createTodo({ date: "2026-07-15", text: "Call the vendor" });
+    database.createTodo({ date: "2026-07-16", text: "Different day" });
+
+    expect(database.listTodos("2026-07-15", "2026-07-15").map((todo) => todo.text)).toEqual([
+      "Write the report",
+      "Call the vendor"
+    ]);
+    expect(first.completed).toBe(false);
+    expect(first.position).toBe(0);
+    expect(second.position).toBe(1);
+
+    const completed = database.updateTodo(first.id, { completed: true });
+    expect(completed.completed).toBe(true);
+    expect(completed.text).toBe("Write the report");
+
+    const renamed = database.updateTodo(second.id, { text: "Call the vendor back" });
+    expect(renamed.text).toBe("Call the vendor back");
+
+    database.deleteTodo(first.id);
+    expect(database.listTodos("2026-07-15", "2026-07-15").map((todo) => todo.id)).toEqual([second.id]);
+    expect(() => database.updateTodo("missing-id", { completed: true })).toThrow("To-do item not found");
+
+    database.close();
+  });
+
+  it("creates, runs, and reports on AI schedules scoped to a folder and read state", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Schedule mail",
+      sourceType: "mbox",
+      fingerprint: "ai-schedule",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const otherFolder = database.ensureFolder(archive.id, "Archived", "Archived", null);
+    database.completeArchive(archive.id, 0);
+
+    const readId = insertDatedMessage(database, archive.id, inbox.id, "read-message", "2026-07-01T00:00:00.000Z");
+    database.updateMessageState(readId, { isRead: true });
+    const unreadId = insertDatedMessage(database, archive.id, inbox.id, "unread-message", "2026-07-02T00:00:00.000Z");
+    insertDatedMessage(database, archive.id, otherFolder.id, "other-folder-message", "2026-07-03T00:00:00.000Z");
+
+    const schedule = database.createAiSchedule({
+      name: "Inbox sweep",
+      folderId: inbox.id,
+      mode: "unread",
+      intervalMinutes: 30,
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      skills: ["summarize", "extract-actions"],
+      prompt: "Focus on commitments and due dates.",
+      enabled: true
+    });
+    expect(schedule).toMatchObject({
+      name: "Inbox sweep",
+      folderId: inbox.id,
+      folderPath: "Inbox",
+      archiveId: archive.id,
+      archiveName: "Schedule mail",
+      mode: "unread",
+      intervalMinutes: 30,
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      skills: ["summarize", "extract-actions"],
+      prompt: "Focus on commitments and due dates.",
+      enabled: true,
+      lastRunAt: null
+    });
+
+    expect(database.listMessageIdsForSchedule(inbox.id, "unread")).toEqual([unreadId]);
+    expect(database.listMessageIdsForSchedule(inbox.id, "all").sort()).toEqual([readId, unreadId].sort());
+
+    expect(() => database.createAiSchedule({
+      name: "Bad folder",
+      folderId: "00000000-0000-0000-0000-000000000000",
+      mode: "all",
+      intervalMinutes: 60,
+      provider: "openai",
+      model: "gpt-test",
+      skills: ["summarize"],
+      prompt: "",
+      enabled: true
+    })).toThrow("Mailbox not found");
+
+    expect(database.dueAiSchedules(new Date().toISOString()).map((entry) => entry.id)).toEqual([schedule.id]);
+
+    database.recordAiScheduleRun(schedule.id, "2026-07-10T00:00:00.000Z", "Queued 1 of 1 message");
+    const afterRun = database.getAiSchedule(schedule.id)!;
+    expect(afterRun).toMatchObject({ lastRunAt: "2026-07-10T00:00:00.000Z", lastRunSummary: "Queued 1 of 1 message" });
+
+    expect(database.dueAiSchedules("2026-07-10T00:10:00.000Z")).toEqual([]);
+    expect(database.dueAiSchedules("2026-07-10T00:31:00.000Z").map((entry) => entry.id)).toEqual([schedule.id]);
+
+    const disabled = database.updateAiSchedule(schedule.id, { enabled: false });
+    expect(disabled.enabled).toBe(false);
+    expect(database.dueAiSchedules("2026-07-10T01:00:00.000Z")).toEqual([]);
+
+    database.deleteAiSchedule(schedule.id);
+    expect(database.listAiSchedules()).toEqual([]);
+
+    database.close();
+  });
+
+  it("aggregates mailbox insights: endpoints, top contacts, and AI analysis breakdown", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Insights mail",
+      sourceType: "mbox",
+      fingerprint: "insights",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    database.completeArchive(archive.id, 0);
+
+    const empty = database.getAdminInsights();
+    expect(empty).toMatchObject({ totalMessages: 0, totalAttachments: 0, analysis: null });
+    expect(empty.endpoints).toEqual({ oldest: null, newest: null });
+
+    const oldestId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "oldest",
+      internetMessageId: null,
+      subject: "First contact",
+      sender: { name: "Vendor A", address: "vendor-a@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2020-01-01T00:00:00.000Z",
+      receivedAt: "2020-01-01T00:00:00.000Z",
+      bodyText: "oldest",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 10,
+      attachments: []
+    });
+    database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "middle",
+      internetMessageId: null,
+      subject: "Second contact",
+      sender: { name: "Vendor A", address: "vendor-a@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2021-01-01T00:00:00.000Z",
+      receivedAt: "2021-01-01T00:00:00.000Z",
+      bodyText: "middle",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 10,
+      attachments: []
+    });
+    const newestId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "newest",
+      internetMessageId: null,
+      subject: "Third contact",
+      sender: { name: "Vendor B", address: "vendor-b@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2022-01-01T00:00:00.000Z",
+      receivedAt: "2022-01-01T00:00:00.000Z",
+      bodyText: "newest",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 10,
+      attachments: []
+    });
+
+    database.upsertMessageAnalysis({
+      messageId: oldestId,
+      summary: "Needs review",
+      categories: ["Finance", "Vendor"],
+      priority: "high",
+      actionRequired: true,
+      actionSummary: "Pay invoice",
+      spamProbability: 0.1,
+      phishingProbability: 0.05,
+      draftRecommended: false,
+      confidence: 0.9,
+      signals: [],
+      model: "test-model",
+      promptVersion: "test-v1",
+      contentHash: "hash-1"
+    });
+    database.upsertMessageAnalysis({
+      messageId: newestId,
+      summary: "Likely spam",
+      categories: ["Finance"],
+      priority: "low",
+      actionRequired: false,
+      actionSummary: null,
+      spamProbability: 0.9,
+      phishingProbability: 0.8,
+      draftRecommended: true,
+      confidence: 0.6,
+      signals: [],
+      model: "test-model",
+      promptVersion: "test-v1",
+      contentHash: "hash-2"
+    });
+
+    const insights = database.getAdminInsights();
+    expect(insights.totalMessages).toBe(3);
+    expect(insights.endpoints.oldest).toMatchObject({ id: oldestId, subject: "First contact", date: "2020-01-01T00:00:00.000Z" });
+    expect(insights.endpoints.newest).toMatchObject({ id: newestId, subject: "Third contact", date: "2022-01-01T00:00:00.000Z" });
+    expect(insights.topSenders).toEqual([
+      { address: "vendor-a@example.test", name: "Vendor A", count: 2 },
+      { address: "vendor-b@example.test", name: "Vendor B", count: 1 }
+    ]);
+    expect(insights.topRecipients).toEqual([
+      { address: "owner@example.test", name: "Owner", count: 3 }
+    ]);
+    expect(insights.analysis).toMatchObject({
+      analyzedCount: 2,
+      priorityBreakdown: { low: 1, normal: 0, high: 1, urgent: 0 },
+      actionRequiredCount: 1,
+      draftRecommendedCount: 1,
+      flaggedSpamCount: 1,
+      flaggedPhishingCount: 1
+    });
+    expect(insights.analysis?.topCategories).toEqual(expect.arrayContaining([
+      { category: "Finance", count: 2 },
+      { category: "Vendor", count: 1 }
+    ]));
+    expect(insights.analysis?.averageSpamProbability).toBeCloseTo(0.5, 5);
+
     database.close();
   });
 });
@@ -635,6 +1017,34 @@ function insertDatedMessage(
     sentAt,
     receivedAt,
     bodyText: "ordering-marker",
+    bodyHtml: null,
+    headers: {},
+    sizeBytes: 25,
+    attachments: []
+  });
+}
+
+function insertSenderMessage(
+  database: EmailDatabase,
+  archiveId: string,
+  folderId: string,
+  sourceKey: string,
+  senderName: string,
+  senderAddress: string
+): string {
+  return database.insertMessage({
+    archiveId,
+    folderId,
+    sourceKey,
+    internetMessageId: null,
+    subject: sourceKey,
+    sender: { name: senderName, address: senderAddress },
+    to: [],
+    cc: [],
+    bcc: [],
+    sentAt: "2026-07-15T12:00:00.000Z",
+    receivedAt: "2026-07-15T12:00:00.000Z",
+    bodyText: "sender-rule-marker",
     bodyHtml: null,
     headers: {},
     sizeBytes: 25,

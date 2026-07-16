@@ -22,7 +22,10 @@ describe("GmailDialog", () => {
         onLoadFolders={onLoadFolders}
         onConnect={onConnect}
         onSync={vi.fn()}
+        onFullSync={vi.fn()}
         onCancel={vi.fn()}
+        onReorganize={vi.fn()}
+        onReauthorize={vi.fn()}
         onCompose={vi.fn()}
         onDisconnect={vi.fn()}
       />
@@ -33,7 +36,7 @@ describe("GmailDialog", () => {
     expect(screen.getByRole("heading", { name: "Add another Gmail account" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "New mailbox" }).getAttribute("aria-pressed")).toBe("true");
 
-    fireEvent.change(screen.getByLabelText("New mailbox name"), { target: { value: "Second account" } });
+    fireEvent.change(screen.getByLabelText("New local folder name"), { target: { value: "Second account" } });
     fireEvent.click(screen.getByRole("button", { name: "Add Gmail account" }));
     expect(onConnect).toHaveBeenLastCalledWith(expect.objectContaining({
       archiveId: ARCHIVES[0]!.id,
@@ -52,7 +55,7 @@ describe("GmailDialog", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "New archive" }));
     fireEvent.change(screen.getByLabelText("Archive name"), { target: { value: "Personal Gmail" } });
-    fireEvent.change(screen.getByLabelText("First mailbox"), { target: { value: "Inbox" } });
+    fireEvent.change(screen.getByLabelText("Local folder name"), { target: { value: "Inbox" } });
     fireEvent.click(screen.getByRole("button", { name: "Add Gmail account" }));
     expect(onConnect).toHaveBeenLastCalledWith(expect.objectContaining({
       archiveId: null,
@@ -60,6 +63,65 @@ describe("GmailDialog", () => {
       archiveName: "Personal Gmail",
       folderName: "Inbox"
     }));
+  });
+
+  it("lets an existing connection be reauthorized in one click", () => {
+    const onReauthorize = vi.fn();
+    render(
+      <GmailDialog
+        open
+        archives={ARCHIVES}
+        selectedArchiveId={ARCHIVES[0]!.id}
+        connections={CONNECTIONS}
+        loading={false}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onLoadFolders={vi.fn().mockResolvedValue(FOLDERS)}
+        onConnect={vi.fn()}
+        onSync={vi.fn()}
+        onFullSync={vi.fn()}
+        onCancel={vi.fn()}
+        onReorganize={vi.fn()}
+        onReauthorize={onReauthorize}
+        onCompose={vi.fn()}
+        onDisconnect={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reauthorize first@example.test" }));
+    expect(onReauthorize).toHaveBeenCalledWith(CONNECTIONS[0]);
+  });
+
+  it("triggers a full sync for a connection after confirming", () => {
+    const onFullSync = vi.fn();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(
+      <GmailDialog
+        open
+        archives={ARCHIVES}
+        selectedArchiveId={ARCHIVES[0]!.id}
+        connections={CONNECTIONS}
+        loading={false}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onLoadFolders={vi.fn().mockResolvedValue(FOLDERS)}
+        onConnect={vi.fn()}
+        onSync={vi.fn()}
+        onFullSync={onFullSync}
+        onCancel={vi.fn()}
+        onReorganize={vi.fn()}
+        onReauthorize={vi.fn()}
+        onCompose={vi.fn()}
+        onDisconnect={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Sync all mail and folders for first@example.test" }));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(onFullSync).toHaveBeenCalledWith(CONNECTIONS[0]!.id);
+    confirmSpy.mockRestore();
   });
 });
 
@@ -99,6 +161,7 @@ function gmailConnection(id: string, email: string, folderId: string, folderPath
     query: "newer_than:30d",
     ocrEnabled: false,
     canSend: true,
+    canManageCalendar: false,
     status: "connected",
     processedItems: 0,
     totalItems: null,

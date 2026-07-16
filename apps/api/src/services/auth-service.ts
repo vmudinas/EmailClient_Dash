@@ -122,6 +122,10 @@ export class AuthService {
     this.database.revokeAuthSession(sessionId);
   }
 
+  revokeViewerSessions(): void {
+    this.database.revokeSessionsByRole("viewer");
+  }
+
   listUsers(): UserSummary[] {
     return this.database.listUsers();
   }

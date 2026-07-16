@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 export interface StoredBlob {
   sha256: string;
@@ -55,7 +55,10 @@ export class BlobStore {
 
   resolve(relativePath: string): string {
     const absolute = resolve(this.rootDir, relativePath);
-    if (!absolute.startsWith(`${this.rootDir}/`) && absolute !== this.rootDir) {
+    // path.relative + isAbsolute is separator-agnostic, unlike a hardcoded "/" prefix
+    // check, which never matches on Windows where resolve() joins with "\".
+    const fromRoot = relative(this.rootDir, absolute);
+    if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
       throw new Error("Invalid blob path");
     }
     return absolute;

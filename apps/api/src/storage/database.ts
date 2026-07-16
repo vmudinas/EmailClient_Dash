@@ -4,8 +4,18 @@ import { dirname, resolve } from "node:path";
 import BetterSqlite3, { type Database as SqliteDatabase } from "better-sqlite3";
 import type {
   AccountRole,
+  AdminInsights,
+  AiAgentSkillId,
+  AiJobTask,
   AiJob,
   AiJobStatus,
+  AiPriority,
+  AiProviderId,
+  AiSchedule,
+  AiScheduleCreate,
+  AiScheduleMode,
+  AiScheduleTask,
+  AiScheduleUpdate,
   AiUsageSummary,
   Archive,
   ArchiveMergeResult,
@@ -17,6 +27,10 @@ import type {
   DiagnosticCategory,
   DiagnosticEvent,
   DiagnosticLevel,
+  EmailDraft,
+  EmailDraftCreate,
+  EmailDraftSource,
+  EmailDraftUpdate,
   EmailAddress,
   Folder,
   GmailConnection,
@@ -32,9 +46,16 @@ import type {
   MessageAnalysis,
   MessageAnalysisOutput,
   MessageSummary,
+  ResumeAsset,
   SearchFilters,
   SearchHit,
+  SenderFilingRule,
+  SenderFilingStatus,
   SessionRole,
+  TodoCreate,
+  TodoItem,
+  TodoPatch,
+  TopContact,
   UploadSession,
   UploadStatus,
   UserSummary
@@ -117,6 +138,7 @@ export interface GmailConnectionCreateInput {
   query: string;
   ocrEnabled: boolean;
   canSend: boolean;
+  canManageCalendar: boolean;
   refreshToken: string;
   accessToken?: string | null;
   accessTokenExpiresAt?: string | null;
@@ -234,10 +256,47 @@ export interface AuditQuery {
 export interface AiJobCreateInput {
   id?: string;
   messageId: string;
+  task?: AiJobTask;
+  scheduleId?: string | null;
+  gmailConnectionId?: string | null;
+  resumeId?: string | null;
+  provider: AiProviderId;
   model: string;
+  skills: AiAgentSkillId[];
+  prompt: string;
   promptVersion: string;
   contentHash: string;
   maxAttempts?: number;
+}
+
+export interface ResumeAssetCreateInput {
+  id?: string;
+  name: string;
+  filename: string;
+  contentType: string;
+  blob: StoredBlob;
+}
+
+export interface ResumeAssetRecord extends ResumeAsset {
+  sha256: string;
+  relativePath: string;
+}
+
+export interface AutomatedDraftCreateInput {
+  connectionId: string;
+  sourceMessageId: string;
+  scheduleId: string;
+  fromAddress?: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  bodyText: string;
+  resumeId?: string | null;
+  workRelated: boolean;
+  developmentOpportunity: boolean;
+  aiReason: string;
+  aiConfidence: number;
 }
 
 export interface MessageAnalysisUpsertInput extends MessageAnalysisOutput {
@@ -771,6 +830,220 @@ export class EmailDatabase {
         });
       }
     }
+
+    const calendarScopeVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (calendarScopeVersion < 11) {
+      const hasCalendarColumn = (this.db.pragma("table_info(gmail_connections)") as Array<{ name: string }>)
+        .some((column) => column.name === "can_manage_calendar");
+      if (!hasCalendarColumn) {
+        this.db.exec("ALTER TABLE gmail_connections ADD COLUMN can_manage_calendar INTEGER NOT NULL DEFAULT 0;");
+      }
+      this.db.pragma("user_version = 11");
+    }
+
+    const todosVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (todosVersion < 12) {
+      const hasTodosTable = this.db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'todos'"
+      ).get();
+      if (!hasTodosTable) {
+        this.db.exec(`
+          CREATE TABLE todos (
+            id TEXT PRIMARY KEY,
+            todo_date TEXT NOT NULL,
+            text TEXT NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE INDEX todos_date_idx ON todos(todo_date, position);
+        `);
+      }
+      this.db.pragma("user_version = 12");
+    }
+
+    const aiScheduleVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (aiScheduleVersion < 13) {
+      const hasAiSchedulesTable = this.db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_schedules'"
+      ).get();
+      if (!hasAiSchedulesTable) {
+        this.db.exec(`
+          CREATE TABLE ai_schedules (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            folder_id TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK(mode IN ('all', 'unread')),
+            interval_minutes INTEGER NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_run_at TEXT,
+            last_run_summary TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE CASCADE
+          );
+          CREATE INDEX ai_schedules_folder_idx ON ai_schedules(folder_id);
+        `);
+      }
+      this.db.pragma("user_version = 13");
+    }
+
+    const aiAgentConfigVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (aiAgentConfigVersion < 14) {
+      const columns = (table: string) => new Set(
+        (this.db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
+      );
+      const jobColumns = columns("ai_jobs");
+      if (!jobColumns.has("provider")) this.db.exec("ALTER TABLE ai_jobs ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai';");
+      if (!jobColumns.has("skills_json")) this.db.exec("ALTER TABLE ai_jobs ADD COLUMN skills_json TEXT NOT NULL DEFAULT '[]';");
+      if (!jobColumns.has("prompt")) this.db.exec("ALTER TABLE ai_jobs ADD COLUMN prompt TEXT NOT NULL DEFAULT '';");
+
+      const scheduleColumns = columns("ai_schedules");
+      if (!scheduleColumns.has("provider")) this.db.exec("ALTER TABLE ai_schedules ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai';");
+      if (!scheduleColumns.has("model")) this.db.exec("ALTER TABLE ai_schedules ADD COLUMN model TEXT NOT NULL DEFAULT 'gpt-5.6-luna';");
+      if (!scheduleColumns.has("skills_json")) {
+        this.db.exec("ALTER TABLE ai_schedules ADD COLUMN skills_json TEXT NOT NULL DEFAULT '[\"summarize\",\"categorize\",\"prioritize\",\"extract-actions\",\"detect-spam\",\"detect-phishing\",\"recommend-draft\"]';");
+      }
+      if (!scheduleColumns.has("prompt")) this.db.exec("ALTER TABLE ai_schedules ADD COLUMN prompt TEXT NOT NULL DEFAULT '';");
+      this.db.pragma("user_version = 14");
+    }
+
+    const draftAutomationVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (draftAutomationVersion < 15) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS resume_assets (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          content_type TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS resume_assets_created_idx ON resume_assets(created_at DESC);
+      `);
+
+      const scheduleColumns = new Set(
+        (this.db.pragma("table_info(ai_schedules)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!scheduleColumns.has("task")) this.db.exec("ALTER TABLE ai_schedules ADD COLUMN task TEXT NOT NULL DEFAULT 'analyze';");
+      if (!scheduleColumns.has("message_id")) this.db.exec("ALTER TABLE ai_schedules ADD COLUMN message_id TEXT;");
+      if (!scheduleColumns.has("gmail_connection_id")) this.db.exec("ALTER TABLE ai_schedules ADD COLUMN gmail_connection_id TEXT;");
+      if (!scheduleColumns.has("resume_id")) this.db.exec("ALTER TABLE ai_schedules ADD COLUMN resume_id TEXT;");
+
+      this.db.pragma("foreign_keys = OFF");
+      try {
+        this.db.exec(`
+          DROP INDEX IF EXISTS ai_jobs_message_idx;
+          DROP INDEX IF EXISTS ai_jobs_status_idx;
+          DROP INDEX IF EXISTS ai_jobs_active_message_idx;
+          ALTER TABLE ai_jobs RENAME TO ai_jobs_v14;
+          CREATE TABLE ai_jobs (
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            task TEXT NOT NULL DEFAULT 'analyze' CHECK(task IN ('analyze', 'draft_reply')),
+            schedule_id TEXT,
+            gmail_connection_id TEXT,
+            resume_id TEXT,
+            status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+            provider TEXT NOT NULL DEFAULT 'openai',
+            model TEXT NOT NULL,
+            skills_json TEXT NOT NULL DEFAULT '[]',
+            prompt TEXT NOT NULL DEFAULT '',
+            prompt_version TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 2,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+          );
+          INSERT INTO ai_jobs (
+            id, message_id, task, status, provider, model, skills_json, prompt,
+            prompt_version, content_hash, attempts, max_attempts, error,
+            created_at, updated_at, started_at, completed_at
+          )
+          SELECT id, message_id, task, status, provider, model, skills_json, prompt,
+            prompt_version, content_hash, attempts, max_attempts, error,
+            created_at, updated_at, started_at, completed_at
+          FROM ai_jobs_v14;
+          DROP TABLE ai_jobs_v14;
+          CREATE INDEX ai_jobs_message_idx ON ai_jobs(message_id, task, created_at DESC);
+          CREATE INDEX ai_jobs_status_idx ON ai_jobs(status, created_at);
+          CREATE UNIQUE INDEX ai_jobs_active_message_idx
+            ON ai_jobs(message_id, task)
+            WHERE status IN ('queued', 'running');
+        `);
+      } finally {
+        this.db.pragma("foreign_keys = ON");
+      }
+
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS email_drafts (
+          id TEXT PRIMARY KEY,
+          connection_id TEXT NOT NULL,
+          source_message_id TEXT,
+          schedule_id TEXT,
+          source TEXT NOT NULL CHECK(source IN ('manual', 'ai')),
+          from_address TEXT,
+          to_json TEXT NOT NULL DEFAULT '[]',
+          cc_json TEXT NOT NULL DEFAULT '[]',
+          bcc_json TEXT NOT NULL DEFAULT '[]',
+          subject TEXT NOT NULL DEFAULT '',
+          body_text TEXT NOT NULL DEFAULT '',
+          resume_id TEXT,
+          work_related INTEGER,
+          development_opportunity INTEGER,
+          ai_reason TEXT,
+          ai_confidence REAL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(connection_id) REFERENCES gmail_connections(id) ON DELETE CASCADE,
+          FOREIGN KEY(source_message_id) REFERENCES messages(id) ON DELETE SET NULL,
+          FOREIGN KEY(schedule_id) REFERENCES ai_schedules(id) ON DELETE SET NULL,
+          FOREIGN KEY(resume_id) REFERENCES resume_assets(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS email_drafts_updated_idx ON email_drafts(updated_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS email_drafts_schedule_message_idx
+          ON email_drafts(schedule_id, source_message_id)
+          WHERE schedule_id IS NOT NULL AND source_message_id IS NOT NULL;
+        PRAGMA user_version = 15;
+      `);
+    }
+
+    const senderFilingVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (senderFilingVersion < 16) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS sender_filing_rules (
+          id TEXT PRIMARY KEY,
+          archive_id TEXT NOT NULL,
+          sender_address TEXT NOT NULL,
+          sender_name TEXT,
+          folder_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(archive_id) REFERENCES archives(id) ON DELETE CASCADE,
+          FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE CASCADE,
+          UNIQUE(archive_id, sender_address)
+        );
+        CREATE INDEX IF NOT EXISTS sender_filing_rules_archive_idx
+          ON sender_filing_rules(archive_id, created_at);
+        CREATE TABLE IF NOT EXISTS sender_filing_runs (
+          archive_id TEXT PRIMARY KEY,
+          moved_messages INTEGER NOT NULL DEFAULT 0,
+          created_folders INTEGER NOT NULL DEFAULT 0,
+          ran_at TEXT NOT NULL,
+          FOREIGN KEY(archive_id) REFERENCES archives(id) ON DELETE CASCADE
+        );
+        PRAGMA user_version = 16;
+      `);
+    }
   }
 
   private moveUndatedMessagesToDedicatedFolders(): number {
@@ -1015,6 +1288,12 @@ export class EmailDatabase {
     return this.db.prepare(`
       UPDATE auth_sessions SET revoked_at = ? WHERE revoked_at IS NULL
     `).run(new Date().toISOString()).changes;
+  }
+
+  revokeSessionsByRole(role: SessionRole): number {
+    return this.db.prepare(`
+      UPDATE auth_sessions SET revoked_at = ? WHERE effective_role = ? AND revoked_at IS NULL
+    `).run(new Date().toISOString(), role).changes;
   }
 
   purgeExpiredSessions(): number {
@@ -1527,13 +1806,21 @@ export class EmailDatabase {
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO ai_jobs (
-        id, message_id, task, status, model, prompt_version, content_hash,
+        id, message_id, task, schedule_id, gmail_connection_id, resume_id,
+        status, provider, model, skills_json, prompt, prompt_version, content_hash,
         attempts, max_attempts, created_at, updated_at
-      ) VALUES (?, ?, 'analyze', 'queued', ?, ?, ?, 0, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       id,
       input.messageId,
+      input.task ?? "analyze",
+      input.scheduleId ?? null,
+      input.gmailConnectionId ?? null,
+      input.resumeId ?? null,
+      input.provider,
       input.model,
+      JSON.stringify(input.skills),
+      input.prompt,
       input.promptVersion,
       input.contentHash,
       input.maxAttempts ?? 2,
@@ -1548,20 +1835,25 @@ export class EmailDatabase {
     return row ? this.mapAiJob(row) : null;
   }
 
-  getActiveAiJob(messageId: string): AiJob | null {
+  getActiveAiJob(messageId: string, task: AiJobTask = "analyze"): AiJob | null {
     const row = this.db.prepare(`
       SELECT * FROM ai_jobs
-      WHERE message_id = ? AND status IN ('queued', 'running')
+      WHERE message_id = ? AND task = ? AND status IN ('queued', 'running')
       ORDER BY created_at DESC LIMIT 1
-    `).get(messageId) as Row | undefined;
+    `).get(messageId, task) as Row | undefined;
     return row ? this.mapAiJob(row) : null;
   }
 
-  getLatestAiJob(messageId: string): AiJob | null {
-    const row = this.db.prepare(`
-      SELECT * FROM ai_jobs WHERE message_id = ?
-      ORDER BY created_at DESC LIMIT 1
-    `).get(messageId) as Row | undefined;
+  getLatestAiJob(messageId: string, task: AiJobTask = "analyze", scheduleId?: string): AiJob | null {
+    const row = scheduleId
+      ? this.db.prepare(`
+          SELECT * FROM ai_jobs WHERE message_id = ? AND task = ? AND schedule_id = ?
+          ORDER BY created_at DESC LIMIT 1
+        `).get(messageId, task, scheduleId) as Row | undefined
+      : this.db.prepare(`
+          SELECT * FROM ai_jobs WHERE message_id = ? AND task = ?
+          ORDER BY created_at DESC LIMIT 1
+        `).get(messageId, task) as Row | undefined;
     return row ? this.mapAiJob(row) : null;
   }
 
@@ -1751,6 +2043,674 @@ export class EmailDatabase {
     );
   }
 
+  listAiSchedules(): AiSchedule[] {
+    return (this.db.prepare(`
+      SELECT s.*, f.path AS folder_path, f.archive_id AS archive_id, a.name AS archive_name,
+        m.subject AS message_subject, gc.email AS gmail_connection_email, r.name AS resume_name
+      FROM ai_schedules s
+      JOIN folders f ON f.id = s.folder_id
+      JOIN archives a ON a.id = f.archive_id
+      LEFT JOIN messages m ON m.id = s.message_id
+      LEFT JOIN gmail_connections gc ON gc.id = s.gmail_connection_id
+      LEFT JOIN resume_assets r ON r.id = s.resume_id
+      ORDER BY s.created_at DESC
+    `).all() as Row[]).map((row) => this.mapAiSchedule(row));
+  }
+
+  getAiSchedule(id: string): AiSchedule | null {
+    const row = this.db.prepare(`
+      SELECT s.*, f.path AS folder_path, f.archive_id AS archive_id, a.name AS archive_name,
+        m.subject AS message_subject, gc.email AS gmail_connection_email, r.name AS resume_name
+      FROM ai_schedules s
+      JOIN folders f ON f.id = s.folder_id
+      JOIN archives a ON a.id = f.archive_id
+      LEFT JOIN messages m ON m.id = s.message_id
+      LEFT JOIN gmail_connections gc ON gc.id = s.gmail_connection_id
+      LEFT JOIN resume_assets r ON r.id = s.resume_id
+      WHERE s.id = ?
+    `).get(id) as Row | undefined;
+    return row ? this.mapAiSchedule(row) : null;
+  }
+
+  createAiSchedule(input: AiScheduleCreate): AiSchedule {
+    this.validateAiScheduleTargets({
+      folderId: input.folderId,
+      task: input.task ?? "analyze",
+      messageId: input.messageId ?? null,
+      gmailConnectionId: input.gmailConnectionId ?? null,
+      resumeId: input.resumeId ?? null
+    });
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO ai_schedules (
+        id, name, task, folder_id, message_id, gmail_connection_id, resume_id,
+        mode, interval_minutes, provider, model, skills_json, prompt,
+        enabled, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.name,
+      input.task ?? "analyze",
+      input.folderId,
+      input.messageId ?? null,
+      input.gmailConnectionId ?? null,
+      input.resumeId ?? null,
+      input.mode,
+      input.intervalMinutes,
+      input.provider,
+      input.model,
+      JSON.stringify(input.skills),
+      input.prompt,
+      input.enabled ? 1 : 0,
+      now,
+      now
+    );
+    return this.getAiSchedule(id)!;
+  }
+
+  updateAiSchedule(id: string, input: AiScheduleUpdate): AiSchedule {
+    const existing = this.getAiSchedule(id);
+    if (!existing) throw new Error("Schedule not found");
+    this.validateAiScheduleTargets({
+      folderId: input.folderId ?? existing.folderId,
+      task: input.task ?? existing.task,
+      messageId: input.messageId === undefined ? existing.messageId : input.messageId,
+      gmailConnectionId: input.gmailConnectionId === undefined
+        ? existing.gmailConnectionId
+        : input.gmailConnectionId,
+      resumeId: input.resumeId === undefined ? existing.resumeId : input.resumeId
+    });
+    const columns: string[] = [];
+    const values: unknown[] = [];
+    const set = (column: string, value: unknown) => {
+      columns.push(`${column} = ?`);
+      values.push(value);
+    };
+    if (input.name !== undefined) set("name", input.name);
+    if (input.task !== undefined) set("task", input.task);
+    if (input.folderId !== undefined) set("folder_id", input.folderId);
+    if (input.messageId !== undefined) set("message_id", input.messageId);
+    if (input.gmailConnectionId !== undefined) set("gmail_connection_id", input.gmailConnectionId);
+    if (input.resumeId !== undefined) set("resume_id", input.resumeId);
+    if (input.mode !== undefined) set("mode", input.mode);
+    if (input.intervalMinutes !== undefined) set("interval_minutes", input.intervalMinutes);
+    if (input.provider !== undefined) set("provider", input.provider);
+    if (input.model !== undefined) set("model", input.model);
+    if (input.skills !== undefined) set("skills_json", JSON.stringify(input.skills));
+    if (input.prompt !== undefined) set("prompt", input.prompt);
+    if (input.enabled !== undefined) set("enabled", input.enabled ? 1 : 0);
+    set("updated_at", new Date().toISOString());
+    values.push(id);
+    this.db.prepare(`UPDATE ai_schedules SET ${columns.join(", ")} WHERE id = ?`).run(...values);
+    return this.getAiSchedule(id)!;
+  }
+
+  deleteAiSchedule(id: string): void {
+    this.db.prepare("DELETE FROM ai_schedules WHERE id = ?").run(id);
+  }
+
+  recordAiScheduleRun(id: string, ranAt: string, summary: string): void {
+    this.db.prepare(`
+      UPDATE ai_schedules SET last_run_at = ?, last_run_summary = ?, updated_at = ? WHERE id = ?
+    `).run(ranAt, summary, new Date().toISOString(), id);
+  }
+
+  dueAiSchedules(now: string): AiSchedule[] {
+    return this.listAiSchedules().filter((schedule) => {
+      if (!schedule.enabled) return false;
+      if (!schedule.lastRunAt) return true;
+      const dueAt = new Date(schedule.lastRunAt).getTime() + schedule.intervalMinutes * 60_000;
+      return new Date(now).getTime() >= dueAt;
+    });
+  }
+
+  listMessageIdsForSchedule(folderId: string, mode: AiScheduleMode): string[] {
+    if (mode === "unread") {
+      return (this.db.prepare(`
+        SELECT m.id FROM messages m
+        JOIN message_state s ON s.message_id = m.id
+        WHERE m.folder_id = ? AND s.is_read = 0
+        ORDER BY m.received_at DESC, m.sent_at DESC
+      `).all(folderId) as Row[]).map((row) => String(row.id));
+    }
+    return (this.db.prepare(`
+      SELECT id FROM messages WHERE folder_id = ? ORDER BY received_at DESC, sent_at DESC
+    `).all(folderId) as Row[]).map((row) => String(row.id));
+  }
+
+  listResumeAssets(): ResumeAsset[] {
+    return (this.db.prepare("SELECT * FROM resume_assets ORDER BY created_at DESC").all() as Row[])
+      .map((row) => this.mapResumeAsset(row));
+  }
+
+  getResumeAsset(id: string): ResumeAsset | null {
+    const row = this.db.prepare("SELECT * FROM resume_assets WHERE id = ?").get(id) as Row | undefined;
+    return row ? this.mapResumeAsset(row) : null;
+  }
+
+  getResumeAssetRecord(id: string): ResumeAssetRecord | null {
+    const row = this.db.prepare("SELECT * FROM resume_assets WHERE id = ?").get(id) as Row | undefined;
+    return row ? this.mapResumeAssetRecord(row) : null;
+  }
+
+  createResumeAsset(input: ResumeAssetCreateInput): ResumeAsset {
+    const id = input.id ?? randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO resume_assets (
+        id, name, filename, content_type, sha256, relative_path, size_bytes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.name,
+      input.filename,
+      input.contentType,
+      input.blob.sha256,
+      input.blob.relativePath,
+      input.blob.sizeBytes,
+      now,
+      now
+    );
+    return this.getResumeAsset(id)!;
+  }
+
+  deleteResumeAsset(id: string): ResumeAssetRecord | null {
+    const existing = this.getResumeAssetRecord(id);
+    if (!existing) return null;
+    const remove = this.db.transaction(() => {
+      this.db.prepare("UPDATE ai_schedules SET resume_id = NULL, updated_at = ? WHERE resume_id = ?")
+        .run(new Date().toISOString(), id);
+      this.db.prepare("DELETE FROM resume_assets WHERE id = ?").run(id);
+    });
+    remove();
+    return existing;
+  }
+
+  isBlobPathReferenced(relativePath: string): boolean {
+    return Boolean(
+      this.db.prepare("SELECT 1 FROM resume_assets WHERE relative_path = ? LIMIT 1").get(relativePath)
+      || this.db.prepare(`
+        SELECT 1 FROM attachments a
+        JOIN blobs b ON b.sha256 = a.blob_sha256
+        WHERE b.relative_path = ? LIMIT 1
+      `).get(relativePath)
+    );
+  }
+
+  listEmailDrafts(): EmailDraft[] {
+    return (this.db.prepare(`${this.emailDraftSelect()} ORDER BY d.updated_at DESC`).all() as Row[])
+      .map((row) => this.mapEmailDraft(row));
+  }
+
+  getEmailDraft(id: string): EmailDraft | null {
+    const row = this.db.prepare(`${this.emailDraftSelect()} WHERE d.id = ?`).get(id) as Row | undefined;
+    return row ? this.mapEmailDraft(row) : null;
+  }
+
+  getAutomatedDraft(scheduleId: string, sourceMessageId: string): EmailDraft | null {
+    const row = this.db.prepare(`${this.emailDraftSelect()}
+      WHERE d.schedule_id = ? AND d.source_message_id = ?
+    `).get(scheduleId, sourceMessageId) as Row | undefined;
+    return row ? this.mapEmailDraft(row) : null;
+  }
+
+  createEmailDraft(input: EmailDraftCreate): EmailDraft {
+    this.validateEmailDraftTargets(input.connectionId, input.sourceMessageId ?? null, input.resumeId ?? null);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO email_drafts (
+        id, connection_id, source_message_id, source, from_address, to_json, cc_json, bcc_json,
+        subject, body_text, resume_id, created_at, updated_at
+      ) VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.connectionId,
+      input.sourceMessageId ?? null,
+      input.fromAddress ?? null,
+      JSON.stringify(input.to),
+      JSON.stringify(input.cc),
+      JSON.stringify(input.bcc),
+      input.subject,
+      input.bodyText,
+      input.resumeId ?? null,
+      now,
+      now
+    );
+    return this.getEmailDraft(id)!;
+  }
+
+  createAutomatedDraft(input: AutomatedDraftCreateInput): EmailDraft {
+    this.validateEmailDraftTargets(input.connectionId, input.sourceMessageId, input.resumeId ?? null);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO email_drafts (
+        id, connection_id, source_message_id, schedule_id, source, from_address,
+        to_json, cc_json, bcc_json, subject, body_text, resume_id,
+        work_related, development_opportunity, ai_reason, ai_confidence, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'ai', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.connectionId,
+      input.sourceMessageId,
+      input.scheduleId,
+      input.fromAddress ?? null,
+      JSON.stringify(input.to),
+      JSON.stringify(input.cc),
+      JSON.stringify(input.bcc),
+      input.subject,
+      input.bodyText,
+      input.resumeId ?? null,
+      input.workRelated ? 1 : 0,
+      input.developmentOpportunity ? 1 : 0,
+      input.aiReason,
+      input.aiConfidence,
+      now,
+      now
+    );
+    const draft = this.getAutomatedDraft(input.scheduleId, input.sourceMessageId);
+    if (!draft) throw new Error("Automated draft could not be created");
+    return draft;
+  }
+
+  updateEmailDraft(id: string, input: EmailDraftUpdate): EmailDraft {
+    const existing = this.getEmailDraft(id);
+    if (!existing) throw new Error("Draft not found");
+    const connectionId = input.connectionId ?? existing.connectionId;
+    const resumeId = input.resumeId === undefined ? existing.resumeId : input.resumeId;
+    this.validateEmailDraftTargets(connectionId, existing.sourceMessageId, resumeId);
+    const columns: string[] = [];
+    const values: unknown[] = [];
+    const set = (column: string, value: unknown) => {
+      columns.push(`${column} = ?`);
+      values.push(value);
+    };
+    if (input.connectionId !== undefined) set("connection_id", input.connectionId);
+    if (input.to !== undefined) set("to_json", JSON.stringify(input.to));
+    if (input.cc !== undefined) set("cc_json", JSON.stringify(input.cc));
+    if (input.bcc !== undefined) set("bcc_json", JSON.stringify(input.bcc));
+    if (input.subject !== undefined) set("subject", input.subject);
+    if (input.bodyText !== undefined) set("body_text", input.bodyText);
+    if (input.fromAddress !== undefined) set("from_address", input.fromAddress);
+    if (input.resumeId !== undefined) set("resume_id", input.resumeId);
+    set("updated_at", new Date().toISOString());
+    values.push(id);
+    this.db.prepare(`UPDATE email_drafts SET ${columns.join(", ")} WHERE id = ?`).run(...values);
+    return this.getEmailDraft(id)!;
+  }
+
+  deleteEmailDraft(id: string): EmailDraft | null {
+    const existing = this.getEmailDraft(id);
+    if (!existing) return null;
+    this.db.prepare("DELETE FROM email_drafts WHERE id = ?").run(id);
+    return existing;
+  }
+
+  private emailDraftSelect(): string {
+    return `
+      SELECT d.*, gc.email AS connection_email, m.subject AS source_message_subject,
+        s.name AS schedule_name, r.name AS resume_name, r.filename AS resume_filename
+      FROM email_drafts d
+      JOIN gmail_connections gc ON gc.id = d.connection_id
+      LEFT JOIN messages m ON m.id = d.source_message_id
+      LEFT JOIN ai_schedules s ON s.id = d.schedule_id
+      LEFT JOIN resume_assets r ON r.id = d.resume_id
+    `;
+  }
+
+  private validateEmailDraftTargets(
+    connectionId: string,
+    sourceMessageId: string | null,
+    resumeId: string | null
+  ): void {
+    const connection = this.db.prepare("SELECT can_send FROM gmail_connections WHERE id = ?")
+      .get(connectionId) as Row | undefined;
+    if (!connection) throw new Error("Gmail connection not found");
+    if (!connection.can_send) throw new Error("The selected Gmail account does not have send permission");
+    if (sourceMessageId && !this.db.prepare("SELECT 1 FROM messages WHERE id = ?").get(sourceMessageId)) {
+      throw new Error("Source email not found");
+    }
+    if (resumeId && !this.db.prepare("SELECT 1 FROM resume_assets WHERE id = ?").get(resumeId)) {
+      throw new Error("Resume not found");
+    }
+  }
+
+  private validateAiScheduleTargets(input: {
+    folderId: string;
+    task: AiScheduleTask;
+    messageId: string | null;
+    gmailConnectionId: string | null;
+    resumeId: string | null;
+  }): void {
+    const folder = this.db.prepare("SELECT id FROM folders WHERE id = ?").get(input.folderId);
+    if (!folder) throw new Error("Mailbox not found");
+    if (input.messageId) {
+      const message = this.db.prepare("SELECT id FROM messages WHERE id = ? AND folder_id = ?")
+        .get(input.messageId, input.folderId);
+      if (!message) throw new Error("Selected email is not in this mailbox");
+    }
+    if (input.task === "draft_reply") {
+      if (!input.gmailConnectionId) throw new Error("Choose a Gmail sending account for draft tasks");
+      const connection = this.db.prepare("SELECT can_send FROM gmail_connections WHERE id = ?")
+        .get(input.gmailConnectionId) as Row | undefined;
+      if (!connection) throw new Error("Gmail connection not found");
+      if (!connection.can_send) throw new Error("The selected Gmail account does not have send permission");
+    }
+    if (input.resumeId && !this.db.prepare("SELECT 1 FROM resume_assets WHERE id = ?").get(input.resumeId)) {
+      throw new Error("Resume not found");
+    }
+  }
+
+  getAdminInsights(): AdminInsights {
+    const totalMessages = Number((this.db.prepare("SELECT COUNT(*) AS count FROM messages").get() as Row).count);
+    const totalAttachments = Number((this.db.prepare("SELECT COUNT(*) AS count FROM attachments").get() as Row).count);
+
+    const oldestRow = this.db.prepare(`
+      SELECT id, subject, sender_name, sender_address, COALESCE(sent_at, received_at) AS effective_date
+      FROM messages
+      WHERE COALESCE(sent_at, received_at) IS NOT NULL
+      ORDER BY effective_date ASC LIMIT 1
+    `).get() as Row | undefined;
+    const newestRow = this.db.prepare(`
+      SELECT id, subject, sender_name, sender_address, COALESCE(sent_at, received_at) AS effective_date
+      FROM messages
+      WHERE COALESCE(sent_at, received_at) IS NOT NULL
+      ORDER BY effective_date DESC LIMIT 1
+    `).get() as Row | undefined;
+
+    const topSenders = (this.db.prepare(`
+      SELECT sender_address AS address, MAX(sender_name) AS name, COUNT(*) AS count
+      FROM messages
+      WHERE sender_address != ''
+      GROUP BY sender_address
+      ORDER BY count DESC
+      LIMIT 10
+    `).all() as Row[]).map((row) => this.mapTopContact(row));
+
+    const topRecipients = (this.db.prepare(`
+      SELECT
+        json_extract(je.value, '$.address') AS address,
+        MAX(json_extract(je.value, '$.name')) AS name,
+        COUNT(*) AS count
+      FROM messages m, json_each(m.to_json) je
+      WHERE json_extract(je.value, '$.address') IS NOT NULL AND json_extract(je.value, '$.address') != ''
+      GROUP BY address
+      ORDER BY count DESC
+      LIMIT 10
+    `).all() as Row[]).map((row) => this.mapTopContact(row));
+
+    const analyzedCount = Number(
+      (this.db.prepare("SELECT COUNT(*) AS count FROM ai_message_analysis").get() as Row).count
+    );
+    let analysis: AdminInsights["analysis"] = null;
+    if (analyzedCount > 0) {
+      const priorityRows = this.db.prepare(`
+        SELECT priority, COUNT(*) AS count FROM ai_message_analysis GROUP BY priority
+      `).all() as Row[];
+      const priorityBreakdown: Record<AiPriority, number> = { low: 0, normal: 0, high: 0, urgent: 0 };
+      for (const row of priorityRows) {
+        const priority = row.priority as AiPriority;
+        if (priority in priorityBreakdown) priorityBreakdown[priority] = Number(row.count);
+      }
+      const topCategories = (this.db.prepare(`
+        SELECT je.value AS category, COUNT(*) AS count
+        FROM ai_message_analysis a, json_each(a.categories_json) je
+        GROUP BY category
+        ORDER BY count DESC
+        LIMIT 10
+      `).all() as Row[]).map((row) => ({ category: String(row.category), count: Number(row.count) }));
+      const actionRequiredCount = Number((this.db.prepare(
+        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE action_required = 1"
+      ).get() as Row).count);
+      const draftRecommendedCount = Number((this.db.prepare(
+        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE draft_recommended = 1"
+      ).get() as Row).count);
+      const flaggedSpamCount = Number((this.db.prepare(
+        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE spam_probability >= 0.5"
+      ).get() as Row).count);
+      const flaggedPhishingCount = Number((this.db.prepare(
+        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE phishing_probability >= 0.5"
+      ).get() as Row).count);
+      const averages = this.db.prepare(`
+        SELECT AVG(spam_probability) AS avg_spam, AVG(phishing_probability) AS avg_phishing
+        FROM ai_message_analysis
+      `).get() as Row;
+      analysis = {
+        analyzedCount,
+        priorityBreakdown,
+        topCategories,
+        actionRequiredCount,
+        draftRecommendedCount,
+        flaggedSpamCount,
+        flaggedPhishingCount,
+        averageSpamProbability: Number(averages.avg_spam ?? 0),
+        averagePhishingProbability: Number(averages.avg_phishing ?? 0)
+      };
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      totalMessages,
+      totalAttachments,
+      endpoints: {
+        oldest: oldestRow ? {
+          id: String(oldestRow.id),
+          subject: String(oldestRow.subject),
+          senderName: oldestRow.sender_name ? String(oldestRow.sender_name) : null,
+          senderAddress: String(oldestRow.sender_address),
+          date: String(oldestRow.effective_date)
+        } : null,
+        newest: newestRow ? {
+          id: String(newestRow.id),
+          subject: String(newestRow.subject),
+          senderName: newestRow.sender_name ? String(newestRow.sender_name) : null,
+          senderAddress: String(newestRow.sender_address),
+          date: String(newestRow.effective_date)
+        } : null
+      },
+      topSenders,
+      topRecipients,
+      analysis
+    };
+  }
+
+  getSenderFilingStatus(archiveId: string): SenderFilingStatus {
+    const archive = this.db.prepare("SELECT id, name FROM archives WHERE id = ?")
+      .get(archiveId) as Row | undefined;
+    if (!archive) throw new Error("Archive not found");
+
+    const rules = (this.db.prepare(`
+      SELECT r.*, f.path AS folder_path,
+        (
+          SELECT COUNT(*) FROM messages m
+          WHERE m.archive_id = r.archive_id
+            AND m.folder_id = r.folder_id
+            AND lower(trim(m.sender_address)) = r.sender_address
+        ) AS live_message_count
+      FROM sender_filing_rules r
+      JOIN folders f ON f.id = r.folder_id
+      WHERE r.archive_id = ?
+      ORDER BY live_message_count DESC, r.sender_address COLLATE NOCASE
+    `).all(archiveId) as Row[]).map((row): SenderFilingRule => ({
+      id: String(row.id),
+      archiveId: String(row.archive_id),
+      senderAddress: String(row.sender_address),
+      senderName: row.sender_name ? String(row.sender_name) : null,
+      folderId: String(row.folder_id),
+      folderPath: String(row.folder_path),
+      messageCount: Number(row.live_message_count),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    }));
+    const run = this.db.prepare("SELECT * FROM sender_filing_runs WHERE archive_id = ?")
+      .get(archiveId) as Row | undefined;
+
+    return {
+      archiveId,
+      archiveName: String(archive.name),
+      enabled: rules.length > 0,
+      rules,
+      lastRunAt: run ? String(run.ran_at) : null,
+      lastRunMovedMessages: Number(run?.moved_messages ?? 0),
+      lastRunCreatedFolders: Number(run?.created_folders ?? 0)
+    };
+  }
+
+  organizeTopSenderFolders(archiveId: string, limit = 20): SenderFilingStatus {
+    const ruleLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
+    const organize = this.db.transaction(() => {
+      const archive = this.db.prepare("SELECT status FROM archives WHERE id = ?")
+        .get(archiveId) as Row | undefined;
+      if (!archive) throw new Error("Archive not found");
+      if (!["ready", "ready_with_errors"].includes(String(archive.status))) {
+        throw new Error("Wait for the archive import to finish before organizing senders");
+      }
+      if (this.hasActiveGmailSync([archiveId])) {
+        throw new Error("Wait for Gmail sync to finish before organizing senders");
+      }
+
+      const existingRuleCount = Number((this.db.prepare(`
+        SELECT COUNT(*) AS count FROM sender_filing_rules WHERE archive_id = ?
+      `).get(archiveId) as Row).count);
+      const availableRuleCount = Math.max(0, ruleLimit - existingRuleCount);
+      const candidates = availableRuleCount === 0 ? [] : this.db.prepare(`
+        SELECT
+          lower(trim(m.sender_address)) AS sender_address,
+          MAX(NULLIF(trim(m.sender_name), '')) AS sender_name,
+          COUNT(*) AS message_count
+        FROM messages m
+        JOIN folders f ON f.id = m.folder_id
+        WHERE m.archive_id = ?
+          AND lower(trim(f.name)) = 'inbox'
+          AND trim(m.sender_address) != ''
+          AND NOT EXISTS (
+            SELECT 1 FROM sender_filing_rules r
+            WHERE r.archive_id = m.archive_id
+              AND r.sender_address = lower(trim(m.sender_address))
+          )
+        GROUP BY lower(trim(m.sender_address))
+        ORDER BY message_count DESC, sender_address COLLATE NOCASE
+        LIMIT ?
+      `).all(archiveId, availableRuleCount) as Row[];
+
+      let createdFolders = 0;
+      if (candidates.length > 0) {
+        let root = this.db.prepare(`
+          SELECT id, path FROM folders
+          WHERE archive_id = ? AND parent_id IS NULL AND lower(path) = lower(?)
+          LIMIT 1
+        `).get(archiveId, "Top Senders") as Row | undefined;
+        if (!root) {
+          const id = randomUUID();
+          this.db.prepare(`
+            INSERT INTO folders (id, archive_id, parent_id, name, path)
+            VALUES (?, ?, NULL, ?, ?)
+          `).run(id, archiveId, "Top Senders", "Top Senders");
+          root = { id, path: "Top Senders" };
+          createdFolders += 1;
+        }
+
+        const rootId = String(root.id);
+        const rootPath = String(root.path);
+        const usedPaths = new Set(
+          (this.db.prepare("SELECT path FROM folders WHERE archive_id = ?").all(archiveId) as Row[])
+            .map((row) => String(row.path).toLowerCase())
+        );
+        const now = new Date().toISOString();
+
+        for (const candidate of candidates) {
+          const senderAddress = String(candidate.sender_address);
+          const senderName = candidate.sender_name ? String(candidate.sender_name) : null;
+          const folderName = uniqueSenderFolderName(rootPath, senderName, senderAddress, usedPaths);
+          const folderPath = `${rootPath}/${folderName}`;
+          const folderId = randomUUID();
+          this.db.prepare(`
+            INSERT INTO folders (id, archive_id, parent_id, name, path)
+            VALUES (?, ?, ?, ?, ?)
+          `).run(folderId, archiveId, rootId, folderName, folderPath);
+          this.db.prepare(`
+            INSERT INTO sender_filing_rules (
+              id, archive_id, sender_address, sender_name, folder_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(randomUUID(), archiveId, senderAddress, senderName, folderId, now, now);
+          usedPaths.add(folderPath.toLowerCase());
+          createdFolders += 1;
+        }
+      }
+
+      let movedMessages = 0;
+      const rules = this.db.prepare(`
+        SELECT r.sender_address, r.folder_id, f.path AS folder_path
+        FROM sender_filing_rules r
+        JOIN folders f ON f.id = r.folder_id
+        WHERE r.archive_id = ?
+      `).all(archiveId) as Row[];
+      for (const rule of rules) {
+        const senderAddress = String(rule.sender_address);
+        const targetFolderId = String(rule.folder_id);
+        const targetFolderPath = String(rule.folder_path);
+        this.db.prepare(`
+          UPDATE message_fts SET folder = ?
+          WHERE message_id IN (
+            SELECT m.id FROM messages m
+            JOIN folders source_folder ON source_folder.id = m.folder_id
+            WHERE m.archive_id = ?
+              AND lower(trim(source_folder.name)) = 'inbox'
+              AND lower(trim(m.sender_address)) = ?
+              AND m.folder_id != ?
+          )
+        `).run(targetFolderPath, archiveId, senderAddress, targetFolderId);
+        movedMessages += this.db.prepare(`
+          UPDATE messages SET folder_id = ?
+          WHERE archive_id = ?
+            AND lower(trim(sender_address)) = ?
+            AND folder_id != ?
+            AND folder_id IN (
+              SELECT id FROM folders WHERE archive_id = ? AND lower(trim(name)) = 'inbox'
+            )
+        `).run(targetFolderId, archiveId, senderAddress, targetFolderId, archiveId).changes;
+      }
+
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE archive_id = ?
+      `).run(archiveId);
+      this.db.prepare(`
+        UPDATE archives SET
+          message_count = (SELECT COUNT(*) FROM messages WHERE archive_id = archives.id),
+          folder_count = (SELECT COUNT(*) FROM folders WHERE archive_id = archives.id),
+          attachment_count = (
+            SELECT COUNT(*) FROM attachments a
+            JOIN messages m ON m.id = a.message_id
+            WHERE m.archive_id = archives.id
+          )
+        WHERE id = ?
+      `).run(archiveId);
+      this.db.prepare(`
+        INSERT INTO sender_filing_runs (archive_id, moved_messages, created_folders, ran_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(archive_id) DO UPDATE SET
+          moved_messages = excluded.moved_messages,
+          created_folders = excluded.created_folders,
+          ran_at = excluded.ran_at
+      `).run(archiveId, movedMessages, createdFolders, new Date().toISOString());
+    });
+
+    organize();
+    return this.getSenderFilingStatus(archiveId);
+  }
+
+  clearSenderFilingRules(archiveId: string): SenderFilingStatus {
+    if (!this.db.prepare("SELECT 1 FROM archives WHERE id = ?").get(archiveId)) {
+      throw new Error("Archive not found");
+    }
+    this.db.prepare("DELETE FROM sender_filing_rules WHERE archive_id = ?").run(archiveId);
+    return this.getSenderFilingStatus(archiveId);
+  }
+
   createGmailConnection(input: GmailConnectionCreateInput): GmailConnection {
     const now = new Date().toISOString();
     const create = this.db.transaction(() => {
@@ -1771,7 +2731,8 @@ export class EmailDatabase {
         this.db.prepare(`
           UPDATE gmail_connections SET
             query = ?, ocr_enabled = ?, refresh_token = ?, access_token = ?,
-            access_token_expires_at = ?, can_send = ?, status = 'connected', last_error = NULL,
+            access_token_expires_at = ?, can_send = ?, can_manage_calendar = ?,
+            status = 'connected', last_error = NULL,
             updated_at = ?
           WHERE id = ?
         `).run(
@@ -1781,6 +2742,7 @@ export class EmailDatabase {
           input.accessToken ?? null,
           input.accessTokenExpiresAt ?? null,
           input.canSend ? 1 : 0,
+          input.canManageCalendar ? 1 : 0,
           now,
           id
         );
@@ -1789,8 +2751,8 @@ export class EmailDatabase {
           INSERT INTO gmail_connections (
             id, email, archive_id, folder_id, query, ocr_enabled,
             refresh_token, access_token, access_token_expires_at,
-            can_send, status, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?)
+            can_send, can_manage_calendar, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?)
         `).run(
           id,
           input.email,
@@ -1802,6 +2764,7 @@ export class EmailDatabase {
           input.accessToken ?? null,
           input.accessTokenExpiresAt ?? null,
           input.canSend ? 1 : 0,
+          input.canManageCalendar ? 1 : 0,
           now,
           now
         );
@@ -1862,6 +2825,7 @@ export class EmailDatabase {
       importedItems?: number;
       lastSyncedAt?: string | null;
       lastError?: string | null;
+      query?: string;
     }
   ): GmailConnection {
     const columns: string[] = [];
@@ -1876,6 +2840,7 @@ export class EmailDatabase {
     if (update.importedItems !== undefined) set("imported_items", update.importedItems);
     if (update.lastSyncedAt !== undefined) set("last_synced_at", update.lastSyncedAt);
     if (update.lastError !== undefined) set("last_error", update.lastError);
+    if (update.query !== undefined) set("query", update.query);
     set("updated_at", new Date().toISOString());
     values.push(id);
     const result = this.db.prepare(`
@@ -1888,7 +2853,15 @@ export class EmailDatabase {
   deleteGmailConnection(id: string): GmailConnectionRecord | null {
     const connection = this.getGmailConnectionRecord(id);
     if (!connection) return null;
-    this.db.prepare("DELETE FROM gmail_connections WHERE id = ?").run(id);
+    const remove = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE ai_schedules
+        SET gmail_connection_id = NULL, enabled = 0, updated_at = ?
+        WHERE gmail_connection_id = ?
+      `).run(new Date().toISOString(), id);
+      this.db.prepare("DELETE FROM gmail_connections WHERE id = ?").run(id);
+    });
+    remove();
     return connection;
   }
 
@@ -2113,8 +3086,25 @@ export class EmailDatabase {
     const now = new Date().toISOString();
     const allRecipients = [...input.to, ...input.cc, ...input.bcc];
     const recipientsText = allRecipients.map(addressToText).join(" ");
-    const folder = this.getFolder(input.folderId);
-    if (!folder) throw new Error(`Folder ${input.folderId} not found`);
+    const requestedFolder = this.getFolder(input.folderId);
+    if (!requestedFolder) throw new Error(`Folder ${input.folderId} not found`);
+    if (requestedFolder.archiveId !== input.archiveId) {
+      throw new Error("Message folder does not belong to the archive");
+    }
+    const senderAddress = input.sender.address.trim().toLowerCase();
+    const matchingRule = requestedFolder.name.trim().toLowerCase() === "inbox" && senderAddress
+      ? this.db.prepare(`
+          SELECT r.folder_id FROM sender_filing_rules r
+          JOIN folders f ON f.id = r.folder_id
+          WHERE r.archive_id = ? AND r.sender_address = ? AND f.archive_id = ?
+          LIMIT 1
+        `).get(input.archiveId, senderAddress, input.archiveId) as Row | undefined
+      : undefined;
+    const effectiveFolderId = matchingRule ? String(matchingRule.folder_id) : input.folderId;
+    const folder = effectiveFolderId === input.folderId
+      ? requestedFolder
+      : this.getFolder(effectiveFolderId);
+    if (!folder) throw new Error("Sender rule mailbox not found");
 
     const insert = this.db.transaction(() => {
       const result = this.db.prepare(`
@@ -2127,7 +3117,7 @@ export class EmailDatabase {
       `).run(
         id,
         input.archiveId,
-        input.folderId,
+        effectiveFolderId,
         input.sourceKey,
         input.internetMessageId,
         input.subject,
@@ -2200,7 +3190,7 @@ export class EmailDatabase {
 
       this.db.prepare(`
         UPDATE folders SET message_count = message_count + 1 WHERE id = ?
-      `).run(input.folderId);
+      `).run(effectiveFolderId);
       return id;
     });
 
@@ -2726,6 +3716,117 @@ export class EmailDatabase {
     };
   }
 
+  /**
+   * Moves the messages identified by `sourceKeys` into `targetFolderId`, wherever in the
+   * archive they currently live. Used to backfill messages imported before a folder
+   * routing change (e.g. Gmail label mirroring) into their correct mailbox.
+   */
+  reassignMessagesToFolder(archiveId: string, sourceKeys: string[], targetFolderId: string): number {
+    if (sourceKeys.length === 0) return 0;
+    const reassign = this.db.transaction(() => {
+      const target = this.db.prepare("SELECT id, path FROM folders WHERE id = ? AND archive_id = ?")
+        .get(targetFolderId, archiveId) as Row | undefined;
+      if (!target) throw new Error("Target mailbox not found");
+
+      const placeholders = sourceKeys.map(() => "?").join(", ");
+      const touchedFolders = this.db.prepare(`
+        SELECT DISTINCT folder_id FROM messages
+        WHERE archive_id = ? AND source_key IN (${placeholders}) AND folder_id != ?
+      `).all(archiveId, ...sourceKeys, targetFolderId) as Row[];
+      if (touchedFolders.length === 0) return 0;
+
+      const changed = this.db.prepare(`
+        UPDATE messages SET folder_id = ?
+        WHERE archive_id = ? AND source_key IN (${placeholders}) AND folder_id != ?
+      `).run(targetFolderId, archiveId, ...sourceKeys, targetFolderId).changes;
+
+      this.db.prepare(`
+        UPDATE message_fts SET folder = ?
+        WHERE message_id IN (
+          SELECT id FROM messages WHERE archive_id = ? AND source_key IN (${placeholders})
+        )
+      `).run(String(target.path), archiveId, ...sourceKeys);
+
+      const touchedFolderIds = [...new Set([
+        ...touchedFolders.map((row) => String(row.folder_id)),
+        targetFolderId
+      ])];
+      const touchedPlaceholders = touchedFolderIds.map(() => "?").join(", ");
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE id IN (${touchedPlaceholders})
+      `).run(...touchedFolderIds);
+
+      return changed;
+    });
+    return reassign();
+  }
+
+  /**
+   * Moves every message currently in `sourceFolderId` into `targetFolderId`, without
+   * deleting the source folder (unlike mergeFolders, which is for user-initiated mailbox
+   * combining). Used as the catch-all step of a Gmail folder backfill: whatever remains in
+   * a connection's own root folder after label-matched messages have been moved out.
+   */
+  reassignAllMessagesInFolder(sourceFolderId: string, targetFolderId: string): number {
+    if (sourceFolderId === targetFolderId) return 0;
+    const reassign = this.db.transaction(() => {
+      const target = this.db.prepare("SELECT path FROM folders WHERE id = ?").get(targetFolderId) as Row | undefined;
+      if (!target) throw new Error("Target mailbox not found");
+
+      const changed = this.db.prepare(`
+        UPDATE messages SET folder_id = ? WHERE folder_id = ?
+      `).run(targetFolderId, sourceFolderId).changes;
+      if (changed === 0) return 0;
+
+      this.db.prepare(`
+        UPDATE message_fts SET folder = ?
+        WHERE message_id IN (SELECT id FROM messages WHERE folder_id = ?)
+      `).run(String(target.path), targetFolderId);
+
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE id IN (?, ?)
+      `).run(sourceFolderId, targetFolderId);
+
+      return changed;
+    });
+    return reassign();
+  }
+
+  /**
+   * Moves a single message to a different mailbox within the same archive (e.g. the
+   * message reader's "Move to" action). Messages cannot be moved across archives, matching
+   * every other mailbox operation in this store.
+   */
+  moveMessage(messageId: string, targetFolderId: string): void {
+    const move = this.db.transaction(() => {
+      const message = this.db.prepare("SELECT archive_id, folder_id FROM messages WHERE id = ?")
+        .get(messageId) as Row | undefined;
+      if (!message) throw new Error("Message not found");
+      const target = this.db.prepare("SELECT id, archive_id, path FROM folders WHERE id = ?")
+        .get(targetFolderId) as Row | undefined;
+      if (!target) throw new Error("Target mailbox not found");
+      if (String(target.archive_id) !== String(message.archive_id)) {
+        throw new Error("Messages can only be moved within the same archive");
+      }
+      const sourceFolderId = String(message.folder_id);
+      if (sourceFolderId === targetFolderId) return;
+
+      this.db.prepare("UPDATE messages SET folder_id = ? WHERE id = ?").run(targetFolderId, messageId);
+      this.db.prepare("UPDATE message_fts SET folder = ? WHERE message_id = ?")
+        .run(String(target.path), messageId);
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE id IN (?, ?)
+      `).run(sourceFolderId, targetFolderId);
+    });
+    move();
+  }
+
   deleteArchive(id: string): string[] {
     const orphanedPaths: string[] = [];
     const remove = this.db.transaction(() => {
@@ -2916,9 +4017,15 @@ export class EmailDatabase {
     return {
       id: String(row.id),
       messageId: String(row.message_id),
-      task: "analyze",
+      task: row.task as AiJobTask,
+      scheduleId: row.schedule_id ? String(row.schedule_id) : null,
+      gmailConnectionId: row.gmail_connection_id ? String(row.gmail_connection_id) : null,
+      resumeId: row.resume_id ? String(row.resume_id) : null,
       status: row.status as AiJobStatus,
+      provider: row.provider as AiProviderId,
       model: String(row.model),
+      skills: parseJson<AiAgentSkillId[]>(row.skills_json, []),
+      prompt: String(row.prompt ?? ""),
       promptVersion: String(row.prompt_version),
       contentHash: String(row.content_hash),
       attempts: Number(row.attempts),
@@ -2953,6 +4060,97 @@ export class EmailDatabase {
     };
   }
 
+  private mapAiSchedule(row: Row): AiSchedule {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      task: row.task as AiScheduleTask,
+      folderId: String(row.folder_id),
+      folderPath: String(row.folder_path),
+      archiveId: String(row.archive_id),
+      archiveName: String(row.archive_name),
+      messageId: row.message_id ? String(row.message_id) : null,
+      messageSubject: row.message_subject ? String(row.message_subject) : null,
+      gmailConnectionId: row.gmail_connection_id ? String(row.gmail_connection_id) : null,
+      gmailConnectionEmail: row.gmail_connection_email ? String(row.gmail_connection_email) : null,
+      resumeId: row.resume_id ? String(row.resume_id) : null,
+      resumeName: row.resume_name ? String(row.resume_name) : null,
+      mode: row.mode as AiScheduleMode,
+      intervalMinutes: Number(row.interval_minutes),
+      provider: row.provider as AiProviderId,
+      model: String(row.model),
+      skills: parseJson<AiAgentSkillId[]>(row.skills_json, []),
+      prompt: String(row.prompt ?? ""),
+      enabled: Boolean(row.enabled),
+      lastRunAt: row.last_run_at ? String(row.last_run_at) : null,
+      lastRunSummary: row.last_run_summary ? String(row.last_run_summary) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    };
+  }
+
+  private mapResumeAsset(row: Row): ResumeAsset {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      filename: String(row.filename),
+      contentType: String(row.content_type),
+      sizeBytes: Number(row.size_bytes),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    };
+  }
+
+  private mapResumeAssetRecord(row: Row): ResumeAssetRecord {
+    return {
+      ...this.mapResumeAsset(row),
+      sha256: String(row.sha256),
+      relativePath: String(row.relative_path)
+    };
+  }
+
+  private mapEmailDraft(row: Row): EmailDraft {
+    return {
+      id: String(row.id),
+      connectionId: String(row.connection_id),
+      connectionEmail: String(row.connection_email),
+      sourceMessageId: row.source_message_id ? String(row.source_message_id) : null,
+      sourceMessageSubject: row.source_message_subject ? String(row.source_message_subject) : null,
+      scheduleId: row.schedule_id ? String(row.schedule_id) : null,
+      scheduleName: row.schedule_name ? String(row.schedule_name) : null,
+      source: row.source as EmailDraftSource,
+      fromAddress: row.from_address ? String(row.from_address) : null,
+      to: parseJson<string[]>(row.to_json, []),
+      cc: parseJson<string[]>(row.cc_json, []),
+      bcc: parseJson<string[]>(row.bcc_json, []),
+      subject: String(row.subject ?? ""),
+      bodyText: String(row.body_text ?? ""),
+      resumeId: row.resume_id ? String(row.resume_id) : null,
+      resumeName: row.resume_name ? String(row.resume_name) : null,
+      resumeFilename: row.resume_filename ? String(row.resume_filename) : null,
+      workRelated: row.work_related === null || row.work_related === undefined
+        ? null
+        : Boolean(row.work_related),
+      developmentOpportunity: row.development_opportunity === null || row.development_opportunity === undefined
+        ? null
+        : Boolean(row.development_opportunity),
+      aiReason: row.ai_reason ? String(row.ai_reason) : null,
+      aiConfidence: row.ai_confidence === null || row.ai_confidence === undefined
+        ? null
+        : Number(row.ai_confidence),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    };
+  }
+
+  private mapTopContact(row: Row): TopContact {
+    return {
+      address: String(row.address),
+      name: row.name ? String(row.name) : null,
+      count: Number(row.count)
+    };
+  }
+
   private mapGmailConnection(row: Row): GmailConnection {
     return {
       id: String(row.id),
@@ -2964,6 +4162,7 @@ export class EmailDatabase {
       query: String(row.query ?? ""),
       ocrEnabled: Boolean(row.ocr_enabled),
       canSend: Boolean(row.can_send),
+      canManageCalendar: Boolean(row.can_manage_calendar),
       status: row.status as GmailConnectionStatus,
       processedItems: Number(row.processed_items),
       totalItems: row.total_items === null || row.total_items === undefined
@@ -3032,6 +4231,64 @@ export class EmailDatabase {
       contentId: row.content_id ? String(row.content_id) : null,
       disposition: row.disposition === "inline" ? "inline" : "attachment",
       textStatus: row.text_status as Attachment["textStatus"]
+    };
+  }
+
+  listTodos(startDate: string, endDate: string): TodoItem[] {
+    return (this.db.prepare(`
+      SELECT * FROM todos
+      WHERE todo_date BETWEEN ? AND ?
+      ORDER BY todo_date, position, created_at
+    `).all(startDate, endDate) as Row[]).map((row) => this.mapTodo(row));
+  }
+
+  createTodo(input: TodoCreate): TodoItem {
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    const nextPosition = this.db.prepare(
+      "SELECT COALESCE(MAX(position), -1) + 1 AS next FROM todos WHERE todo_date = ?"
+    ).get(input.date) as Row;
+    this.db.prepare(`
+      INSERT INTO todos (id, todo_date, text, completed, position, created_at, updated_at)
+      VALUES (?, ?, ?, 0, ?, ?, ?)
+    `).run(id, input.date, input.text.trim(), Number(nextPosition.next), now, now);
+    return this.getTodo(id)!;
+  }
+
+  updateTodo(id: string, patch: TodoPatch): TodoItem {
+    const existing = this.getTodo(id);
+    if (!existing) throw new Error("To-do item not found");
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE todos SET text = ?, completed = ?, position = ?, updated_at = ? WHERE id = ?
+    `).run(
+      patch.text !== undefined ? patch.text.trim() : existing.text,
+      patch.completed !== undefined ? (patch.completed ? 1 : 0) : (existing.completed ? 1 : 0),
+      patch.position !== undefined ? patch.position : existing.position,
+      now,
+      id
+    );
+    return this.getTodo(id)!;
+  }
+
+  deleteTodo(id: string): void {
+    this.db.prepare("DELETE FROM todos WHERE id = ?").run(id);
+  }
+
+  private getTodo(id: string): TodoItem | null {
+    const row = this.db.prepare("SELECT * FROM todos WHERE id = ?").get(id) as Row | undefined;
+    return row ? this.mapTodo(row) : null;
+  }
+
+  private mapTodo(row: Row): TodoItem {
+    return {
+      id: String(row.id),
+      date: String(row.todo_date),
+      text: String(row.text),
+      completed: Boolean(row.completed),
+      position: Number(row.position),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
     };
   }
 }
@@ -3111,6 +4368,36 @@ function decodeOffset(cursor?: string): number {
   } catch {
     return 0;
   }
+}
+
+function uniqueSenderFolderName(
+  rootPath: string,
+  senderName: string | null,
+  senderAddress: string,
+  usedPaths: Set<string>
+): string {
+  const base = safeSenderFolderName(senderName || senderAddress);
+  let candidate = base;
+  if (!usedPaths.has(`${rootPath}/${candidate}`.toLowerCase())) return candidate;
+
+  const addressSuffix = safeSenderFolderName(senderAddress);
+  candidate = `${base.slice(0, Math.max(1, 96 - addressSuffix.length))} — ${addressSuffix}`;
+  let suffix = 2;
+  while (usedPaths.has(`${rootPath}/${candidate}`.toLowerCase())) {
+    const numberedSuffix = ` (${suffix})`;
+    candidate = `${base.slice(0, Math.max(1, 100 - numberedSuffix.length))}${numberedSuffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function safeSenderFolderName(value: string): string {
+  const cleaned = value
+    .replace(/[\/\\\u0000-\u001f\u007f]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 100);
+  return cleaned || "Unknown sender";
 }
 
 export function toFtsQuery(value: string): string {

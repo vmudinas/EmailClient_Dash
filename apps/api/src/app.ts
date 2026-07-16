@@ -10,24 +10,38 @@ import Fastify, {
   type FastifyRequest
 } from "fastify";
 import {
+  AI_PROVIDER_IDS,
+  aiActiveProviderSchema,
+  aiScheduleCreateSchema,
+  aiScheduleUpdateSchema,
   aiSettingsPatchSchema,
   archiveMergeSchema,
   authLoginSchema,
+  calendarEventInputSchema,
   clientDiagnosticSchema,
   databaseSettingsPatchSchema,
   displayNamePatchSchema,
+  emailDraftCreateSchema,
+  emailDraftUpdateSchema,
   gmailAuthRequestSchema,
   gmailSettingsPatchSchema,
   gmailSendRequestSchema,
+  gmailSyncRequestSchema,
   importOptionsSchema,
   localMessageStatePatchSchema,
   mailboxCreateSchema,
   mailboxMergeSchema,
+  messageMoveSchema,
   pinChangeSchema,
+  senderFilingArchiveSchema,
+  todoCreateSchema,
+  todoPatchSchema,
   uploadSessionCreateSchema,
   userCreateSchema,
   userUpdateSchema,
   type AdminSettings,
+  type AiJob,
+  type AiProviderId,
   type DiagnosticCategory,
   type DiagnosticLevel,
   type ImportOptions,
@@ -58,6 +72,12 @@ import {
   GmailPermissionError,
   GmailService
 } from "./services/gmail-service.js";
+import { CalendarService } from "./services/calendar-service.js";
+import {
+  DraftNotFoundError,
+  DraftService,
+  DraftValidationError
+} from "./services/draft-service.js";
 import {
   GmailSettingsManagedError,
   GmailSettingsManager
@@ -68,8 +88,14 @@ import {
   AiMessageNotFoundError,
   AiService
 } from "./services/ai-service.js";
+import { AiScheduleService } from "./services/ai-schedule-service.js";
 import {
-  AiSettingsManagedError,
+  ResumeNotFoundError,
+  ResumeService,
+  ResumeValidationError
+} from "./services/resume-service.js";
+import {
+  AI_PROVIDER_INFO,
   AiSettingsManager
 } from "./services/ai-settings.js";
 import {
@@ -79,6 +105,15 @@ import {
 } from "./services/upload-service.js";
 
 type Role = "viewer" | "local" | "admin";
+
+// The API and its served UI are same-origin in every real launch mode (npm start,
+// production Electron, LAN-shared pages), so browsers never send an Origin header for
+// them. The one legitimate cross-origin caller is the Electron renderer in `npm run
+// dev:desktop`, which loads the Vite dev server (127.0.0.1:5173) while talking to this
+// API directly. Reflecting every Origin (the previous behavior) would let any website
+// open in the same browser call /api/auth/login and steal the bearer token, which is
+// especially dangerous while the first-run admin/2332 PIN is still active.
+const ALLOWED_CORS_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"];
 
 export interface StartedApi {
   runtime: EmailApiRuntime;
@@ -97,8 +132,12 @@ export class EmailApiRuntime {
   readonly imports: ImportService;
   readonly gmail: GmailService;
   readonly gmailSettings: GmailSettingsManager;
+  readonly calendar: CalendarService;
+  readonly resumes: ResumeService;
+  readonly drafts: DraftService;
   readonly ai: AiService;
   readonly aiSettings: AiSettingsManager;
+  readonly aiSchedules: AiScheduleService;
   readonly uploads: UploadService;
   readonly adminToken = randomToken();
   readonly localToken = randomToken();
@@ -122,16 +161,25 @@ export class EmailApiRuntime {
     this.imports = new ImportService(this.database, this.blobStore);
     this.gmailSettings = new GmailSettingsManager(config.dataDir, {
       clientId: config.gmailClientId,
-      clientSecret: config.gmailClientSecret
+      clientSecret: config.gmailClientSecret,
+      syncIntervalMinutes: config.gmailSyncIntervalMinutes
     });
     const gmailCredentials = this.gmailSettings.credentials();
     this.gmail = new GmailService(this.database, this.imports, {
       clientId: gmailCredentials.clientId,
       clientSecret: gmailCredentials.clientSecret,
-      redirectUri: () => `http://127.0.0.1:${this.listeningPort}/api/gmail/oauth/callback`
+      redirectUri: () => `http://127.0.0.1:${this.listeningPort}/api/gmail/oauth/callback`,
+      syncIntervalMinutes: this.gmailSettings.syncIntervalMinutes()
     });
-    this.aiSettings = new AiSettingsManager(config.dataDir, config.openAiApiKey);
+    this.calendar = new CalendarService(this.gmail);
+    this.resumes = new ResumeService(this.database, this.blobStore);
+    this.drafts = new DraftService(this.database, this.gmail, this.resumes);
+    this.aiSettings = new AiSettingsManager(config.dataDir, {
+      openai: config.openAiApiKey,
+      deepseek: config.deepSeekApiKey
+    });
     this.ai = new AiService(this.database, this.aiSettings);
+    this.aiSchedules = new AiScheduleService(this.database, this.ai);
     this.uploads = new UploadService(config.dataDir, this.database, this.imports);
   }
 
@@ -156,6 +204,7 @@ export class EmailApiRuntime {
       });
     }
     this.ai.initialize();
+    this.aiSchedules.start();
     await this.imports.initialize();
     await this.registerPlugins();
     this.registerRoutes();
@@ -185,6 +234,7 @@ export class EmailApiRuntime {
       category: "system",
       message: "Local email service shutting down"
     });
+    this.aiSchedules.close();
     await this.ai.close();
     await this.gmail.close();
     await this.imports.close();
@@ -254,6 +304,7 @@ export class EmailApiRuntime {
     if (!enabled) {
       this.shareToken = null;
       this.shareExpiresAt = null;
+      this.auth.revokeViewerSessions();
       return { enabled: false, url: null, expiresAt: null };
     }
     this.shareToken = randomToken();
@@ -278,7 +329,7 @@ export class EmailApiRuntime {
 
   private async registerPlugins(): Promise<void> {
     await this.app.register(cors, {
-      origin: true,
+      origin: ALLOWED_CORS_ORIGINS,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Authorization", "Content-Type", "X-Upload-Offset"]
     });
@@ -631,6 +682,24 @@ export class EmailApiRuntime {
       }
     });
 
+    this.app.post<{
+      Params: { messageId: string };
+      Body: unknown;
+    }>("/api/messages/:messageId/move", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = messageMoveSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: "Choose a destination mailbox" });
+      }
+      try {
+        this.database.moveMessage(request.params.messageId, parsed.data.folderId);
+        return this.database.getMessage(request.params.messageId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Message could not be moved";
+        return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+      }
+    });
+
     this.app.get<{ Params: { messageId: string } }>(
       "/api/messages/:messageId/ai",
       async (request, reply) => {
@@ -771,12 +840,16 @@ export class EmailApiRuntime {
       }
     });
 
-    this.app.post<{ Params: { connectionId: string } }>(
+    this.app.post<{ Params: { connectionId: string }; Body: unknown }>(
       "/api/gmail/connections/:connectionId/sync",
       async (request, reply) => {
         if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = gmailSyncRequestSchema.safeParse(request.body ?? {});
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid sync request" });
+        }
         try {
-          return this.gmail.startSync(request.params.connectionId);
+          return this.gmail.startSync(request.params.connectionId, { full: parsed.data.full });
         } catch (error) {
           const message = error instanceof Error ? error.message : "Gmail sync could not start";
           return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
@@ -792,6 +865,19 @@ export class EmailApiRuntime {
           return this.gmail.cancelSync(request.params.connectionId);
         } catch (error) {
           return reply.code(404).send({ error: error instanceof Error ? error.message : "Gmail connection not found" });
+        }
+      }
+    );
+
+    this.app.post<{ Params: { connectionId: string } }>(
+      "/api/gmail/connections/:connectionId/reorganize",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          return this.gmail.reorganizeFolders(request.params.connectionId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Gmail folder reorganize could not start";
+          return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
         }
       }
     );
@@ -829,6 +915,184 @@ export class EmailApiRuntime {
         }
       }
     );
+
+    this.app.get<{ Params: { connectionId: string } }>(
+      "/api/gmail/connections/:connectionId/send-as",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          return await this.gmail.listSendAsAliases(request.params.connectionId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Send-as addresses could not be loaded";
+          if (message.includes("not found")) return reply.code(404).send({ error: message });
+          if (error instanceof GmailPermissionError) return reply.code(409).send({ error: message });
+          return reply.code(502).send({ error: message });
+        }
+      }
+    );
+
+    this.app.get("/api/drafts", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      return this.drafts.list();
+    });
+
+    this.app.post<{ Body: unknown }>("/api/drafts", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = emailDraftCreateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid draft" });
+      }
+      try {
+        return this.drafts.create(parsed.data);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Draft could not be saved" });
+      }
+    });
+
+    this.app.patch<{ Params: { draftId: string }; Body: unknown }>(
+      "/api/drafts/:draftId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = emailDraftUpdateSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid draft" });
+        }
+        try {
+          return this.drafts.update(request.params.draftId, parsed.data);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Draft could not be updated";
+          return reply.code(error instanceof DraftNotFoundError ? 404 : 400).send({ error: message });
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { draftId: string } }>("/api/drafts/:draftId", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      try {
+        this.drafts.remove(request.params.draftId);
+        return reply.code(204).send();
+      } catch (error) {
+        return reply.code(404).send({ error: error instanceof Error ? error.message : "Draft not found" });
+      }
+    });
+
+    this.app.post<{ Params: { draftId: string } }>("/api/drafts/:draftId/send", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      try {
+        return await this.drafts.send(request.params.draftId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Draft could not be sent";
+        if (error instanceof DraftNotFoundError || error instanceof ResumeNotFoundError) {
+          return reply.code(404).send({ error: message });
+        }
+        if (error instanceof DraftValidationError) return reply.code(400).send({ error: message });
+        if (error instanceof GmailPermissionError) return reply.code(409).send({ error: message });
+        return reply.code(502).send({ error: message });
+      }
+    });
+
+    this.app.get<{ Params: { connectionId: string }; Querystring: { timeMin?: string; timeMax?: string } }>(
+      "/api/calendar/connections/:connectionId/events",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const timeMin = request.query.timeMin;
+        const timeMax = request.query.timeMax;
+        if (!timeMin || !timeMax) {
+          return reply.code(400).send({ error: "timeMin and timeMax query parameters are required" });
+        }
+        try {
+          return await this.calendar.listEvents(request.params.connectionId, timeMin, timeMax);
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
+    this.app.post<{ Params: { connectionId: string }; Body: unknown }>(
+      "/api/calendar/connections/:connectionId/events",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = calendarEventInputSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
+        }
+        try {
+          return await this.calendar.createEvent(request.params.connectionId, parsed.data);
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
+    this.app.patch<{ Params: { connectionId: string; eventId: string }; Body: unknown }>(
+      "/api/calendar/connections/:connectionId/events/:eventId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = calendarEventInputSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
+        }
+        try {
+          return await this.calendar.updateEvent(request.params.connectionId, request.params.eventId, parsed.data);
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { connectionId: string; eventId: string } }>(
+      "/api/calendar/connections/:connectionId/events/:eventId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          await this.calendar.deleteEvent(request.params.connectionId, request.params.eventId);
+          return reply.code(204).send();
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
+    this.app.get<{ Querystring: { start?: string; end?: string } }>("/api/todos", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const start = request.query.start;
+      const end = request.query.end;
+      if (!start || !end) {
+        return reply.code(400).send({ error: "start and end query parameters are required" });
+      }
+      return this.database.listTodos(start, end);
+    });
+
+    this.app.post<{ Body: unknown }>("/api/todos", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = todoCreateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid to-do item" });
+      }
+      return reply.code(201).send(this.database.createTodo(parsed.data));
+    });
+
+    this.app.patch<{ Params: { todoId: string }; Body: unknown }>(
+      "/api/todos/:todoId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = todoPatchSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid to-do update" });
+        }
+        try {
+          return this.database.updateTodo(request.params.todoId, parsed.data);
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "To-do item not found" });
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { todoId: string } }>("/api/todos/:todoId", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      this.database.deleteTodo(request.params.todoId);
+      return reply.code(204).send();
+    });
 
     this.app.get("/api/import-jobs", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
@@ -1007,7 +1271,7 @@ export class EmailApiRuntime {
         importJobs: this.database.listImportJobs(),
         uploads: this.database.listUploadSessions(100),
         gmailConnections: this.gmail.listConnections(),
-        aiJobs: this.database.listAiJobs(300)
+        aiJobs: this.database.listAiJobs(300).map(redactAiJobPrompt)
       };
     });
 
@@ -1021,7 +1285,7 @@ export class EmailApiRuntime {
         importJobs: this.database.listImportJobs(),
         uploads: this.database.listUploadSessions(200),
         gmailConnections: this.gmail.listConnections(),
-        aiJobs: this.database.listAiJobs(1_000)
+        aiJobs: this.database.listAiJobs(1_000).map(redactAiJobPrompt)
       };
       reply.header("Content-Type", "application/json; charset=utf-8");
       reply.header("Content-Disposition", `attachment; filename="email-client-diagnostics-${exportedAt.slice(0, 10)}.json"`);
@@ -1081,6 +1345,7 @@ export class EmailApiRuntime {
       try {
         const credentials = this.gmailSettings.update(parsed.data);
         this.gmail.configureCredentials(credentials.clientId, credentials.clientSecret);
+        this.gmail.configureSyncInterval(this.gmailSettings.syncIntervalMinutes());
         this.database.recordDiagnostic({
           level: "info",
           category: "gmail",
@@ -1110,6 +1375,7 @@ export class EmailApiRuntime {
       try {
         const credentials = this.gmailSettings.clear();
         this.gmail.configureCredentials(credentials.clientId, credentials.clientSecret);
+        this.gmail.configureSyncInterval(this.gmailSettings.syncIntervalMinutes());
         this.database.recordDiagnostic({
           level: "info",
           category: "gmail",
@@ -1142,6 +1408,7 @@ export class EmailApiRuntime {
           message: "AI configuration saved",
           context: {
             operation: "configuration_update",
+            provider: updated.provider,
             enabled: updated.enabled,
             model: updated.model,
             apiKeyConfigured: Boolean(updated.apiKey),
@@ -1151,7 +1418,6 @@ export class EmailApiRuntime {
         });
         return this.getAdminSettings();
       } catch (error) {
-        const statusCode = error instanceof AiSettingsManagedError ? 409 : 400;
         const message = error instanceof Error ? error.message : "AI settings could not be saved";
         this.database.recordDiagnostic({
           level: "error",
@@ -1160,40 +1426,247 @@ export class EmailApiRuntime {
           stack: error instanceof Error ? error.stack : null,
           context: { operation: "configuration_update" }
         });
-        return reply.code(statusCode).send({ error: message });
+        return reply.code(400).send({ error: message });
       }
     });
 
-    this.app.delete("/api/admin/settings/ai/key", async (request, reply) => {
+    this.app.post<{ Body: unknown }>("/api/admin/settings/ai/active", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = aiActiveProviderSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose a provider" });
+      }
+      const updated = this.aiSettings.setActiveProvider(parsed.data.provider);
+      this.ai.configurationChanged();
+      this.database.recordDiagnostic({
+        level: "info",
+        category: "ai",
+        message: `Active AI provider switched to ${AI_PROVIDER_INFO[updated.provider].label}`,
+        context: { operation: "configuration_active_provider", provider: updated.provider }
+      });
+      return this.getAdminSettings();
+    });
+
+    this.app.delete<{ Querystring: { provider?: string } }>("/api/admin/settings/ai/key", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const provider = parseAiProvider(request.query.provider) ?? this.aiSettings.current().provider;
+      const providerLabel = AI_PROVIDER_INFO[provider].label;
       try {
-        this.aiSettings.clearApiKey();
+        this.aiSettings.clearApiKey(provider);
         this.database.recordDiagnostic({
           level: "info",
           category: "ai",
-          message: "Saved OpenAI API key cleared",
-          context: { operation: "configuration_key_clear" }
+          message: `Saved ${providerLabel} API key cleared`,
+          context: { operation: "configuration_key_clear", provider }
         });
         return this.getAdminSettings();
       } catch (error) {
-        const statusCode = error instanceof AiSettingsManagedError ? 409 : 400;
-        return reply.code(statusCode).send({
-          error: error instanceof Error ? error.message : "OpenAI API key could not be cleared"
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : `${providerLabel} API key could not be cleared`
         });
       }
     });
 
-    this.app.post("/api/admin/settings/ai/test", async (request, reply) => {
+    this.app.post<{ Querystring: { provider?: string } }>("/api/admin/settings/ai/test", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
+      const provider = parseAiProvider(request.query.provider) ?? this.aiSettings.current().provider;
       try {
-        await this.ai.testConnection();
+        await this.ai.testConnection(provider);
         return { ok: true };
       } catch (error) {
         const statusCode = error instanceof AiConfigurationError ? 503 : 502;
+        const providerLabel = AI_PROVIDER_INFO[provider].label;
         return reply.code(statusCode).send({
-          error: error instanceof Error ? error.message : "OpenAI connection test failed"
+          error: error instanceof Error ? error.message : `${providerLabel} connection test failed`
         });
       }
+    });
+
+    this.app.get<{ Querystring: { provider?: string } }>("/api/admin/settings/ai/models", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const provider = parseAiProvider(request.query.provider);
+      if (!provider) return reply.code(400).send({ error: "Provide a valid provider" });
+      try {
+        return await this.ai.listModels(provider);
+      } catch (error) {
+        const statusCode = error instanceof AiConfigurationError ? 503 : 502;
+        return reply.code(statusCode).send({
+          error: error instanceof Error ? error.message : "Model list could not be loaded"
+        });
+      }
+    });
+
+    this.app.get("/api/admin/ai-schedules", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      return this.database.listAiSchedules();
+    });
+
+    this.app.get("/api/admin/resumes", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      return this.resumes.list();
+    });
+
+    this.app.post<{ Querystring: { filename?: string; name?: string }; Body: unknown }>(
+      "/api/admin/resumes",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!request.query.filename || !Buffer.isBuffer(request.body)) {
+          return reply.code(400).send({ error: "Choose a resume file" });
+        }
+        try {
+          return await this.resumes.upload(request.query.filename, request.body, request.query.name);
+        } catch (error) {
+          const status = error instanceof ResumeValidationError ? 400 : 500;
+          return reply.code(status).send({
+            error: error instanceof Error ? error.message : "Resume could not be uploaded"
+          });
+        }
+      }
+    );
+
+    this.app.get<{ Params: { resumeId: string } }>(
+      "/api/admin/resumes/:resumeId/download",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        try {
+          const { asset, content } = await this.resumes.read(request.params.resumeId);
+          reply.header("Content-Type", asset.contentType);
+          reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(asset.filename)}`);
+          return reply.send(content);
+        } catch (error) {
+          return reply.code(error instanceof ResumeNotFoundError ? 404 : 500).send({
+            error: error instanceof Error ? error.message : "Resume could not be downloaded"
+          });
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { resumeId: string } }>("/api/admin/resumes/:resumeId", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      try {
+        await this.resumes.remove(request.params.resumeId);
+        return reply.code(204).send();
+      } catch (error) {
+        return reply.code(error instanceof ResumeNotFoundError ? 404 : 500).send({
+          error: error instanceof Error ? error.message : "Resume could not be removed"
+        });
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/admin/ai-schedules", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = aiScheduleCreateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid AI schedule" });
+      }
+      try {
+        const schedule = this.database.createAiSchedule(parsed.data);
+        this.database.recordDiagnostic({
+          level: "info",
+          category: "ai",
+          message: `AI schedule "${schedule.name}" created`,
+          context: { operation: "schedule_create", scheduleId: schedule.id, folderId: schedule.folderId, mode: schedule.mode }
+        });
+        return schedule;
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "AI schedule could not be created" });
+      }
+    });
+
+    this.app.patch<{ Params: { scheduleId: string }; Body: unknown }>(
+      "/api/admin/ai-schedules/:scheduleId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = aiScheduleUpdateSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid AI schedule" });
+        }
+        try {
+          return this.database.updateAiSchedule(request.params.scheduleId, parsed.data);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "AI schedule could not be updated";
+          return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { scheduleId: string } }>("/api/admin/ai-schedules/:scheduleId", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      this.database.deleteAiSchedule(request.params.scheduleId);
+      return reply.code(204).send();
+    });
+
+    this.app.post<{ Params: { scheduleId: string } }>(
+      "/api/admin/ai-schedules/:scheduleId/run",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        try {
+          return await this.aiSchedules.runNow(request.params.scheduleId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "AI schedule could not run";
+          return reply.code(message.includes("not found") ? 404 : 500).send({ error: message });
+        }
+      }
+    );
+
+    this.app.get<{ Querystring: { archiveId?: string } }>("/api/admin/sender-filing", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = senderFilingArchiveSchema.safeParse({ archiveId: request.query.archiveId });
+      if (!parsed.success) return reply.code(400).send({ error: "Choose a valid archive" });
+      try {
+        return this.database.getSenderFilingStatus(parsed.data.archiveId);
+      } catch (error) {
+        return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/admin/sender-filing/organize", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = senderFilingArchiveSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: "Choose a valid archive" });
+      try {
+        const status = this.database.organizeTopSenderFolders(parsed.data.archiveId);
+        this.database.recordDiagnostic({
+          level: "info",
+          category: "system",
+          message: `Top sender organization completed for ${status.archiveName}`,
+          archiveId: status.archiveId,
+          context: {
+            operation: "sender_filing_organize",
+            ruleCount: status.rules.length,
+            movedMessages: status.lastRunMovedMessages,
+            createdFolders: status.lastRunCreatedFolders
+          }
+        });
+        return status;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Top senders could not be organized";
+        return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
+      }
+    });
+
+    this.app.delete<{ Querystring: { archiveId?: string } }>("/api/admin/sender-filing", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = senderFilingArchiveSchema.safeParse({ archiveId: request.query.archiveId });
+      if (!parsed.success) return reply.code(400).send({ error: "Choose a valid archive" });
+      try {
+        const status = this.database.clearSenderFilingRules(parsed.data.archiveId);
+        this.database.recordDiagnostic({
+          level: "info",
+          category: "system",
+          message: `Automatic sender filing disabled for ${status.archiveName}`,
+          archiveId: status.archiveId,
+          context: { operation: "sender_filing_disable" }
+        });
+        return status;
+      } catch (error) {
+        return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+      }
+    });
+
+    this.app.get("/api/admin/insights", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      return this.database.getAdminInsights();
     });
 
     this.app.get("/api/admin/users", async (request, reply) => {
@@ -1331,6 +1804,13 @@ export class EmailApiRuntime {
     return null;
   }
 
+  private calendarErrorReply(reply: FastifyReply, error: unknown): FastifyReply {
+    const message = error instanceof Error ? error.message : "Calendar request failed";
+    if (message.includes("not found")) return reply.code(404).send({ error: message });
+    if (error instanceof GmailPermissionError) return reply.code(409).send({ error: message });
+    return reply.code(502).send({ error: message });
+  }
+
   private resolveRole(request: FastifyRequest): Role | null {
     const loopback = isLoopback(request.ip);
     if (this.config.devAuthBypass && loopback) return "admin";
@@ -1448,6 +1928,10 @@ function randomToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+function redactAiJobPrompt(job: AiJob): AiJob {
+  return { ...job, prompt: job.prompt ? "[configured prompt omitted]" : "" };
+}
+
 function optionalNumber(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
@@ -1471,6 +1955,10 @@ function diagnosticCategory(value: string | undefined): DiagnosticCategory | und
     || value === "system"
     ? value
     : undefined;
+}
+
+function parseAiProvider(value: string | undefined): AiProviderId | undefined {
+  return AI_PROVIDER_IDS.includes(value as AiProviderId) ? value as AiProviderId : undefined;
 }
 
 function safeFilename(value: string): string {

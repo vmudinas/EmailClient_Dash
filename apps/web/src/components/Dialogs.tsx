@@ -5,10 +5,13 @@ import {
   Archive,
   Check,
   CircleAlert,
+  CloudDownload,
   Combine as CombineIcon,
   Download,
   Filter,
   FolderPlus,
+  FolderTree,
+  KeyRound,
   LoaderCircle,
   MailCheck,
   MonitorSmartphone,
@@ -382,8 +385,11 @@ interface GmailDialogProps {
   onLoadFolders(archiveId: string): Promise<Folder[]>;
   onConnect(request: GmailAuthRequest): void;
   onSync(connectionId: string): void;
+  onFullSync(connectionId: string): void;
   onCancel(connectionId: string): void;
+  onReorganize(connectionId: string): void;
   onCompose(connection: GmailConnection): void;
+  onReauthorize(connection: GmailConnection): void;
   onDisconnect(connection: GmailConnection): void;
 }
 
@@ -401,8 +407,11 @@ export function GmailDialog({
   onLoadFolders,
   onConnect,
   onSync,
+  onFullSync,
   onCancel,
+  onReorganize,
   onCompose,
+  onReauthorize,
   onDisconnect
 }: GmailDialogProps) {
   const readyArchives = archives.filter((archive) => archive.status !== "importing" && archive.status !== "failed");
@@ -410,7 +419,7 @@ export function GmailDialog({
   const [archiveName, setArchiveName] = useState("Gmail");
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderChoice, setFolderChoice] = useState("");
-  const [folderName, setFolderName] = useState("Inbox");
+  const [folderName, setFolderName] = useState("Gmail");
   const [query, setQuery] = useState("newer_than:30d");
   const [ocrEnabled, setOcrEnabled] = useState(false);
   const [destinationMode, setDestinationMode] = useState<GmailDestinationMode>("new_archive");
@@ -423,7 +432,7 @@ export function GmailDialog({
     setArchiveId(initialArchive);
     setArchiveName("Gmail");
     setFolderChoice("");
-    setFolderName("Inbox");
+    setFolderName("Gmail");
     setQuery("newer_than:30d");
     setOcrEnabled(false);
     setDestinationMode(selectedArchiveId && initialArchive ? "new_mailbox" : "new_archive");
@@ -490,8 +499,36 @@ export function GmailDialog({
                         {connection.status === "syncing" ? (
                           <button className="icon-button" onClick={() => onCancel(connection.id)} title="Stop Gmail sync" aria-label={`Stop Gmail sync for ${connection.email}`}><X size={15} /></button>
                         ) : (
-                          <button className="icon-button" onClick={() => onSync(connection.id)} title="Sync Gmail now" aria-label={`Sync ${connection.email} now`}><RefreshCw size={15} /></button>
+                          <>
+                            <button className="icon-button" onClick={() => onSync(connection.id)} title="Sync Gmail now" aria-label={`Sync ${connection.email} now`}><RefreshCw size={15} /></button>
+                            <button
+                              className="icon-button"
+                              onClick={() => {
+                                if (window.confirm(`Pull all mail and folders for ${connection.email}, not just recent messages? This removes any date limit from the original search and can take a while for large mailboxes.`)) {
+                                  onFullSync(connection.id);
+                                }
+                              }}
+                              title="Sync everything (all folders, full history)"
+                              aria-label={`Sync all mail and folders for ${connection.email}`}
+                            ><CloudDownload size={15} /></button>
+                            <button
+                              className="icon-button"
+                              onClick={() => {
+                                if (window.confirm(`Reorganize ${connection.email}'s local mail into Inbox/Sent/Spam/label sub-folders based on its current Gmail labels? Messages already synced before this feature will be moved.`)) {
+                                  onReorganize(connection.id);
+                                }
+                              }}
+                              title="Reorganize into label folders"
+                              aria-label={`Reorganize folders for ${connection.email}`}
+                            ><FolderTree size={15} /></button>
+                          </>
                         )}
+                        <button
+                          className="icon-button"
+                          onClick={() => onReauthorize(connection)}
+                          title="Reauthorize (grants newly added permissions like Calendar or send-as)"
+                          aria-label={`Reauthorize ${connection.email}`}
+                        ><KeyRound size={15} /></button>
                         <button className="icon-button" onClick={() => onDisconnect(connection)} title="Disconnect Gmail" aria-label={`Disconnect ${connection.email}`}><Unplug size={15} /></button>
                       </div>
                     </div>
@@ -534,7 +571,7 @@ export function GmailDialog({
               {destinationMode === "new_archive" ? (
                 <>
                   <label className="rename-field"><span>Archive name</span><input value={archiveName} maxLength={120} onChange={(event) => setArchiveName(event.target.value)} /></label>
-                  <label className="rename-field"><span>First mailbox</span><input value={folderName} maxLength={120} onChange={(event) => setFolderName(event.target.value)} /></label>
+                  <label className="rename-field"><span>Local folder name</span><input value={folderName} maxLength={120} onChange={(event) => setFolderName(event.target.value)} /></label>
                 </>
               ) : (
                 <label className="rename-field">
@@ -544,7 +581,7 @@ export function GmailDialog({
                   </select>
                 </label>
               )}
-              {destinationMode === "new_mailbox" && <label className="rename-field"><span>New mailbox name</span><input value={folderName} maxLength={120} onChange={(event) => setFolderName(event.target.value)} /></label>}
+              {destinationMode === "new_mailbox" && <label className="rename-field"><span>New local folder name</span><input value={folderName} maxLength={120} onChange={(event) => setFolderName(event.target.value)} /></label>}
               {destinationMode === "existing_mailbox" && folders.length > 0 && (
                 <label className="rename-field">
                   <span>Merge into mailbox</span>
@@ -566,6 +603,7 @@ export function GmailDialog({
               <span><strong>Scan attachments for text</strong><small>English OCR for images and scanned PDFs.</small></span>
               <input type="checkbox" checked={ocrEnabled} onChange={(event) => setOcrEnabled(event.target.checked)} />
             </label>
+            <p className="gmail-destination-note">Gmail labels are mirrored underneath this local folder: Inbox, Sent, Drafts, Spam, Trash, and custom labels each become their own sub-folder. Mail with no matching label is filed under Archived.</p>
             <div className="gmail-safety"><ShieldCheck size={18} /><span>Synchronization is pull-only. Authorization grants separate read-only and send permissions, with no permission to modify or delete Gmail messages.</span></div>
           </section>
           {error && <div className="import-error" role="alert"><CircleAlert size={18} /><div><strong>Gmail action failed</strong><span>{error}</span></div></div>}
@@ -579,7 +617,7 @@ export function GmailDialog({
               archiveId: destinationArchiveId,
               folderId: selectedFolderId,
               archiveName: archiveName.trim() || "Gmail",
-              folderName: folderName.trim() || "Inbox",
+              folderName: folderName.trim() || "Gmail",
               query: query.trim(),
               ocrEnabled
             })}

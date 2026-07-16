@@ -11,20 +11,33 @@ import { dirname, resolve } from "node:path";
 import type { AdminSettings, GmailSettingsPatch } from "@email-client/shared";
 
 const SETTINGS_FILENAME = "gmail-oauth-settings.json";
+const DEFAULT_SYNC_INTERVAL_MINUTES = 5;
 
 export interface GmailOAuthCredentials {
   clientId: string | null;
   clientSecret: string | null;
 }
 
+export interface GmailSettingsEnvironment extends GmailOAuthCredentials {
+  syncIntervalMinutes: number | null;
+}
+
+interface PersistedGmailSettings extends GmailOAuthCredentials {
+  syncIntervalMinutes: number;
+}
+
 export class GmailSettingsManager {
   readonly settingsPath: string;
-  private persisted: GmailOAuthCredentials = { clientId: null, clientSecret: null };
+  private persisted: PersistedGmailSettings = {
+    clientId: null,
+    clientSecret: null,
+    syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES
+  };
   private readError: string | null = null;
 
   constructor(
     dataDir: string,
-    private readonly environment: GmailOAuthCredentials
+    private readonly environment: GmailSettingsEnvironment
   ) {
     this.settingsPath = resolve(dataDir, SETTINGS_FILENAME);
     if (!environment.clientId) this.persisted = this.read();
@@ -32,7 +45,11 @@ export class GmailSettingsManager {
 
   credentials(): GmailOAuthCredentials {
     const source = this.environment.clientId ? this.environment : this.persisted;
-    return { ...source };
+    return { clientId: source.clientId, clientSecret: source.clientSecret };
+  }
+
+  syncIntervalMinutes(): number {
+    return this.environment.syncIntervalMinutes ?? this.persisted.syncIntervalMinutes;
   }
 
   view(): AdminSettings["gmail"] {
@@ -48,7 +65,9 @@ export class GmailSettingsManager {
       clientSecretConfigured: Boolean(credentials.clientSecret),
       source,
       settingsPath: this.settingsPath,
-      configurationError: this.readError
+      configurationError: this.readError,
+      syncIntervalMinutes: this.syncIntervalMinutes(),
+      syncIntervalEnvManaged: this.environment.syncIntervalMinutes !== null
     };
   }
 
@@ -59,7 +78,10 @@ export class GmailSettingsManager {
     const clientSecret = input.clearClientSecret
       ? null
       : input.clientSecret?.trim() || (sameClient ? this.persisted.clientSecret : null);
-    const next = { clientId, clientSecret };
+    const syncIntervalMinutes = this.environment.syncIntervalMinutes
+      ?? input.syncIntervalMinutes
+      ?? this.persisted.syncIntervalMinutes;
+    const next: PersistedGmailSettings = { clientId, clientSecret, syncIntervalMinutes };
 
     mkdirSync(dirname(this.settingsPath), { recursive: true });
     const temporaryPath = `${this.settingsPath}.tmp`;
@@ -74,7 +96,11 @@ export class GmailSettingsManager {
   clear(): GmailOAuthCredentials {
     this.requireAdminManaged();
     rmSync(this.settingsPath, { force: true });
-    this.persisted = { clientId: null, clientSecret: null };
+    this.persisted = {
+      clientId: null,
+      clientSecret: null,
+      syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES
+    };
     this.readError = null;
     return this.credentials();
   }
@@ -87,8 +113,10 @@ export class GmailSettingsManager {
     }
   }
 
-  private read(): GmailOAuthCredentials {
-    if (!existsSync(this.settingsPath)) return { clientId: null, clientSecret: null };
+  private read(): PersistedGmailSettings {
+    if (!existsSync(this.settingsPath)) {
+      return { clientId: null, clientSecret: null, syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES };
+    }
     try {
       const parsed = JSON.parse(readFileSync(this.settingsPath, "utf8")) as unknown;
       const credentials = parseCredentials(parsed);
@@ -96,14 +124,14 @@ export class GmailSettingsManager {
       return credentials;
     } catch (error) {
       this.readError = `Saved Gmail OAuth settings could not be loaded: ${errorMessage(error)}`;
-      return { clientId: null, clientSecret: null };
+      return { clientId: null, clientSecret: null, syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES };
     }
   }
 }
 
 export class GmailSettingsManagedError extends Error {}
 
-function parseCredentials(value: unknown): GmailOAuthCredentials {
+function parseCredentials(value: unknown): PersistedGmailSettings {
   if (!value || typeof value !== "object") throw new Error("the file is not a JSON object");
   const root = value as Record<string, unknown>;
   const installed = root.installed && typeof root.installed === "object"
@@ -116,7 +144,10 @@ function parseCredentials(value: unknown): GmailOAuthCredentials {
     ?? stringValue(root.client_secret)
     ?? stringValue(installed?.client_secret);
   if (!clientId) throw new Error("client_id is missing");
-  return { clientId, clientSecret };
+  const syncIntervalMinutes = Number.isInteger(root.syncIntervalMinutes) && Number(root.syncIntervalMinutes) >= 0
+    ? Number(root.syncIntervalMinutes)
+    : DEFAULT_SYNC_INTERVAL_MINUTES;
+  return { clientId, clientSecret, syncIntervalMinutes };
 }
 
 function stringValue(value: unknown): string | null {

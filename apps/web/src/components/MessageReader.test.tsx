@@ -35,16 +35,157 @@ describe("MessageReader AI analysis", () => {
   });
 });
 
-function renderReader(api: ApiClient): void {
-  render(
+describe("MessageReader reply, forward, and move", () => {
+  it("invokes onReply and onForward with the current message", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
+    } as unknown as ApiClient;
+    const onReply = vi.fn();
+    const onForward = vi.fn();
+    renderReader(api, MESSAGE, { onReply, onForward });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+
+    expect(onReply).toHaveBeenCalledWith(MESSAGE);
+    expect(onForward).toHaveBeenCalledWith(MESSAGE);
+  });
+
+  it("loads mailboxes for the move menu and moves the message to the chosen one", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
+    } as unknown as ApiClient;
+    const onLoadFolders = vi.fn().mockResolvedValue([
+      { id: "folder-1", archiveId: "archive-1", parentId: null, name: "Inbox", path: "Inbox", messageCount: 1, unreadCount: 0 },
+      { id: "folder-2", archiveId: "archive-1", parentId: null, name: "Archived", path: "Archived", messageCount: 0, unreadCount: 0 }
+    ]);
+    const onMove = vi.fn().mockResolvedValue(undefined);
+    renderReader(api, MESSAGE, { onLoadFolders, onMove });
+
+    fireEvent.click(screen.getByRole("button", { name: "Move to folder" }));
+    await waitFor(() => expect(onLoadFolders).toHaveBeenCalledWith("archive-1"));
+
+    await waitFor(() => expect(screen.getByRole("menuitem", { name: "Archived" })).toBeTruthy());
+    expect(screen.queryByRole("menuitem", { name: "Inbox" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archived" }));
+    expect(onMove).toHaveBeenCalledWith("message-1", "folder-2");
+  });
+
+  it("offers a one-click Archive action for inbox messages", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
+    } as unknown as ApiClient;
+    const onArchive = vi.fn().mockResolvedValue(undefined);
+    renderReader(api, MESSAGE, { onArchive });
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive message" }));
+    expect(onArchive).toHaveBeenCalledWith(MESSAGE);
+  });
+});
+
+describe("MessageReader attachment preview", () => {
+  it("previews an image attachment and offers no preview for a non-previewable one", async () => {
+    const imageBlob = new Blob(["fake-image-bytes"], { type: "image/png" });
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null }),
+      attachmentBlob: vi.fn().mockResolvedValue(imageBlob)
+    } as unknown as ApiClient;
+    renderReader(api, {
+      ...MESSAGE,
+      attachments: [
+        {
+          id: "attachment-1",
+          messageId: MESSAGE.id,
+          filename: "photo.png",
+          contentType: "image/png",
+          sizeBytes: 2_048,
+          contentId: null,
+          disposition: "attachment",
+          textStatus: "unsupported"
+        },
+        {
+          id: "attachment-2",
+          messageId: MESSAGE.id,
+          filename: "archive.zip",
+          contentType: "application/zip",
+          sizeBytes: 4_096,
+          contentId: null,
+          disposition: "attachment",
+          textStatus: "unsupported"
+        }
+      ]
+    });
+
+    await waitFor(() => expect(screen.getByText("photo.png")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "Preview photo.png" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Preview archive.zip" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview photo.png" }));
+
+    await waitFor(() => expect(api.attachmentBlob).toHaveBeenCalledWith("attachment-1"));
+    await waitFor(() => expect(screen.getByRole("img", { name: "photo.png" })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("img", { name: "photo.png" })).toBeNull());
+  });
+});
+
+describe("MessageReader remote images", () => {
+  it("blocks remote images by default and reveals them after Show images is clicked", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
+    } as unknown as ApiClient;
+    renderReader(api, {
+      ...MESSAGE,
+      bodyHtml: '<img src="https://example.test/pixel.gif" alt="pixel" data-remote-src="https://example.test/pixel.gif">'
+    });
+
+    await waitFor(() => expect(screen.getByText("Images are blocked to protect your privacy.")).toBeTruthy());
+    const frame = document.querySelector("iframe.email-frame") as HTMLIFrameElement;
+    await waitFor(() => expect(frame.getAttribute("srcdoc")).not.toMatch(/<img[^>]*\ssrc=/));
+
+    fireEvent.click(screen.getByRole("button", { name: "Show images" }));
+
+    await waitFor(() => expect(screen.queryByText("Images are blocked to protect your privacy.")).toBeNull());
+    await waitFor(() => expect(document.querySelector("iframe.email-frame")?.getAttribute("srcdoc")).toContain("https://example.test/pixel.gif"));
+  });
+
+  it("does not show the banner for a message with no remote images", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
+    } as unknown as ApiClient;
+    renderReader(api, {
+      ...MESSAGE,
+      bodyHtml: "<p>Plain content with no images.</p>"
+    });
+
+    await waitFor(() => expect(document.querySelector("iframe.email-frame")).toBeTruthy());
+    expect(screen.queryByText("Images are blocked to protect your privacy.")).toBeNull();
+  });
+});
+
+function renderReader(
+  api: ApiClient,
+  message: MessageDetail = MESSAGE,
+  handlers: Partial<React.ComponentProps<typeof MessageReader>> = {}
+) {
+  return render(
     <MessageReader
-      message={MESSAGE}
+      message={message}
       loading={false}
       readOnly={false}
       api={api}
       onMobileBack={vi.fn()}
       onUpdateState={vi.fn().mockResolvedValue(undefined)}
       onError={vi.fn()}
+      onReply={vi.fn()}
+      onForward={vi.fn()}
+      onLoadFolders={vi.fn().mockResolvedValue([])}
+      onMove={vi.fn().mockResolvedValue(undefined)}
+      onArchive={vi.fn().mockResolvedValue(undefined)}
+      moveBusy={false}
+      {...handlers}
     />
   );
 }
@@ -55,8 +196,14 @@ function analysisState(): AiMessageState {
       id: "job-1",
       messageId: "message-1",
       task: "analyze",
+      scheduleId: null,
+      gmailConnectionId: null,
+      resumeId: null,
       status: "completed",
+      provider: "openai",
       model: "test-model",
+      skills: ["summarize"],
+      prompt: "",
       promptVersion: "message-analysis-v1",
       contentHash: "hash",
       attempts: 1,

@@ -7,103 +7,157 @@ import {
   writeFileSync
 } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type {
-  AdminSettings,
-  AiSettingsPatch,
-  AiUsageSummary
+import {
+  AI_PROVIDER_IDS,
+  type AdminSettings,
+  type AiProviderId,
+  type AiProviderSettings,
+  type AiSettingsPatch,
+  type AiUsageSummary
 } from "@email-client/shared";
 
 const SETTINGS_FILENAME = "ai-settings.json";
-export const DEFAULT_AI_MODEL = "gpt-5.6-luna";
+
+export const AI_PROVIDER_INFO: Record<AiProviderId, { label: string; defaultModel: string; envVar: string }> = {
+  openai: { label: "OpenAI", defaultModel: "gpt-5.6-luna", envVar: "OPENAI_API_KEY" },
+  // deepseek-chat/deepseek-reasoner retire 2026-07-24; deepseek-v4-flash is their replacement default.
+  deepseek: { label: "DeepSeek", defaultModel: "deepseek-v4-flash", envVar: "DEEPSEEK_API_KEY" }
+};
+
+export const DEFAULT_AI_MODEL = AI_PROVIDER_INFO.openai.defaultModel;
 
 export interface AiRuntimeSettings {
+  provider: AiProviderId;
   apiKey: string | null;
-  enabled: boolean;
   model: string;
+  enabled: boolean;
   dailyRequestLimit: number;
   monthlyRequestLimit: number;
 }
 
-const DEFAULT_SETTINGS: AiRuntimeSettings = {
-  apiKey: null,
+type ByProvider<T> = Record<AiProviderId, T>;
+
+interface PersistedAiSettings {
+  provider: AiProviderId;
+  apiKeys: ByProvider<string | null>;
+  // Each provider remembers its own last-used model, so switching the active provider
+  // and back doesn't lose a custom model id in favor of the other provider's default.
+  models: ByProvider<string>;
+  enabled: boolean;
+  dailyRequestLimit: number;
+  monthlyRequestLimit: number;
+}
+
+const DEFAULT_SETTINGS: PersistedAiSettings = {
+  provider: "openai",
+  apiKeys: { openai: null, deepseek: null },
+  models: { openai: AI_PROVIDER_INFO.openai.defaultModel, deepseek: AI_PROVIDER_INFO.deepseek.defaultModel },
   enabled: false,
-  model: DEFAULT_AI_MODEL,
   dailyRequestLimit: 100,
   monthlyRequestLimit: 2_000
 };
 
 export class AiSettingsManager {
   readonly settingsPath: string;
-  private persisted: AiRuntimeSettings = { ...DEFAULT_SETTINGS };
+  private persisted: PersistedAiSettings = clone(DEFAULT_SETTINGS);
   private readError: string | null = null;
 
   constructor(
     dataDir: string,
-    private readonly environmentApiKey: string | null
+    private readonly environmentApiKeys: Partial<Record<AiProviderId, string | null>> = {}
   ) {
     this.settingsPath = resolve(dataDir, SETTINGS_FILENAME);
     this.persisted = this.read();
   }
 
+  /** Resolved settings for the currently active provider — the one actually used to analyze messages. */
   current(): AiRuntimeSettings {
+    return this.forProvider(this.persisted.provider);
+  }
+
+  /** Resolved settings for any provider, active or not — lets each provider's card be configured/tested independently. */
+  forProvider(provider: AiProviderId): AiRuntimeSettings {
     return {
-      ...this.persisted,
-      apiKey: this.environmentApiKey || this.persisted.apiKey
+      provider,
+      apiKey: this.persisted.apiKeys[provider] || this.environmentApiKeys[provider] || null,
+      model: this.persisted.models[provider],
+      enabled: this.persisted.enabled,
+      dailyRequestLimit: this.persisted.dailyRequestLimit,
+      monthlyRequestLimit: this.persisted.monthlyRequestLimit
     };
   }
 
   view(usage: AiUsageSummary): AdminSettings["ai"] {
-    const current = this.current();
-    const source = this.environmentApiKey
-      ? "environment"
-      : current.apiKey
+    const providers = {} as Record<AiProviderId, AiProviderSettings>;
+    for (const id of AI_PROVIDER_IDS) {
+      const snapshot = this.forProvider(id);
+      const source = this.persisted.apiKeys[id]
         ? "admin"
-        : "none";
+        : this.environmentApiKeys[id]
+          ? "environment"
+          : "none";
+      providers[id] = {
+        configured: Boolean(snapshot.apiKey),
+        apiKeyConfigured: Boolean(snapshot.apiKey),
+        savedApiKeyConfigured: Boolean(this.persisted.apiKeys[id]),
+        environmentApiKeyConfigured: Boolean(this.environmentApiKeys[id]),
+        source,
+        model: snapshot.model
+      };
+    }
     return {
-      configured: Boolean(current.apiKey),
-      enabled: current.enabled,
-      apiKeyConfigured: Boolean(current.apiKey),
-      source,
-      model: current.model,
-      dailyRequestLimit: current.dailyRequestLimit,
-      monthlyRequestLimit: current.monthlyRequestLimit,
+      activeProvider: this.persisted.provider,
+      enabled: this.persisted.enabled,
+      dailyRequestLimit: this.persisted.dailyRequestLimit,
+      monthlyRequestLimit: this.persisted.monthlyRequestLimit,
       settingsPath: this.settingsPath,
       configurationError: this.readError,
-      usage
+      usage,
+      providers
     };
   }
 
+  /** Switches which provider is used to analyze messages, without touching either provider's saved key/model. */
+  setActiveProvider(provider: AiProviderId): AiRuntimeSettings {
+    this.write({ ...this.persisted, provider });
+    return this.current();
+  }
+
+  /** Edits one provider's key/model (input.provider, defaulting to whichever is active) and/or the shared enable/limit settings. */
   update(input: AiSettingsPatch): AiRuntimeSettings {
-    if (this.environmentApiKey && (input.apiKey || input.clearApiKey)) {
-      throw new AiSettingsManagedError(
-        "The OpenAI API key is managed by OPENAI_API_KEY. Remove that environment value and restart Archive Mail before changing the key here."
-      );
-    }
-    const next: AiRuntimeSettings = {
-      apiKey: input.clearApiKey
-        ? null
-        : input.apiKey?.trim() || this.persisted.apiKey,
+    const target = input.provider ?? this.persisted.provider;
+    const apiKeys = { ...this.persisted.apiKeys };
+    if (input.clearApiKey) apiKeys[target] = null;
+    else if (input.apiKey?.trim()) apiKeys[target] = input.apiKey.trim();
+
+    const models = { ...this.persisted.models };
+    if (input.model?.trim()) models[target] = input.model.trim();
+
+    this.write({
+      provider: this.persisted.provider,
+      apiKeys,
+      models,
       enabled: input.enabled ?? this.persisted.enabled,
-      model: input.model?.trim() || this.persisted.model,
       dailyRequestLimit: input.dailyRequestLimit ?? this.persisted.dailyRequestLimit,
       monthlyRequestLimit: input.monthlyRequestLimit ?? this.persisted.monthlyRequestLimit
-    };
-    this.write(next);
-    return this.current();
+    });
+    return this.forProvider(target);
   }
 
-  clearApiKey(): AiRuntimeSettings {
-    if (this.environmentApiKey) {
-      throw new AiSettingsManagedError(
-        "The OpenAI API key is managed by OPENAI_API_KEY and cannot be cleared in the admin panel."
-      );
-    }
-    const next = { ...this.persisted, apiKey: null, enabled: false };
-    this.write(next);
-    return this.current();
+  clearApiKey(provider?: AiProviderId): AiRuntimeSettings {
+    const target = provider ?? this.persisted.provider;
+    this.write({
+      ...this.persisted,
+      apiKeys: { ...this.persisted.apiKeys, [target]: null },
+      // Clearing a saved key restores its environment fallback when one exists.
+      enabled: target === this.persisted.provider && !this.environmentApiKeys[target]
+        ? false
+        : this.persisted.enabled
+    });
+    return this.forProvider(target);
   }
 
-  private write(settings: AiRuntimeSettings): void {
+  private write(settings: PersistedAiSettings): void {
     mkdirSync(dirname(this.settingsPath), { recursive: true });
     const temporaryPath = `${this.settingsPath}.tmp`;
     writeFileSync(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
@@ -113,8 +167,8 @@ export class AiSettingsManager {
     this.readError = null;
   }
 
-  private read(): AiRuntimeSettings {
-    if (!existsSync(this.settingsPath)) return { ...DEFAULT_SETTINGS };
+  private read(): PersistedAiSettings {
+    if (!existsSync(this.settingsPath)) return clone(DEFAULT_SETTINGS);
     try {
       const parsed = JSON.parse(readFileSync(this.settingsPath, "utf8")) as unknown;
       const settings = parseSettings(parsed);
@@ -122,20 +176,44 @@ export class AiSettingsManager {
       return settings;
     } catch (error) {
       this.readError = `Saved AI settings could not be loaded: ${errorMessage(error)}`;
-      return { ...DEFAULT_SETTINGS };
+      return clone(DEFAULT_SETTINGS);
     }
   }
 }
 
-export class AiSettingsManagedError extends Error {}
+function clone(settings: PersistedAiSettings): PersistedAiSettings {
+  return { ...settings, apiKeys: { ...settings.apiKeys }, models: { ...settings.models } };
+}
 
-function parseSettings(value: unknown): AiRuntimeSettings {
+function parseSettings(value: unknown): PersistedAiSettings {
   if (!value || typeof value !== "object") throw new Error("the file is not a JSON object");
   const root = value as Record<string, unknown>;
+  const provider: AiProviderId = AI_PROVIDER_IDS.includes(root.provider as AiProviderId)
+    ? root.provider as AiProviderId
+    : DEFAULT_SETTINGS.provider;
+  // Settings files written before multi-provider support only had flat `apiKey`/`model`
+  // fields for whatever was then the sole provider (OpenAI); fold them into that slot.
+  const legacyApiKey = optionalString(root.apiKey);
+  const legacyModel = optionalString(root.model);
+  const apiKeysRoot = root.apiKeys && typeof root.apiKeys === "object"
+    ? root.apiKeys as Record<string, unknown>
+    : null;
+  const modelsRoot = root.models && typeof root.models === "object"
+    ? root.models as Record<string, unknown>
+    : null;
+  const apiKeys = {} as ByProvider<string | null>;
+  const models = {} as ByProvider<string>;
+  for (const id of AI_PROVIDER_IDS) {
+    apiKeys[id] = apiKeysRoot ? optionalString(apiKeysRoot[id]) : (id === "openai" ? legacyApiKey : null);
+    models[id] = (modelsRoot ? optionalString(modelsRoot[id]) : null)
+      ?? (id === provider ? legacyModel : null)
+      ?? AI_PROVIDER_INFO[id].defaultModel;
+  }
   return {
-    apiKey: optionalString(root.apiKey),
+    provider,
+    apiKeys,
+    models,
     enabled: typeof root.enabled === "boolean" ? root.enabled : DEFAULT_SETTINGS.enabled,
-    model: optionalString(root.model) ?? DEFAULT_SETTINGS.model,
     dailyRequestLimit: positiveInteger(root.dailyRequestLimit, DEFAULT_SETTINGS.dailyRequestLimit),
     monthlyRequestLimit: positiveInteger(root.monthlyRequestLimit, DEFAULT_SETTINGS.monthlyRequestLimit)
   };

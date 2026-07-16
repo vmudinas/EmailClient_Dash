@@ -28,7 +28,7 @@ export function sanitizeEmailHtml(value: string): string {
       ...sanitizeHtml.defaults.allowedAttributes,
       "*": ["class", "title", "dir", "lang", "aria-label"],
       a: ["href", "name", "title", "target", "rel"],
-      img: ["src", "alt", "title", "width", "height"],
+      img: ["src", "alt", "title", "width", "height", "data-remote-src"],
       table: ["width", "cellpadding", "cellspacing", "border", "role"],
       td: ["width", "height", "colspan", "rowspan", "align", "valign"],
       th: ["width", "height", "colspan", "rowspan", "align", "valign"],
@@ -51,8 +51,17 @@ export function sanitizeEmailHtml(value: string): string {
       img: (_tagName, attribs) => {
         const source = attribs.src ?? "";
         if (!source.startsWith("cid:") && !source.startsWith("data:")) {
+          // Remote images are blocked by default (they're a common tracking/read-receipt
+          // vector), but a well-formed http(s) URL is kept in data-remote-src so the reader
+          // can offer a one-time "Show images" action instead of losing it permanently at
+          // import time. Anything else (unknown schemes, malformed values) is just dropped.
           const { src: _removed, ...safeAttribs } = attribs;
-          return { tagName: "img", attribs: { ...safeAttribs, alt: attribs.alt || "Remote image blocked" } };
+          const nextAttribs: Record<string, string> = {
+            ...safeAttribs,
+            alt: attribs.alt || "Remote image blocked"
+          };
+          if (/^https?:\/\//i.test(source)) nextAttribs["data-remote-src"] = source;
+          return { tagName: "img", attribs: nextAttribs };
         }
         return { tagName: "img", attribs };
       }

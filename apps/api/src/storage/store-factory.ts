@@ -6,6 +6,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
   DatabaseProvider,
   DatabaseProviderOption,
@@ -127,8 +128,14 @@ export function defaultStorageConfig(dataDir: string): StorageBootstrapConfig {
   };
 }
 
+// Encode/decode the filesystem path portion using WHATWG file: URL rules (via
+// pathToFileURL/fileURLToPath) rather than hand-rolled encodeURI/decodeURI, so a Windows
+// absolute path (e.g. "C:\Users\name\archive-mail.sqlite") round-trips correctly. A plain
+// encodeURI would escape "\" without normalizing drive letters, producing a connection
+// string sqlitePath() itself then rejects for not starting with "/".
 export function sqliteConnectionString(path: string): string {
-  return `sqlite://${encodeURI(resolve(path))}`;
+  const fileUrl = pathToFileURL(resolve(path)).href;
+  return `sqlite://${fileUrl.slice("file://".length)}`;
 }
 
 export function sqlitePath(connectionString: string, dataDir: string): string {
@@ -139,7 +146,11 @@ export function sqlitePath(connectionString: string, dataDir: string): string {
   if (value.startsWith("sqlite://")) {
     const encodedPath = value.slice("sqlite://".length);
     if (!encodedPath.startsWith("/")) throw new Error("Use an absolute SQLite path");
-    return resolve(decodeURI(encodedPath));
+    try {
+      return fileURLToPath(`file://${encodedPath}`);
+    } catch {
+      throw new Error("Use an absolute SQLite path");
+    }
   }
   const relativePath = value.slice("sqlite:".length);
   if (!relativePath || relativePath === ":memory:") {

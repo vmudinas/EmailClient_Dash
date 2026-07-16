@@ -514,7 +514,7 @@ export class ImportService {
     }
   }
 
-  private ensureFolderPath(archiveId: string, rawPath: string): string {
+  ensureFolderPath(archiveId: string, rawPath: string): string {
     let cache = this.folderCache.get(archiveId);
     if (!cache) {
       cache = new Map();

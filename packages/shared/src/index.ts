@@ -11,7 +11,33 @@ export type DiagnosticCategory = "upload" | "import" | "parser" | "attachment" |
 export type GmailConnectionStatus = "connected" | "syncing" | "error";
 export type GmailConfigurationSource = "admin" | "environment" | "none";
 export type AiConfigurationSource = "admin" | "environment" | "none";
+export const AI_PROVIDER_IDS = ["openai", "deepseek"] as const;
+export type AiProviderId = typeof AI_PROVIDER_IDS[number];
+export const AI_AGENT_SKILL_IDS = [
+  "summarize",
+  "categorize",
+  "prioritize",
+  "extract-actions",
+  "detect-spam",
+  "detect-phishing",
+  "recommend-draft"
+] as const;
+export type AiAgentSkillId = typeof AI_AGENT_SKILL_IDS[number];
+export const AI_AGENT_SKILLS: ReadonlyArray<{
+  id: AiAgentSkillId;
+  label: string;
+  description: string;
+}> = [
+  { id: "summarize", label: "Summarize", description: "Produce a concise factual summary." },
+  { id: "categorize", label: "Categorize", description: "Assign short, useful categories." },
+  { id: "prioritize", label: "Prioritize", description: "Estimate urgency and business priority." },
+  { id: "extract-actions", label: "Extract actions", description: "Find requested actions and next steps." },
+  { id: "detect-spam", label: "Detect spam", description: "Estimate whether the message is unwanted bulk mail." },
+  { id: "detect-phishing", label: "Detect phishing", description: "Identify impersonation and credential-theft signals." },
+  { id: "recommend-draft", label: "Recommend reply", description: "Decide whether a response draft would help." }
+];
 export type AiJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type AiJobTask = "analyze" | "draft_reply";
 export type AiPriority = "low" | "normal" | "high" | "urgent";
 export type AccountRole = "admin" | "user";
 export type SessionRole = AccountRole | "viewer";
@@ -163,12 +189,21 @@ export interface AiUsageSummary {
   monthOutputTokens: number;
 }
 
-export interface AiJob {
+export interface AiAgentConfig {
+  provider: AiProviderId;
+  model: string;
+  skills: AiAgentSkillId[];
+  prompt: string;
+}
+
+export interface AiJob extends AiAgentConfig {
   id: string;
   messageId: string;
-  task: "analyze";
+  task: AiJobTask;
+  scheduleId: string | null;
+  gmailConnectionId: string | null;
+  resumeId: string | null;
   status: AiJobStatus;
-  model: string;
   promptVersion: string;
   contentHash: string;
   attempts: number;
@@ -210,6 +245,165 @@ export interface AiMessageState {
   analysis: MessageAnalysis | null;
 }
 
+export type AiScheduleMode = "all" | "unread";
+export type AiScheduleTask = "analyze" | "draft_reply";
+
+export interface AiSchedule extends AiAgentConfig {
+  id: string;
+  name: string;
+  task: AiScheduleTask;
+  folderId: string;
+  folderPath: string;
+  archiveId: string;
+  archiveName: string;
+  messageId: string | null;
+  messageSubject: string | null;
+  gmailConnectionId: string | null;
+  gmailConnectionEmail: string | null;
+  resumeId: string | null;
+  resumeName: string | null;
+  mode: AiScheduleMode;
+  intervalMinutes: number;
+  enabled: boolean;
+  lastRunAt: string | null;
+  lastRunSummary: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const aiScheduleCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  task: z.enum(["analyze", "draft_reply"]).optional(),
+  folderId: z.string().uuid(),
+  messageId: z.string().uuid().nullable().optional(),
+  gmailConnectionId: z.string().uuid().nullable().optional(),
+  resumeId: z.string().uuid().nullable().optional(),
+  mode: z.enum(["all", "unread"]),
+  intervalMinutes: z.number().int().min(5).max(43_200),
+  provider: z.enum(AI_PROVIDER_IDS),
+  model: z.string().trim().min(1).max(120),
+  skills: z.array(z.enum(AI_AGENT_SKILL_IDS)).min(1).max(AI_AGENT_SKILL_IDS.length),
+  prompt: z.string().trim().max(12_000),
+  enabled: z.boolean().default(true)
+}).strict().refine(
+  (value) => value.task !== "draft_reply" || Boolean(value.gmailConnectionId),
+  { message: "Choose a Gmail sending account for draft tasks", path: ["gmailConnectionId"] }
+);
+
+export type AiScheduleCreate = z.infer<typeof aiScheduleCreateSchema>;
+
+export const aiScheduleUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  task: z.enum(["analyze", "draft_reply"]).optional(),
+  folderId: z.string().uuid().optional(),
+  messageId: z.string().uuid().nullable().optional(),
+  gmailConnectionId: z.string().uuid().nullable().optional(),
+  resumeId: z.string().uuid().nullable().optional(),
+  mode: z.enum(["all", "unread"]).optional(),
+  intervalMinutes: z.number().int().min(5).max(43_200).optional(),
+  provider: z.enum(AI_PROVIDER_IDS).optional(),
+  model: z.string().trim().min(1).max(120).optional(),
+  skills: z.array(z.enum(AI_AGENT_SKILL_IDS)).min(1).max(AI_AGENT_SKILL_IDS.length).optional(),
+  prompt: z.string().trim().max(12_000).optional(),
+  enabled: z.boolean().optional()
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one schedule setting is required"
+);
+
+export type AiScheduleUpdate = z.infer<typeof aiScheduleUpdateSchema>;
+
+export type EmailDraftSource = "manual" | "ai";
+
+export interface ResumeAsset {
+  id: string;
+  name: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EmailDraft {
+  id: string;
+  connectionId: string;
+  connectionEmail: string;
+  sourceMessageId: string | null;
+  sourceMessageSubject: string | null;
+  scheduleId: string | null;
+  scheduleName: string | null;
+  source: EmailDraftSource;
+  fromAddress: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  bodyText: string;
+  resumeId: string | null;
+  resumeName: string | null;
+  resumeFilename: string | null;
+  workRelated: boolean | null;
+  developmentOpportunity: boolean | null;
+  aiReason: string | null;
+  aiConfidence: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MailboxEndpoints {
+  oldest: { id: string; subject: string; senderName: string | null; senderAddress: string; date: string } | null;
+  newest: { id: string; subject: string; senderName: string | null; senderAddress: string; date: string } | null;
+}
+
+export interface TopContact {
+  address: string;
+  name: string | null;
+  count: number;
+}
+
+export interface AdminInsights {
+  generatedAt: string;
+  totalMessages: number;
+  totalAttachments: number;
+  endpoints: MailboxEndpoints;
+  topSenders: TopContact[];
+  topRecipients: TopContact[];
+  analysis: {
+    analyzedCount: number;
+    priorityBreakdown: Record<AiPriority, number>;
+    topCategories: { category: string; count: number }[];
+    actionRequiredCount: number;
+    draftRecommendedCount: number;
+    flaggedSpamCount: number;
+    flaggedPhishingCount: number;
+    averageSpamProbability: number;
+    averagePhishingProbability: number;
+  } | null;
+}
+
+export interface SenderFilingRule {
+  id: string;
+  archiveId: string;
+  senderAddress: string;
+  senderName: string | null;
+  folderId: string;
+  folderPath: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SenderFilingStatus {
+  archiveId: string;
+  archiveName: string;
+  enabled: boolean;
+  rules: SenderFilingRule[];
+  lastRunAt: string | null;
+  lastRunMovedMessages: number;
+  lastRunCreatedFolders: number;
+}
+
 export interface GmailConnection {
   id: string;
   email: string;
@@ -220,6 +414,7 @@ export interface GmailConnection {
   query: string;
   ocrEnabled: boolean;
   canSend: boolean;
+  canManageCalendar: boolean;
   status: GmailConnectionStatus;
   processedItems: number;
   totalItems: number | null;
@@ -241,6 +436,7 @@ export interface GmailSendRequest {
   bcc: string[];
   subject: string;
   bodyText: string;
+  fromAddress?: string;
 }
 
 export interface GmailSendResult {
@@ -248,6 +444,77 @@ export interface GmailSendResult {
   threadId: string | null;
   localCopyImported: boolean;
 }
+
+export interface GmailSendAsAlias {
+  email: string;
+  displayName: string;
+  isPrimary: boolean;
+  isDefault: boolean;
+}
+
+export interface CalendarEventAttendee {
+  email: string;
+  displayName: string | null;
+  responseStatus: "accepted" | "declined" | "tentative" | "needsAction";
+  organizer: boolean;
+  self: boolean;
+}
+
+export interface CalendarEventOrganizer {
+  email: string;
+  displayName: string | null;
+}
+
+export interface CalendarEvent {
+  id: string;
+  connectionId: string;
+  title: string;
+  description: string;
+  location: string;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  htmlLink: string | null;
+  meetingLink: string | null;
+  organizer: CalendarEventOrganizer | null;
+  attendees: CalendarEventAttendee[];
+}
+
+export const calendarEventInputSchema = z.object({
+  title: z.string().trim().min(1).max(500),
+  description: z.string().max(10_000).default(""),
+  location: z.string().max(500).default(""),
+  startAt: z.string().min(1),
+  endAt: z.string().min(1),
+  allDay: z.boolean().default(false)
+}).strict();
+
+export type CalendarEventInput = z.infer<typeof calendarEventInputSchema>;
+
+export interface TodoItem {
+  id: string;
+  date: string;
+  text: string;
+  completed: boolean;
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const todoCreateSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD"),
+  text: z.string().trim().min(1).max(2_000)
+}).strict();
+
+export type TodoCreate = z.infer<typeof todoCreateSchema>;
+
+export const todoPatchSchema = z.object({
+  text: z.string().trim().min(1).max(2_000).optional(),
+  completed: z.boolean().optional(),
+  position: z.number().int().min(0).optional()
+}).strict();
+
+export type TodoPatch = z.infer<typeof todoPatchSchema>;
 
 export interface ArchiveMergeResult {
   archive: Archive;
@@ -370,19 +637,35 @@ export interface AdminSettings {
     source: GmailConfigurationSource;
     settingsPath: string;
     configurationError: string | null;
+    syncIntervalMinutes: number;
+    syncIntervalEnvManaged: boolean;
   };
   ai: {
-    configured: boolean;
+    activeProvider: AiProviderId;
     enabled: boolean;
-    apiKeyConfigured: boolean;
-    source: AiConfigurationSource;
-    model: string;
     dailyRequestLimit: number;
     monthlyRequestLimit: number;
     settingsPath: string;
     configurationError: string | null;
     usage: AiUsageSummary;
+    providers: Record<AiProviderId, AiProviderSettings>;
   };
+}
+
+export interface AiProviderSettings {
+  configured: boolean;
+  apiKeyConfigured: boolean;
+  savedApiKeyConfigured: boolean;
+  environmentApiKeyConfigured: boolean;
+  source: AiConfigurationSource;
+  model: string;
+}
+
+export interface AiModelOption {
+  id: string;
+  label: string;
+  description: string | null;
+  pricing: string | null;
 }
 
 export const localMessageStatePatchSchema = z.object({
@@ -393,6 +676,18 @@ export const localMessageStatePatchSchema = z.object({
 }).strict();
 
 export type LocalMessageStatePatch = z.infer<typeof localMessageStatePatchSchema>;
+
+export const messageMoveSchema = z.object({
+  folderId: z.string().uuid()
+}).strict();
+
+export type MessageMove = z.infer<typeof messageMoveSchema>;
+
+export const senderFilingArchiveSchema = z.object({
+  archiveId: z.string().uuid()
+}).strict();
+
+export type SenderFilingArchive = z.infer<typeof senderFilingArchiveSchema>;
 
 export const importOptionsSchema = z.object({
   ocrEnabled: z.boolean().default(false),
@@ -435,7 +730,7 @@ export const gmailAuthRequestSchema = z.object({
   archiveId: z.string().uuid().nullable().optional(),
   folderId: z.string().uuid().nullable().optional(),
   archiveName: displayNameSchema.default("Gmail"),
-  folderName: displayNameSchema.default("Inbox"),
+  folderName: displayNameSchema.default("Gmail"),
   query: z.string().trim().max(500).default("newer_than:30d"),
   ocrEnabled: z.boolean().default(false)
 }).strict().refine(
@@ -445,6 +740,12 @@ export const gmailAuthRequestSchema = z.object({
 
 export type GmailAuthRequest = z.infer<typeof gmailAuthRequestSchema>;
 
+export const gmailSyncRequestSchema = z.object({
+  full: z.boolean().default(false)
+}).strict();
+
+export type GmailSyncRequest = z.infer<typeof gmailSyncRequestSchema>;
+
 const gmailRecipientSchema = z.string().trim().email().max(320);
 
 export const gmailSendRequestSchema = z.object({
@@ -452,11 +753,42 @@ export const gmailSendRequestSchema = z.object({
   cc: z.array(gmailRecipientSchema).max(100).default([]),
   bcc: z.array(gmailRecipientSchema).max(100).default([]),
   subject: z.string().max(998).default(""),
-  bodyText: z.string().max(1_000_000).default("")
+  bodyText: z.string().max(1_000_000).default(""),
+  fromAddress: gmailRecipientSchema.optional()
 }).strict().refine(
   (value) => value.subject.trim().length > 0 || value.bodyText.trim().length > 0,
   { message: "Add a subject or message body", path: ["bodyText"] }
 );
+
+const emailDraftFields = {
+  connectionId: z.string().uuid(),
+  to: z.array(gmailRecipientSchema).max(100).default([]),
+  cc: z.array(gmailRecipientSchema).max(100).default([]),
+  bcc: z.array(gmailRecipientSchema).max(100).default([]),
+  subject: z.string().max(998).default(""),
+  bodyText: z.string().max(1_000_000).default(""),
+  fromAddress: gmailRecipientSchema.nullable().optional(),
+  sourceMessageId: z.string().uuid().nullable().optional(),
+  resumeId: z.string().uuid().nullable().optional()
+};
+
+export const emailDraftCreateSchema = z.object(emailDraftFields).strict();
+export type EmailDraftCreate = z.infer<typeof emailDraftCreateSchema>;
+
+export const emailDraftUpdateSchema = z.object({
+  connectionId: emailDraftFields.connectionId.optional(),
+  to: emailDraftFields.to.optional(),
+  cc: emailDraftFields.cc.optional(),
+  bcc: emailDraftFields.bcc.optional(),
+  subject: emailDraftFields.subject.optional(),
+  bodyText: emailDraftFields.bodyText.optional(),
+  fromAddress: emailDraftFields.fromAddress,
+  resumeId: emailDraftFields.resumeId
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one draft field is required"
+);
+export type EmailDraftUpdate = z.infer<typeof emailDraftUpdateSchema>;
 
 export const uploadSessionCreateSchema = z.object({
   filename: z.string().trim().min(1).max(240),
@@ -532,7 +864,8 @@ export type DatabaseSettingsPatch = z.infer<typeof databaseSettingsPatchSchema>;
 export const gmailSettingsPatchSchema = z.object({
   clientId: z.string().trim().min(1).max(1_000),
   clientSecret: z.string().trim().min(1).max(1_000).optional(),
-  clearClientSecret: z.boolean().default(false)
+  clearClientSecret: z.boolean().default(false),
+  syncIntervalMinutes: z.number().int().min(0).max(1_440).optional()
 }).strict().refine(
   (value) => !(value.clientSecret && value.clearClientSecret),
   { message: "Provide a client secret or clear the saved one, not both", path: ["clientSecret"] }
@@ -541,6 +874,7 @@ export const gmailSettingsPatchSchema = z.object({
 export type GmailSettingsPatch = z.infer<typeof gmailSettingsPatchSchema>;
 
 export const aiSettingsPatchSchema = z.object({
+  provider: z.enum(AI_PROVIDER_IDS).optional(),
   apiKey: z.string().trim().min(20).max(2_000).optional(),
   clearApiKey: z.boolean().default(false),
   enabled: z.boolean().optional(),
@@ -557,6 +891,12 @@ export const aiSettingsPatchSchema = z.object({
 
 export type AiSettingsPatch = z.infer<typeof aiSettingsPatchSchema>;
 
+export const aiActiveProviderSchema = z.object({
+  provider: z.enum(AI_PROVIDER_IDS)
+}).strict();
+
+export type AiActiveProviderPatch = z.infer<typeof aiActiveProviderSchema>;
+
 export const messageAnalysisOutputSchema = z.object({
   summary: z.string().trim().min(1).max(1_200),
   categories: z.array(z.string().trim().min(1).max(48)).max(6),
@@ -571,6 +911,20 @@ export const messageAnalysisOutputSchema = z.object({
 }).strict();
 
 export type MessageAnalysisOutput = z.infer<typeof messageAnalysisOutputSchema>;
+
+export const aiDraftReplyOutputSchema = z.object({
+  workRelated: z.boolean(),
+  developmentOpportunity: z.boolean(),
+  reason: z.string().trim().max(500),
+  subject: z.string().max(998),
+  bodyText: z.string().max(20_000),
+  confidence: z.number().min(0).max(1)
+}).strict().refine(
+  (value) => !value.workRelated || value.bodyText.trim().length > 0,
+  { message: "A work-related reply needs a message body", path: ["bodyText"] }
+);
+
+export type AiDraftReplyOutput = z.infer<typeof aiDraftReplyOutputSchema>;
 
 export interface DesktopBridge {
   getRuntimeConfig(): Promise<RuntimeConfig>;

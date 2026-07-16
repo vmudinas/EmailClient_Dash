@@ -11,7 +11,9 @@ export interface ApiConfig {
   logger: boolean;
   gmailClientId: string | null;
   gmailClientSecret: string | null;
+  gmailSyncIntervalMinutes: number | null;
   openAiApiKey: string | null;
+  deepSeekApiKey: string | null;
 }
 
 export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
@@ -30,8 +32,20 @@ export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     gmailClientSecret: overrides.gmailClientSecret !== undefined
       ? overrides.gmailClientSecret
       : process.env.GMAIL_CLIENT_SECRET ?? null,
+    gmailSyncIntervalMinutes: overrides.gmailSyncIntervalMinutes !== undefined
+      ? overrides.gmailSyncIntervalMinutes
+      : parseOptionalInt(process.env.GMAIL_SYNC_INTERVAL_MINUTES),
     openAiApiKey: overrides.openAiApiKey !== undefined
       ? overrides.openAiApiKey
-      : process.env.OPENAI_API_KEY ?? null
+      : process.env.OPENAI_API_KEY ?? null,
+    deepSeekApiKey: overrides.deepSeekApiKey !== undefined
+      ? overrides.deepSeekApiKey
+      : process.env.DEEPSEEK_API_KEY ?? null
   };
+}
+
+function parseOptionalInt(value: string | undefined): number | null {
+  if (value === undefined || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
 }

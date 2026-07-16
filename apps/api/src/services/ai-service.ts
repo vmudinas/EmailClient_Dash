@@ -1,18 +1,24 @@
 import { createHash } from "node:crypto";
 import type {
+  AiAgentConfig,
   AiAnalysisStart,
+  EmailDraft,
   AiJob,
   AiMessageState,
+  AiModelOption,
+  AiProviderId,
   MessageDetail
 } from "@email-client/shared";
+import { AI_AGENT_SKILL_IDS } from "@email-client/shared";
 import type { EmailStore } from "../storage/database.js";
 import {
   AI_PROMPT_VERSION,
   AiProviderError,
-  OpenAiProvider,
+  createAiProvider,
+  DeepSeekProvider,
   type AiProviderFactory
 } from "./ai-provider.js";
-import type { AiSettingsManager } from "./ai-settings.js";
+import { AI_PROVIDER_INFO, type AiSettingsManager } from "./ai-settings.js";
 
 export class AiService {
   private processing: Promise<void> | null = null;
@@ -22,12 +28,13 @@ export class AiService {
   constructor(
     private readonly database: EmailStore,
     private readonly settings: AiSettingsManager,
-    private readonly providerFactory: AiProviderFactory = (apiKey, model) => new OpenAiProvider(apiKey, model)
+    private readonly providerFactory: AiProviderFactory = createAiProvider,
+    private readonly fetcher: typeof fetch = fetch
   ) {}
 
   initialize(): void {
     const current = this.settings.current();
-    if (current.enabled && current.apiKey) this.kick();
+    if (current.enabled) this.kick();
   }
 
   async close(): Promise<void> {
@@ -36,31 +43,49 @@ export class AiService {
     await this.processing;
   }
 
-  startAnalysis(messageId: string): AiAnalysisStart {
-    const current = this.requireConfigured(true);
+  startAnalysis(messageId: string, requestedAgent?: AiAgentConfig): AiAnalysisStart {
+    const active = this.settings.current();
+    const agent: AiAgentConfig = requestedAgent
+      ? {
+          provider: requestedAgent.provider,
+          model: requestedAgent.model.trim(),
+          skills: [...new Set(requestedAgent.skills)],
+          prompt: requestedAgent.prompt.trim()
+        }
+      : {
+          provider: active.provider,
+          model: active.model,
+          skills: [...AI_AGENT_SKILL_IDS],
+          prompt: ""
+        };
+    this.requireConfiguredFor(agent.provider, true);
     const message = this.database.getMessage(messageId);
     if (!message) throw new AiMessageNotFoundError("Message not found");
     const contentHash = messageContentHash(message);
     const analysis = this.database.getMessageAnalysis(messageId);
     const latest = this.database.getLatestAiJob(messageId);
 
+    const promptVersion = requestedAgent ? configuredPromptVersion(agent) : AI_PROMPT_VERSION;
     if (analysis
       && latest?.status === "completed"
       && analysis.contentHash === contentHash
-      && analysis.model === current.model
-      && analysis.promptVersion === AI_PROMPT_VERSION) {
+      && analysis.model === agent.model
+      && analysis.promptVersion === promptVersion) {
       return { job: latest, analysis };
     }
 
-    const active = this.database.getActiveAiJob(messageId);
-    if (active) return { job: active, analysis };
+    const activeJob = this.database.getActiveAiJob(messageId);
+    if (activeJob) return { job: activeJob, analysis };
 
     let job: AiJob;
     try {
       job = this.database.createAiJob({
         messageId,
-        model: current.model,
-        promptVersion: AI_PROMPT_VERSION,
+        provider: agent.provider,
+        model: agent.model,
+        skills: agent.skills,
+        prompt: agent.prompt,
+        promptVersion,
         contentHash
       });
     } catch (error) {
@@ -72,10 +97,86 @@ export class AiService {
       level: "info",
       category: "ai",
       message: "Email analysis queued",
-      context: { operation: "analysis_queue", jobId: job.id, messageId, model: current.model }
+      context: {
+        operation: "analysis_queue",
+        jobId: job.id,
+        messageId,
+        provider: agent.provider,
+        model: agent.model,
+        skills: agent.skills
+      }
     });
     this.kick();
     return { job, analysis };
+  }
+
+  startDraftReply(messageId: string, options: {
+    scheduleId: string;
+    gmailConnectionId: string;
+    resumeId: string | null;
+    agent: AiAgentConfig;
+  }): AiDraftStart {
+    const agent: AiAgentConfig = {
+      provider: options.agent.provider,
+      model: options.agent.model.trim(),
+      skills: [...new Set(options.agent.skills)],
+      prompt: options.agent.prompt.trim()
+    };
+    this.requireConfiguredFor(agent.provider, true);
+    const message = this.database.getMessage(messageId);
+    if (!message) throw new AiMessageNotFoundError("Message not found");
+    if (!message.sender.address.includes("@")) {
+      throw new AiConfigurationError("The source email does not have a replyable sender address");
+    }
+    const contentHash = messageContentHash(message);
+    const promptVersion = configuredPromptVersion(agent, "draft-reply-v1");
+    const existingDraft = this.database.getAutomatedDraft(options.scheduleId, messageId);
+    const latest = this.database.getLatestAiJob(messageId, "draft_reply", options.scheduleId);
+    if (latest?.status === "completed"
+      && latest.contentHash === contentHash
+      && latest.model === agent.model
+      && latest.promptVersion === promptVersion) {
+      return { job: latest, draft: existingDraft };
+    }
+    const activeJob = this.database.getActiveAiJob(messageId, "draft_reply");
+    if (activeJob) return { job: activeJob, draft: existingDraft };
+
+    let job: AiJob;
+    try {
+      job = this.database.createAiJob({
+        messageId,
+        task: "draft_reply",
+        scheduleId: options.scheduleId,
+        gmailConnectionId: options.gmailConnectionId,
+        resumeId: options.resumeId,
+        provider: agent.provider,
+        model: agent.model,
+        skills: agent.skills,
+        prompt: agent.prompt,
+        promptVersion,
+        contentHash
+      });
+    } catch (error) {
+      const raced = this.database.getActiveAiJob(messageId, "draft_reply");
+      if (!raced) throw error;
+      job = raced;
+    }
+    this.database.recordDiagnostic({
+      level: "info",
+      category: "ai",
+      message: "AI draft review queued",
+      context: {
+        operation: "draft_queue",
+        jobId: job.id,
+        messageId,
+        scheduleId: options.scheduleId,
+        provider: agent.provider,
+        model: agent.model,
+        skills: agent.skills
+      }
+    });
+    this.kick();
+    return { job, draft: existingDraft };
   }
 
   getMessageState(messageId: string): AiMessageState {
@@ -106,17 +207,17 @@ export class AiService {
     return cancelled;
   }
 
-  async testConnection(): Promise<void> {
-    const current = this.requireConfigured(false);
+  async testConnection(provider?: AiProviderId): Promise<void> {
+    const target = this.requireConfiguredFor(provider ?? this.settings.current().provider, false);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20_000);
     try {
-      await this.providerFactory(current.apiKey!, current.model).testConnection(controller.signal);
+      await this.providerFactory(target.provider, target.apiKey!, target.model).testConnection(controller.signal);
       this.database.recordDiagnostic({
         level: "info",
         category: "ai",
-        message: "OpenAI connection test succeeded",
-        context: { operation: "connection_test", model: current.model }
+        message: `${AI_PROVIDER_INFO[target.provider].label} connection test succeeded`,
+        context: { operation: "connection_test", provider: target.provider, model: target.model }
       });
     } catch (error) {
       const message = errorText(error);
@@ -125,7 +226,7 @@ export class AiService {
         category: "ai",
         message,
         stack: error instanceof Error ? error.stack : null,
-        context: { operation: "connection_test", model: current.model }
+        context: { operation: "connection_test", provider: target.provider, model: target.model }
       });
       throw error;
     } finally {
@@ -133,9 +234,23 @@ export class AiService {
     }
   }
 
+  async listModels(provider: AiProviderId): Promise<AiModelOption[]> {
+    if (provider !== "deepseek") {
+      throw new AiConfigurationError(`Live model listing is only available for DeepSeek, not ${AI_PROVIDER_INFO[provider].label}.`);
+    }
+    const target = this.requireConfiguredFor(provider, false);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    try {
+      return await new DeepSeekProvider(target.apiKey!, target.model, this.fetcher).listModels(controller.signal);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   configurationChanged(): void {
     const current = this.settings.current();
-    if (current.enabled && current.apiKey) this.kick();
+    if (current.enabled) this.kick();
   }
 
   private kick(): void {
@@ -158,7 +273,7 @@ export class AiService {
     const controller = new AbortController();
     this.controllers.set(job.id, controller);
     try {
-      const current = this.requireConfigured(true);
+      const current = this.requireConfiguredFor(job.provider, true);
       const message = this.database.getMessage(job.messageId);
       if (!message) throw new AiMessageNotFoundError("Message no longer exists");
       if (messageContentHash(message) !== job.contentHash) {
@@ -173,8 +288,64 @@ export class AiService {
           `AI request limit reached (${current.dailyRequestLimit}/day or ${current.monthlyRequestLimit}/month)`
         );
       }
-      const result = await this.providerFactory(current.apiKey!, job.model)
-        .analyze(message, controller.signal);
+      const provider = this.providerFactory(job.provider, current.apiKey!, job.model);
+      if (job.task === "draft_reply") {
+        if (!job.scheduleId || !job.gmailConnectionId) {
+          throw new AiConfigurationError("Draft job is missing its schedule or Gmail account");
+        }
+        if (!provider.draftReply) throw new AiConfigurationError("The AI provider does not support draft tasks");
+        const result = await provider.draftReply(
+          message,
+          controller.signal,
+          { skills: job.skills, prompt: job.prompt }
+        );
+        if (this.database.getAiJob(job.id)?.status === "cancelled") return;
+        this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
+        let draft: EmailDraft | null = null;
+        if (result.draft.workRelated) {
+          draft = this.database.createAutomatedDraft({
+            connectionId: job.gmailConnectionId,
+            sourceMessageId: job.messageId,
+            scheduleId: job.scheduleId,
+            to: [message.sender.address],
+            cc: [],
+            bcc: [],
+            subject: replySubject(result.draft.subject || message.subject),
+            bodyText: result.draft.bodyText,
+            resumeId: result.draft.developmentOpportunity ? job.resumeId : null,
+            workRelated: true,
+            developmentOpportunity: result.draft.developmentOpportunity,
+            aiReason: result.draft.reason,
+            aiConfidence: result.draft.confidence
+          });
+        }
+        this.database.completeAiJob(job.id);
+        this.database.recordDiagnostic({
+          level: "info",
+          category: "ai",
+          message: draft ? "AI reply draft created for review" : "AI review completed without creating a draft",
+          context: {
+            operation: "draft_complete",
+            jobId: job.id,
+            messageId: job.messageId,
+            scheduleId: job.scheduleId,
+            draftId: draft?.id ?? null,
+            workRelated: result.draft.workRelated,
+            developmentOpportunity: result.draft.developmentOpportunity,
+            resumeAttached: Boolean(draft?.resumeId),
+            provider: job.provider,
+            model: job.model,
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens
+          }
+        });
+        return;
+      }
+      const result = await provider.analyze(
+        message,
+        controller.signal,
+        { skills: job.skills, prompt: job.prompt }
+      );
       if (this.database.getAiJob(job.id)?.status === "cancelled") return;
       this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
       this.database.upsertMessageAnalysis({
@@ -193,6 +364,7 @@ export class AiService {
           operation: "analysis_complete",
           jobId: job.id,
           messageId: job.messageId,
+          provider: job.provider,
           model: job.model,
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens
@@ -223,17 +395,17 @@ export class AiService {
     }
   }
 
-  private requireConfigured(requireEnabled: boolean) {
-    const current = this.settings.current();
-    if (!current.apiKey) {
+  private requireConfiguredFor(provider: AiProviderId, requireEnabled: boolean) {
+    const snapshot = this.settings.forProvider(provider);
+    if (!snapshot.apiKey) {
       throw new AiConfigurationError(
-        "OpenAI is not configured. Add an API key in Admin settings > AI."
+        `${AI_PROVIDER_INFO[provider].label} is not configured. Add an API key in Admin settings > AI.`
       );
     }
-    if (requireEnabled && !current.enabled) {
+    if (requireEnabled && !snapshot.enabled) {
       throw new AiConfigurationError("AI features are disabled in Admin settings > AI.");
     }
-    return current;
+    return snapshot;
   }
 }
 
@@ -256,6 +428,27 @@ function messageContentHash(message: MessageDetail): string {
   })).digest("hex");
 }
 
+function configuredPromptVersion(agent: AiAgentConfig, base = AI_PROMPT_VERSION): string {
+  const fingerprint = createHash("sha256").update(JSON.stringify({
+    provider: agent.provider,
+    model: agent.model,
+    skills: [...agent.skills].sort(),
+    prompt: agent.prompt
+  })).digest("hex").slice(0, 16);
+  return `${base}:${fingerprint}`;
+}
+
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : "AI analysis failed";
+  return error instanceof Error ? error.message : "AI task failed";
+}
+
+function replySubject(subject: string): string {
+  const value = subject.trim();
+  if (!value) return "Re: Your email";
+  return /^re:/i.test(value) ? value : `Re: ${value}`;
+}
+
+export interface AiDraftStart {
+  job: AiJob;
+  draft: EmailDraft | null;
 }

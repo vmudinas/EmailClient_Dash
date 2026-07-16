@@ -19,9 +19,10 @@ import {
 import type {
   Archive,
   Folder,
-  ImportJob
+  ImportJob,
+  MessageSummary
 } from "@email-client/shared";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { formatBytes } from "../lib/format.js";
 import {
   formatImportEta,
@@ -39,6 +40,8 @@ interface SidebarProps {
   selectedArchiveId: string | null;
   selectedFolderId: string | null;
   readOnly: boolean;
+  draggedMessage: MessageSummary | null;
+  moveBusy: boolean;
   onSelectArchive(id: string): void;
   onSelectFolder(id: string | null): void;
   onImport(): void;
@@ -53,6 +56,7 @@ interface SidebarProps {
   onRemoveFolder(folder: Folder): void;
   onRenameArchive(archive: Archive): void;
   onRenameFolder(folder: Folder): void;
+  onMoveMessage(messageId: string, folderId: string): void;
   onOpenDiagnostics(): void;
 }
 
@@ -63,6 +67,8 @@ export function Sidebar({
   selectedArchiveId,
   selectedFolderId,
   readOnly,
+  draggedMessage,
+  moveBusy,
   onSelectArchive,
   onSelectFolder,
   onImport,
@@ -77,9 +83,113 @@ export function Sidebar({
   onRemoveFolder,
   onRenameArchive,
   onRenameFolder,
+  onMoveMessage,
   onOpenDiagnostics
 }: SidebarProps) {
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId);
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => loadCollapsedFolders());
+  const [dropFolderId, setDropFolderId] = useState<string | null>(null);
+  useEffect(() => { saveCollapsedFolders(collapsedFolderIds); }, [collapsedFolderIds]);
+  const toggleFolderCollapsed = (folderId: string) => {
+    setCollapsedFolderIds((current) => {
+      const next = new Set(current);
+      if (next.has(folderId)) next.delete(folderId); else next.add(folderId);
+      return next;
+    });
+  };
+  const childrenByParent = useMemo(() => {
+    const map = new Map<string | null, Folder[]>();
+    for (const folder of folders) {
+      const key = folder.parentId;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(folder);
+    }
+    return map;
+  }, [folders]);
+  const renderFolders = (parentId: string | null, depth: number): ReactElement[] => (
+    (childrenByParent.get(parentId) ?? []).flatMap((folder) => {
+      const children = childrenByParent.get(folder.id) ?? [];
+      const hasChildren = children.length > 0;
+      const isCollapsed = collapsedFolderIds.has(folder.id);
+      const canCombine = folders.some((candidate) => (
+        candidate.id !== folder.id && !candidate.path.startsWith(`${folder.path}/`)
+      ));
+      const canDrop = !readOnly
+        && !moveBusy
+        && draggedMessage?.archiveId === folder.archiveId
+        && draggedMessage.folderId !== folder.id;
+      const row = (
+        <div className="folder-entry" key={folder.id}>
+          <button
+            className={`folder-row ${selectedFolderId === folder.id ? "selected" : ""} ${canDrop && dropFolderId === folder.id ? "drop-target" : ""}`}
+            style={{ "--folder-depth": depth } as React.CSSProperties}
+            onClick={() => onSelectFolder(folder.id)}
+            onDragEnter={(event) => {
+              if (!canDrop) return;
+              event.preventDefault();
+              setDropFolderId(folder.id);
+            }}
+            onDragOver={(event) => {
+              if (!canDrop) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setDropFolderId((current) => current === folder.id ? null : current);
+              }
+            }}
+            onDrop={(event) => {
+              if (!canDrop || !draggedMessage) return;
+              event.preventDefault();
+              setDropFolderId(null);
+              onMoveMessage(draggedMessage.id, folder.id);
+            }}
+          >
+            {hasChildren ? (
+              <span
+                className={`folder-toggle ${isCollapsed ? "collapsed" : ""}`}
+                role="button"
+                tabIndex={0}
+                aria-label={isCollapsed ? `Expand ${folder.name}` : `Collapse ${folder.name}`}
+                onClick={(event) => { event.stopPropagation(); toggleFolderCollapsed(folder.id); }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  toggleFolderCollapsed(folder.id);
+                }}
+              ><ChevronRight size={13} /></span>
+            ) : (
+              <span className="folder-toggle-spacer" />
+            )}
+            {selectedFolderId === folder.id ? <FolderOpen size={16} /> : <FolderIcon size={16} />}
+            <span title={folder.name}>{folder.name}</span>
+            <span className="folder-counts" aria-label={`${folder.unreadCount.toLocaleString()} unread, ${folder.messageCount.toLocaleString()} total`}>
+              <b>{folder.unreadCount.toLocaleString()}</b>
+              <small>{folder.messageCount.toLocaleString()}</small>
+            </span>
+          </button>
+          {!readOnly && selectedArchive?.status !== "importing" && (
+            <span className="folder-actions">
+              {canCombine && (
+                <button className="icon-button folder-combine" onClick={() => onCombineFolder(folder)} title={`Combine mailbox ${folder.name}`} aria-label={`Combine mailbox ${folder.name}`}>
+                  <Combine size={13} />
+                </button>
+              )}
+              <button className="icon-button folder-rename" onClick={() => onRenameFolder(folder)} title={`Rename ${folder.name}`} aria-label={`Rename ${folder.name}`}>
+                <Pencil size={13} />
+              </button>
+              <button className="icon-button folder-delete" onClick={() => onRemoveFolder(folder)} title={`Delete mailbox ${folder.name}`} aria-label={`Delete mailbox ${folder.name}`}>
+                <Trash2 size={13} />
+              </button>
+            </span>
+          )}
+        </div>
+      );
+      return hasChildren && !isCollapsed ? [row, ...renderFolders(folder.id, depth + 1)] : [row];
+    })
+  );
   const visibleJobs = jobs.filter((job) => (
     job.status === "running"
     || job.status === "queued"
@@ -112,7 +222,7 @@ export function Sidebar({
               <button className="archive-select" onClick={() => onSelectArchive(archive.id)}>
                 <span className="archive-icon"><ArchiveIcon size={17} /></span>
                 <span className="archive-copy">
-                  <span className="archive-name">{archive.name}</span>
+                  <span className="archive-name" title={archive.name}>{archive.name}</span>
                   <span className="archive-meta">
                     {archive.unreadCount.toLocaleString()} unread · {archive.messageCount.toLocaleString()} total · {archive.sourceType === "gmail" ? "Gmail" : formatBytes(archive.sizeBytes)}
                   </span>
@@ -175,6 +285,7 @@ export function Sidebar({
                 className={`folder-row ${selectedFolderId === null ? "selected" : ""}`}
                 onClick={() => onSelectFolder(null)}
               >
+                <span className="folder-toggle-spacer" />
                 <Inbox size={16} />
                 <span>All mail</span>
                 <span className="folder-counts" aria-label={`${selectedArchive.unreadCount.toLocaleString()} unread, ${selectedArchive.messageCount.toLocaleString()} total`}>
@@ -182,43 +293,7 @@ export function Sidebar({
                   <small>{selectedArchive.messageCount.toLocaleString()}</small>
                 </span>
               </button>
-              {folders.map((folder) => {
-                const depth = Math.max(0, folder.path.split("/").length - 1);
-                const canCombine = folders.some((candidate) => (
-                  candidate.id !== folder.id && !candidate.path.startsWith(`${folder.path}/`)
-                ));
-                return (
-                  <div className="folder-entry" key={folder.id}>
-                    <button
-                      className={`folder-row ${selectedFolderId === folder.id ? "selected" : ""}`}
-                      style={{ "--folder-depth": depth } as React.CSSProperties}
-                      onClick={() => onSelectFolder(folder.id)}
-                    >
-                      {selectedFolderId === folder.id ? <FolderOpen size={16} /> : <FolderIcon size={16} />}
-                      <span>{folder.name}</span>
-                      <span className="folder-counts" aria-label={`${folder.unreadCount.toLocaleString()} unread, ${folder.messageCount.toLocaleString()} total`}>
-                        <b>{folder.unreadCount.toLocaleString()}</b>
-                        <small>{folder.messageCount.toLocaleString()}</small>
-                      </span>
-                    </button>
-                    {!readOnly && selectedArchive.status !== "importing" && (
-                      <span className="folder-actions">
-                        {canCombine && (
-                          <button className="icon-button folder-combine" onClick={() => onCombineFolder(folder)} title={`Combine mailbox ${folder.name}`} aria-label={`Combine mailbox ${folder.name}`}>
-                            <Combine size={13} />
-                          </button>
-                        )}
-                        <button className="icon-button folder-rename" onClick={() => onRenameFolder(folder)} title={`Rename ${folder.name}`} aria-label={`Rename ${folder.name}`}>
-                          <Pencil size={13} />
-                        </button>
-                        <button className="icon-button folder-delete" onClick={() => onRemoveFolder(folder)} title={`Delete mailbox ${folder.name}`} aria-label={`Delete mailbox ${folder.name}`}>
-                          <Trash2 size={13} />
-                        </button>
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
+              {renderFolders(null, 0)}
             </nav>
           </>
         )}
@@ -274,6 +349,25 @@ export function Sidebar({
       )}
     </aside>
   );
+}
+
+const COLLAPSED_FOLDERS_STORAGE_KEY = "archive-mail-collapsed-folders";
+
+function loadCollapsedFolders(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_FOLDERS_STORAGE_KEY);
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedFolders(ids: Set<string>): void {
+  try {
+    localStorage.setItem(COLLAPSED_FOLDERS_STORAGE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Private browsing / storage quota — expand/collapse state just won't persist.
+  }
 }
 
 function useImportEtas(jobs: ImportJob[]): Map<string, number | null> {

@@ -13,6 +13,246 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
+describe("Email API AI provider routes", () => {
+  it("switches the active AI provider and refuses live model listing for OpenAI", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const active = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/settings/ai/active",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { provider: "deepseek" }
+    });
+    expect(active.statusCode).toBe(200);
+    expect(active.json()).toMatchObject({ ai: { activeProvider: "deepseek" } });
+
+    const invalidActive = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/settings/ai/active",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { provider: "not-a-real-provider" }
+    });
+    expect(invalidActive.statusCode).toBe(400);
+
+    const missingProviderQuery = await runtime.app.inject({
+      method: "GET",
+      url: "/api/admin/settings/ai/models",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(missingProviderQuery.statusCode).toBe(400);
+
+    const openAiModels = await runtime.app.inject({
+      method: "GET",
+      url: "/api/admin/settings/ai/models?provider=openai",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(openAiModels.statusCode).toBe(503);
+    expect(openAiModels.json()).toMatchObject({ error: expect.stringContaining("only available for DeepSeek") });
+  });
+});
+
+describe("Email API sender filing routes", () => {
+  it("organizes and disables top-sender Inbox rules from the admin API", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const archive = runtime.database.createArchive({
+      name: "Sender route mail",
+      sourceType: "gmail",
+      fingerprint: "sender-route",
+      sizeBytes: 10
+    });
+    const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "sender-route-message",
+      internetMessageId: null,
+      subject: "Top sender",
+      sender: { name: "Vendor Co", address: "vendor@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T12:00:00.000Z",
+      receivedAt: "2026-07-15T12:00:00.000Z",
+      bodyText: "Route this message",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 10,
+      attachments: []
+    });
+    runtime.database.completeArchive(archive.id, 0);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const initial = await runtime.app.inject({
+      method: "GET",
+      url: `/api/admin/sender-filing?archiveId=${archive.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toMatchObject({ enabled: false, rules: [] });
+
+    const organized = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/sender-filing/organize",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { archiveId: archive.id }
+    });
+    expect(organized.statusCode).toBe(200);
+    expect(organized.json()).toMatchObject({
+      enabled: true,
+      lastRunMovedMessages: 1,
+      rules: [{ senderAddress: "vendor@example.test", folderPath: "Top Senders/Vendor Co" }]
+    });
+
+    const disabled = await runtime.app.inject({
+      method: "DELETE",
+      url: `/api/admin/sender-filing?archiveId=${archive.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json()).toMatchObject({ enabled: false, rules: [] });
+  });
+});
+
+describe("Email API AI schedule and insights routes", () => {
+  it("creates, runs, updates, and deletes a scheduled AI sweep, and reports mailbox insights", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const archive = runtime.database.createArchive({
+      name: "Schedule route mail",
+      sourceType: "mbox",
+      fingerprint: "schedule-route",
+      sizeBytes: 10
+    });
+    const folder = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    runtime.database.completeArchive(archive.id, 0);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const created = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/ai-schedules",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        name: "Inbox sweep",
+        folderId: folder.id,
+        mode: "unread",
+        intervalMinutes: 30,
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        skills: ["summarize", "extract-actions"],
+        prompt: "Focus on commitments and due dates.",
+        enabled: true
+      }
+    });
+    expect(created.statusCode).toBe(200);
+    const scheduleId = (created.json() as { id: string }).id;
+    expect(created.json()).toMatchObject({
+      name: "Inbox sweep",
+      folderPath: "Inbox",
+      mode: "unread",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      skills: ["summarize", "extract-actions"],
+      prompt: "Focus on commitments and due dates."
+    });
+
+    const listed = await runtime.app.inject({ method: "GET", url: "/api/admin/ai-schedules", headers, remoteAddress: "127.0.0.1" });
+    expect(listed.json()).toHaveLength(1);
+
+    const runNow = await runtime.app.inject({
+      method: "POST",
+      url: `/api/admin/ai-schedules/${scheduleId}/run`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(runNow.statusCode).toBe(200);
+    expect(runNow.json()).toMatchObject({ lastRunSummary: "Queued 0 of 0 messages" });
+
+    const updated = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/ai-schedules/${scheduleId}`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { enabled: false }
+    });
+    expect(updated.json()).toMatchObject({ enabled: false });
+
+    const deleted = await runtime.app.inject({
+      method: "DELETE",
+      url: `/api/admin/ai-schedules/${scheduleId}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(deleted.statusCode).toBe(204);
+    const listedAfterDelete = await runtime.app.inject({ method: "GET", url: "/api/admin/ai-schedules", headers, remoteAddress: "127.0.0.1" });
+    expect(listedAfterDelete.json()).toEqual([]);
+
+    const insights = await runtime.app.inject({ method: "GET", url: "/api/admin/insights", headers, remoteAddress: "127.0.0.1" });
+    expect(insights.statusCode).toBe(200);
+    expect(insights.json()).toMatchObject({ totalMessages: 0, analysis: null });
+
+    const unauthorizedInsights = await runtime.app.inject({ method: "GET", url: "/api/admin/insights", remoteAddress: "127.0.0.1" });
+    expect(unauthorizedInsights.statusCode).toBe(401);
+  });
+});
+
 describe("Email API authorization", () => {
   it("requires named login and attributes administrator actions to an IP address", async () => {
     const dataDir = await temporaryDirectory();
@@ -66,7 +306,7 @@ describe("Email API authorization", () => {
       database: { activeProvider: "sqlite" },
       security: { defaultPinWarning: true },
       gmail: { configured: false, source: "none", clientSecretConfigured: false },
-      ai: { configured: false, enabled: false, source: "none", apiKeyConfigured: false }
+      ai: { activeProvider: "openai", enabled: false, providers: { openai: { configured: false, source: "none", apiKeyConfigured: false } } }
     });
 
     const savedAi = await runtime.app.inject({
@@ -86,12 +326,10 @@ describe("Email API authorization", () => {
     expect(savedAi.statusCode).toBe(200);
     expect(savedAi.json()).toMatchObject({
       ai: {
-        configured: true,
         enabled: true,
-        source: "admin",
-        model: "route-test-model",
         dailyRequestLimit: 5,
-        monthlyRequestLimit: 50
+        monthlyRequestLimit: 50,
+        providers: { openai: { configured: true, source: "admin", model: "route-test-model" } }
       }
     });
     expect(savedAi.body).not.toContain("sk-proj-route-test-secret-value");
@@ -103,7 +341,7 @@ describe("Email API authorization", () => {
       remoteAddress: "127.0.0.1"
     });
     expect(clearedAi.statusCode).toBe(200);
-    expect(clearedAi.json()).toMatchObject({ ai: { configured: false, enabled: false } });
+    expect(clearedAi.json()).toMatchObject({ ai: { enabled: false, providers: { openai: { configured: false } } } });
 
     const savedGmail = await runtime.app.inject({
       method: "PATCH",
@@ -426,6 +664,77 @@ describe("Email API authorization", () => {
     });
     expect(clearedDiagnostics.statusCode).toBe(204);
     expect(runtime.database.listDiagnostics()).toEqual([]);
+  });
+
+  it("revokes issued viewer sessions when sharing is turned off", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const sharing = runtime.setSharingEnabled(true);
+    const viewerToken = new URL(sharing.url!).searchParams.get("share")!;
+    const viewerLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "192.168.1.9",
+      payload: { username: "admin", pin: "2332", pairingToken: viewerToken }
+    });
+    const viewerHeaders = {
+      authorization: `Bearer ${(viewerLogin.json() as { accessToken: string }).accessToken}`
+    };
+    const beforeStop = await runtime.app.inject({
+      method: "GET",
+      url: "/api/archives",
+      headers: viewerHeaders,
+      remoteAddress: "192.168.1.9"
+    });
+    expect(beforeStop.statusCode).toBe(200);
+
+    runtime.setSharingEnabled(false);
+
+    const afterStop = await runtime.app.inject({
+      method: "GET",
+      url: "/api/archives",
+      headers: viewerHeaders,
+      remoteAddress: "192.168.1.9"
+    });
+    expect(afterStop.statusCode).toBe(401);
+  });
+
+  it("only allows the Electron dev-server origin for cross-origin API access", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const allowed = await runtime.app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { origin: "http://127.0.0.1:5173" },
+      remoteAddress: "127.0.0.1"
+    });
+    expect(allowed.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:5173");
+
+    const blocked = await runtime.app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { origin: "http://malicious.example" },
+      remoteAddress: "127.0.0.1"
+    });
+    expect(blocked.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
   it("resumes chunked extensionless MBOX uploads and exposes their diagnostics", async () => {
@@ -751,6 +1060,64 @@ describe("Email API authorization", () => {
     });
     expect(diagnostics.json()).toMatchObject({ gmailConnections: [] });
     expect((diagnostics.json() as { events: Array<{ category: string }> }).events.some((event) => event.category === "gmail")).toBe(true);
+  });
+
+  it("creates, updates, and deletes per-day to-do items through the API", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const headers = { authorization: `Bearer ${runtime.localToken}` };
+
+    const created = await runtime.app.inject({
+      method: "POST",
+      url: "/api/todos",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { date: "2026-07-15", text: "Draft the release notes" }
+    });
+    expect(created.statusCode).toBe(201);
+    const todo = created.json() as { id: string; completed: boolean };
+    expect(todo.completed).toBe(false);
+
+    const listed = await runtime.app.inject({
+      method: "GET",
+      url: "/api/todos?start=2026-07-15&end=2026-07-15",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(listed.json()).toMatchObject([{ id: todo.id, text: "Draft the release notes" }]);
+
+    const updated = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/todos/${todo.id}`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { completed: true }
+    });
+    expect(updated.json()).toMatchObject({ id: todo.id, completed: true });
+
+    const deleted = await runtime.app.inject({
+      method: "DELETE",
+      url: `/api/todos/${todo.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    const emptied = await runtime.app.inject({
+      method: "GET",
+      url: "/api/todos?start=2026-07-15&end=2026-07-15",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(emptied.json()).toEqual([]);
   });
 });
 
