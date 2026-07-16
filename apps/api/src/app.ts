@@ -31,6 +31,7 @@ import {
   localMessageStatePatchSchema,
   mailboxCreateSchema,
   mailboxMergeSchema,
+  messageActionSuggestionRequestSchema,
   messageMoveSchema,
   pinChangeSchema,
   senderFilingArchiveSchema,
@@ -84,6 +85,7 @@ import {
 } from "./services/gmail-settings.js";
 import {
   AiConfigurationError,
+  AiBudgetError,
   AiJobNotFoundError,
   AiMessageNotFoundError,
   AiService
@@ -730,6 +732,25 @@ export class EmailApiRuntime {
             return reply.code(503).send({ error: error.message });
           }
           throw error;
+        }
+      }
+    );
+
+    this.app.post<{ Params: { messageId: string }; Body: unknown }>(
+      "/api/messages/:messageId/ai/action-suggestion",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = messageActionSuggestionRequestSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Provide a valid time and time zone" });
+        }
+        try {
+          return await this.ai.suggestMessageAction(request.params.messageId, parsed.data);
+        } catch (error) {
+          if (error instanceof AiMessageNotFoundError) return reply.code(404).send({ error: error.message });
+          if (error instanceof AiConfigurationError) return reply.code(503).send({ error: error.message });
+          if (error instanceof AiBudgetError) return reply.code(429).send({ error: error.message });
+          return reply.code(502).send({ error: error instanceof Error ? error.message : "AI action suggestion failed" });
         }
       }
     );

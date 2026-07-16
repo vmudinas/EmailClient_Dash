@@ -33,6 +33,103 @@ describe("MessageReader AI analysis", () => {
     fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
     await waitFor(() => expect(screen.getByText(/OpenAI is not configured/)).toBeTruthy());
   });
+
+  it("reviews and edits an AI-recommended to-do before creating it", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue(analysisState()),
+      suggestMessageAction: vi.fn().mockResolvedValue({
+        recommendedAction: "todo",
+        reason: "The contract review is due Friday.",
+        confidence: 0.9,
+        dateEvidence: ["Please review by Friday, July 17"],
+        calendarEvent: null,
+        todo: { date: "2026-07-17", text: "Review the attached contract" },
+        provider: "openai",
+        model: "test-model"
+      }),
+      createTodo: vi.fn().mockResolvedValue({
+        id: "todo-1",
+        date: "2026-07-18",
+        text: "Review and approve the attached contract",
+        completed: false,
+        position: 0,
+        createdAt: "2026-07-16T12:00:00.000Z",
+        updatedAt: "2026-07-16T12:00:00.000Z"
+      })
+    } as unknown as ApiClient;
+    renderReader(api);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Plan event or to-do" })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Plan event or to-do" }));
+
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Review AI action" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Due date"), { target: { value: "2026-07-18" } });
+    fireEvent.change(screen.getByLabelText("To-do"), { target: { value: "Review and approve the attached contract" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create to-do" }));
+
+    await waitFor(() => expect(api.createTodo).toHaveBeenCalledWith({
+      date: "2026-07-18",
+      text: "Review and approve the attached contract"
+    }));
+    expect(await screen.findByText(/To-do created/)).toBeTruthy();
+  });
+
+  it("reviews and edits an AI-recommended calendar event before creating it", async () => {
+    const connection = calendarConnection();
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue(analysisState()),
+      suggestMessageAction: vi.fn().mockResolvedValue({
+        recommendedAction: "calendar_event",
+        reason: "The email confirms a specific interview time.",
+        confidence: 0.95,
+        dateEvidence: ["Interview July 20 at 2 PM"],
+        calendarEvent: {
+          title: "AWS interview",
+          description: "Interview from the email",
+          location: "Google Meet",
+          allDay: false,
+          startDate: "2026-07-20",
+          endDate: "2026-07-20",
+          startTime: "14:00",
+          endTime: "15:00"
+        },
+        todo: null,
+        provider: "deepseek",
+        model: "deepseek-chat"
+      }),
+      createCalendarEvent: vi.fn().mockResolvedValue({
+        id: "event-1",
+        connectionId: connection.id,
+        title: "AWS engineering interview",
+        description: "Interview from the email",
+        location: "Google Meet",
+        startAt: "2026-07-20T18:00:00.000Z",
+        endAt: "2026-07-20T19:00:00.000Z",
+        allDay: false,
+        htmlLink: null,
+        meetingLink: null,
+        organizer: null,
+        attendees: []
+      })
+    } as unknown as ApiClient;
+    renderReader(api, MESSAGE, { connections: [connection] });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Plan event or to-do" })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Plan event or to-do" }));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Review AI action" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "AWS engineering interview" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create calendar event" }));
+
+    await waitFor(() => expect(api.createCalendarEvent).toHaveBeenCalledWith(
+      connection.id,
+      expect.objectContaining({
+        title: "AWS engineering interview",
+        allDay: false,
+        location: "Google Meet"
+      })
+    ));
+    expect(await screen.findByText('Calendar event "AWS engineering interview" created.')).toBeTruthy();
+  });
 });
 
 describe("MessageReader reply, forward, and move", () => {
@@ -170,12 +267,14 @@ function renderReader(
   message: MessageDetail = MESSAGE,
   handlers: Partial<React.ComponentProps<typeof MessageReader>> = {}
 ) {
+  const { connections = [], ...overrides } = handlers;
   return render(
     <MessageReader
       message={message}
       loading={false}
       readOnly={false}
       api={api}
+      connections={connections}
       onMobileBack={vi.fn()}
       onUpdateState={vi.fn().mockResolvedValue(undefined)}
       onError={vi.fn()}
@@ -185,7 +284,7 @@ function renderReader(
       onMove={vi.fn().mockResolvedValue(undefined)}
       onArchive={vi.fn().mockResolvedValue(undefined)}
       moveBusy={false}
-      {...handlers}
+      {...overrides}
     />
   );
 }
@@ -265,3 +364,26 @@ const MESSAGE: MessageDetail = {
     updatedAt: null
   }
 };
+
+function calendarConnection() {
+  return {
+    id: "connection-calendar",
+    email: "owner@example.test",
+    archiveId: "archive-1",
+    archiveName: "Gmail",
+    folderId: "folder-1",
+    folderPath: "Inbox",
+    query: "",
+    ocrEnabled: false,
+    canSend: true,
+    canManageCalendar: true,
+    status: "connected" as const,
+    processedItems: 0,
+    totalItems: null,
+    importedItems: 0,
+    lastSyncedAt: null,
+    lastError: null,
+    createdAt: "2026-07-16T00:00:00.000Z",
+    updatedAt: "2026-07-16T00:00:00.000Z"
+  };
+}

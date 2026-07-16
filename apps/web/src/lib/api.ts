@@ -35,6 +35,8 @@ import type {
   LocalMessageStatePatch,
   MailboxMergeResult,
   MessageDetail,
+  MessageActionSuggestion,
+  MessageActionSuggestionRequest,
   MessageSummary,
   RuntimeConfig,
   ResumeAsset,
@@ -322,6 +324,16 @@ export class ApiClient {
   analyzeMessage(messageId: string): Promise<AiAnalysisStart> {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/ai/analyze`, {
       method: "POST"
+    });
+  }
+
+  suggestMessageAction(
+    messageId: string,
+    context: MessageActionSuggestionRequest
+  ): Promise<MessageActionSuggestion> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/ai/action-suggestion`, {
+      method: "POST",
+      body: JSON.stringify(context)
     });
   }
 

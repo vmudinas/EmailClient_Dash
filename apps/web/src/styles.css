@@ -1423,8 +1423,73 @@ textarea:focus-visible {
 }
 
 .ai-analysis-content > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   color: var(--faint);
   font-size: 9px;
+}
+
+.ai-analysis-content > footer .secondary-button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  font-size: 10px;
+}
+
+.message-action-notice {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border: 1px solid #a9c9b3;
+  border-radius: 6px;
+  color: var(--green-dark);
+  background: var(--green-soft);
+  font-size: 11px;
+}
+
+.message-action-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(860px, calc(100vh - 32px));
+}
+
+.message-action-dialog .dialog-body {
+  overflow-y: auto;
+}
+
+.message-action-reason {
+  display: grid;
+  gap: 7px;
+  padding: 13px 14px;
+  border: 1px solid #c6d9ce;
+  border-radius: 7px;
+  background: #f2f7f4;
+}
+
+.message-action-reason > strong {
+  color: var(--green-dark);
+  font-size: 13px;
+}
+
+.message-action-reason p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.message-action-reason > span,
+.message-action-reason ul {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.message-action-reason ul {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  line-height: 1.5;
 }
 
 .message-body {

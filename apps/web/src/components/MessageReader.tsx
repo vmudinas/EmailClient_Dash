@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Archive as ArchiveIcon,
   BrainCircuit,
+  CalendarPlus,
   Check,
   CircleAlert,
   Download,
@@ -31,17 +32,21 @@ import type {
   AiMessageState,
   Attachment,
   Folder,
+  GmailConnection,
   LocalMessageStatePatch,
+  MessageActionSuggestion,
   MessageDetail
 } from "@email-client/shared";
 import { displayAddress, formatBytes, formatDate, formatTimeOfDay, initials } from "../lib/format.js";
 import type { ApiClient } from "../lib/api.js";
+import { MessageActionDialog } from "./MessageActionDialog.js";
 
 interface MessageReaderProps {
   message: MessageDetail | null;
   loading: boolean;
   readOnly: boolean;
   api: ApiClient | null;
+  connections: GmailConnection[];
   onMobileBack(): void;
   onUpdateState(patch: LocalMessageStatePatch): Promise<void>;
   onError(message: string): void;
@@ -58,6 +63,7 @@ export function MessageReader({
   loading,
   readOnly,
   api,
+  connections,
   onMobileBack,
   onUpdateState,
   onError,
@@ -75,6 +81,9 @@ export function MessageReader({
   const [aiState, setAiState] = useState<AiMessageState>({ job: null, analysis: null });
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
+  const [actionSuggestion, setActionSuggestion] = useState<MessageActionSuggestion | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionNotice, setActionNotice] = useState("");
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -97,6 +106,8 @@ export function MessageReader({
     let active = true;
     setAiState({ job: null, analysis: null });
     setAiError("");
+    setActionSuggestion(null);
+    setActionNotice("");
     if (!api || !message?.id) return () => { active = false; };
     setAiLoading(true);
     void api.getMessageAiState(message.id)
@@ -181,6 +192,24 @@ export function MessageReader({
       setAiError(errorText(error));
     } finally {
       setAiLoading(false);
+    }
+  };
+
+  const suggestAction = async () => {
+    if (!api || !message) return;
+    setActionLoading(true);
+    setAiError("");
+    setActionNotice("");
+    try {
+      const suggestion = await api.suggestMessageAction(message.id, {
+        now: new Date().toISOString(),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+      });
+      setActionSuggestion(suggestion);
+    } catch (error) {
+      setAiError(errorText(error));
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -285,8 +314,12 @@ export function MessageReader({
             error={aiError}
             readOnly={readOnly}
             onCancel={() => void cancelAnalysis()}
+            onPlan={() => void suggestAction()}
+            planning={actionLoading}
           />
         )}
+
+        {actionNotice && <div className="message-action-notice" role="status"><Check size={15} />{actionNotice}</div>}
 
         <section className="message-body">
           {message.bodyHtml
@@ -322,6 +355,20 @@ export function MessageReader({
           onClose={() => setPreviewAttachment(null)}
           onError={onError}
         />
+
+        {api && actionSuggestion && (
+          <MessageActionDialog
+            api={api}
+            suggestion={actionSuggestion}
+            connections={connections}
+            onClose={() => setActionSuggestion(null)}
+            onCreated={(notice) => {
+              setActionSuggestion(null);
+              setActionNotice(notice);
+            }}
+            onError={setAiError}
+          />
+        )}
 
         {!readOnly && (
           <section className="local-notes">
@@ -376,13 +423,17 @@ function AiAnalysisPanel({
   loading,
   error,
   readOnly,
-  onCancel
+  onCancel,
+  onPlan,
+  planning
 }: {
   state: AiMessageState;
   loading: boolean;
   error: string;
   readOnly: boolean;
   onCancel(): void;
+  onPlan(): void;
+  planning: boolean;
 }) {
   const { analysis, job } = state;
   const active = job?.status === "queued" || job?.status === "running";
@@ -423,7 +474,15 @@ function AiAnalysisPanel({
           {analysis.signals.length > 0 && (
             <div className="ai-signals"><strong>Signals</strong><ul>{analysis.signals.map((signal) => <li key={signal}>{signal}</li>)}</ul></div>
           )}
-          <footer>{analysis.model} · AI output can be incorrect</footer>
+          <footer>
+            <span>{analysis.model} · AI output can be incorrect</span>
+            {!readOnly && (
+              <button type="button" className="secondary-button compact" disabled={planning || active} onClick={onPlan}>
+                {planning ? <LoaderCircle className="spin" size={14} /> : <CalendarPlus size={14} />}
+                {planning ? "Finding dates" : "Plan event or to-do"}
+              </button>
+            )}
+          </footer>
         </div>
       )}
     </section>

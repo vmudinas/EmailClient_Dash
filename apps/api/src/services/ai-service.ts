@@ -7,6 +7,8 @@ import type {
   AiMessageState,
   AiModelOption,
   AiProviderId,
+  MessageActionSuggestion,
+  MessageActionSuggestionRequest,
   MessageDetail
 } from "@email-client/shared";
 import { AI_AGENT_SKILL_IDS } from "@email-client/shared";
@@ -216,6 +218,51 @@ export class AiService {
       context: { operation: "analysis_cancel", jobId, messageId: job.messageId }
     });
     return cancelled;
+  }
+
+  async suggestMessageAction(
+    messageId: string,
+    context: MessageActionSuggestionRequest
+  ): Promise<MessageActionSuggestion> {
+    const target = this.requireConfiguredFor(this.settings.current().provider, true);
+    const message = this.database.getMessage(messageId);
+    if (!message) throw new AiMessageNotFoundError("Message not found");
+    if (!this.database.consumeAiRequest(target.dailyRequestLimit, target.monthlyRequestLimit)) {
+      throw new AiBudgetError(
+        `AI request limit reached (${target.dailyRequestLimit}/day or ${target.monthlyRequestLimit}/month)`
+      );
+    }
+    const provider = this.providerFactory(target.provider, target.apiKey!, target.model);
+    if (!provider.suggestAction) {
+      throw new AiConfigurationError("The selected AI provider does not support calendar and to-do suggestions");
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45_000);
+    try {
+      const result = await provider.suggestAction(message, context, controller.signal);
+      this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
+      this.database.recordDiagnostic({
+        level: "info",
+        category: "ai",
+        message: "AI calendar/to-do suggestion created for review",
+        context: {
+          operation: "action_suggestion",
+          messageId,
+          recommendedAction: result.suggestion.recommendedAction,
+          provider: target.provider,
+          model: target.model,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens
+        }
+      });
+      return {
+        ...result.suggestion,
+        provider: target.provider,
+        model: target.model
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async testConnection(provider?: AiProviderId): Promise<void> {

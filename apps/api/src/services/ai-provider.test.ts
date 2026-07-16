@@ -85,6 +85,59 @@ describe("DeepSeekProvider", () => {
     });
   });
 
+  it("suggests a structured calendar event using the user's time zone and date evidence", async () => {
+    let requestBody: Record<string, unknown> | null = null;
+    const fetcher: typeof fetch = async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse({
+        id: "chatcmpl-action",
+        object: "chat.completion",
+        created: 0,
+        model: "deepseek-chat",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: JSON.stringify({
+              recommendedAction: "calendar_event",
+              reason: "The email confirms an interview at a specific time.",
+              confidence: 0.94,
+              dateEvidence: ["Interview: July 20 at 2:00 PM"],
+              calendarEvent: {
+                title: "AWS interview",
+                description: "Interview referenced in the email from Vendor.",
+                location: "Google Meet",
+                allDay: false,
+                startDate: "2026-07-20",
+                endDate: "2026-07-20",
+                startTime: "14:00",
+                endTime: "15:00"
+              },
+              todo: null
+            })
+          },
+          finish_reason: "stop"
+        }],
+        usage: { prompt_tokens: 180, completion_tokens: 70, total_tokens: 250 }
+      });
+    };
+    const provider = new DeepSeekProvider("sk-deepseek-test", "deepseek-chat", fetcher);
+
+    const result = await provider.suggestAction(messageFixture(), {
+      now: "2026-07-16T14:00:00.000Z",
+      timeZone: "America/New_York"
+    });
+
+    expect(result.suggestion).toMatchObject({
+      recommendedAction: "calendar_event",
+      calendarEvent: { startDate: "2026-07-20", startTime: "14:00" }
+    });
+    expect(result.usage).toEqual({ inputTokens: 180, outputTokens: 70 });
+    const messages = requestBody!.messages as Array<{ role: string; content: string }>;
+    expect(messages[0]?.content).toContain("America/New_York");
+    expect(messages[0]?.content).toContain("Do not create anything");
+  });
+
   it("tests the connection against the models list endpoint", async () => {
     let called = false;
     const fetcher: typeof fetch = async (input) => {

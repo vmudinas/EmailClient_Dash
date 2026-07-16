@@ -1280,6 +1280,7 @@ export function App() {
               loading={loadingMessage}
               readOnly={readOnly}
               api={api}
+              connections={gmailConnections}
               onMobileBack={() => setMobileView("messages")}
               onUpdateState={updateState}
               onError={showError}

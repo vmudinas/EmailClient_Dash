@@ -72,6 +72,72 @@ describe("Email API AI provider routes", () => {
   });
 });
 
+describe("Email API message action suggestion route", () => {
+  it("requires authentication, validates time context, and returns the AI suggestion", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const suggest = vi.spyOn(runtime.ai, "suggestMessageAction").mockResolvedValue({
+      recommendedAction: "todo",
+      reason: "A dated follow-up is requested.",
+      confidence: 0.88,
+      dateEvidence: ["Follow up July 18"],
+      calendarEvent: null,
+      todo: { date: "2026-07-18", text: "Follow up with the sender" },
+      provider: "openai",
+      model: "test-model"
+    });
+
+    const unauthorized = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/action-suggestion",
+      remoteAddress: "127.0.0.1",
+      payload: { now: "2026-07-16T12:00:00.000Z", timeZone: "America/New_York" }
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const invalid = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/action-suggestion",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { now: "not-a-date", timeZone: "" }
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    const response = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/action-suggestion",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { now: "2026-07-16T12:00:00.000Z", timeZone: "America/New_York" }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      recommendedAction: "todo",
+      todo: { date: "2026-07-18", text: "Follow up with the sender" }
+    });
+    expect(suggest).toHaveBeenCalledWith("message-1", {
+      now: "2026-07-16T12:00:00.000Z",
+      timeZone: "America/New_York"
+    });
+  });
+});
+
 describe("Email API sender filing routes", () => {
   it("organizes and disables top-sender Inbox rules from the admin API", async () => {
     const dataDir = await temporaryDirectory();

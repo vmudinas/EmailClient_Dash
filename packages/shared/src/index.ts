@@ -504,6 +504,35 @@ export interface CalendarEvent {
   attendees: CalendarEventAttendee[];
 }
 
+export type MessageActionSuggestionKind = "calendar_event" | "todo" | "none";
+
+export interface MessageCalendarSuggestion {
+  title: string;
+  description: string;
+  location: string;
+  allDay: boolean;
+  startDate: string;
+  endDate: string;
+  startTime: string | null;
+  endTime: string | null;
+}
+
+export interface MessageTodoSuggestion {
+  date: string;
+  text: string;
+}
+
+export interface MessageActionSuggestion {
+  recommendedAction: MessageActionSuggestionKind;
+  reason: string;
+  confidence: number;
+  dateEvidence: string[];
+  calendarEvent: MessageCalendarSuggestion | null;
+  todo: MessageTodoSuggestion | null;
+  provider: AiProviderId;
+  model: string;
+}
+
 export const calendarEventInputSchema = z.object({
   title: z.string().trim().min(1).max(500),
   description: z.string().max(10_000).default(""),
@@ -514,6 +543,13 @@ export const calendarEventInputSchema = z.object({
 }).strict();
 
 export type CalendarEventInput = z.infer<typeof calendarEventInputSchema>;
+
+export const messageActionSuggestionRequestSchema = z.object({
+  now: z.string().datetime({ offset: true }),
+  timeZone: z.string().trim().min(1).max(100)
+}).strict();
+
+export type MessageActionSuggestionRequest = z.infer<typeof messageActionSuggestionRequestSchema>;
 
 export interface TodoItem {
   id: string;
@@ -949,6 +985,43 @@ export const aiDraftReplyOutputSchema = z.object({
 );
 
 export type AiDraftReplyOutput = z.infer<typeof aiDraftReplyOutputSchema>;
+
+const suggestedDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const suggestedTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable();
+
+export const messageActionSuggestionOutputSchema = z.object({
+  recommendedAction: z.enum(["calendar_event", "todo", "none"]),
+  reason: z.string().trim().min(1).max(800),
+  confidence: z.number().min(0).max(1),
+  dateEvidence: z.array(z.string().trim().min(1).max(240)).max(10),
+  calendarEvent: z.object({
+    title: z.string().trim().min(1).max(500),
+    description: z.string().max(10_000),
+    location: z.string().max(500),
+    allDay: z.boolean(),
+    startDate: suggestedDateSchema,
+    endDate: suggestedDateSchema,
+    startTime: suggestedTimeSchema,
+    endTime: suggestedTimeSchema
+  }).strict().nullable(),
+  todo: z.object({
+    date: suggestedDateSchema,
+    text: z.string().trim().min(1).max(2_000)
+  }).strict().nullable()
+}).strict().superRefine((value, context) => {
+  if (value.recommendedAction === "calendar_event" && !value.calendarEvent) {
+    context.addIssue({ code: "custom", path: ["calendarEvent"], message: "Calendar recommendation requires event details" });
+  }
+  if (value.recommendedAction === "todo" && !value.todo) {
+    context.addIssue({ code: "custom", path: ["todo"], message: "To-do recommendation requires to-do details" });
+  }
+  if (value.calendarEvent && !value.calendarEvent.allDay
+    && (!value.calendarEvent.startTime || !value.calendarEvent.endTime)) {
+    context.addIssue({ code: "custom", path: ["calendarEvent"], message: "Timed events require start and end times" });
+  }
+});
+
+export type MessageActionSuggestionOutput = z.infer<typeof messageActionSuggestionOutputSchema>;
 
 export interface DesktopBridge {
   getRuntimeConfig(): Promise<RuntimeConfig>;

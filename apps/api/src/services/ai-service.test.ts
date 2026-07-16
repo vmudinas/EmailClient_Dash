@@ -91,6 +91,65 @@ describe("AiService", () => {
     database.close();
   });
 
+  it("creates a review-only calendar or to-do suggestion and records usage", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const messageId = insertMessage(database);
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "action-model",
+      dailyRequestLimit: 10,
+      monthlyRequestLimit: 100
+    });
+    const suggestAction = vi.fn().mockResolvedValue({
+      suggestion: {
+        recommendedAction: "todo",
+        reason: "The contract review is due on a specific date.",
+        confidence: 0.91,
+        dateEvidence: ["Review by July 18"],
+        calendarEvent: null,
+        todo: { date: "2026-07-18", text: "Review the contract" }
+      },
+      usage: { inputTokens: 90, outputTokens: 35 }
+    });
+    const service = new AiService(database, settings, () => ({
+      analyze: vi.fn(),
+      suggestAction,
+      testConnection: vi.fn()
+    }));
+
+    const suggestion = await service.suggestMessageAction(messageId, {
+      now: "2026-07-16T12:00:00.000Z",
+      timeZone: "America/New_York"
+    });
+
+    expect(suggestAction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: messageId }),
+      { now: "2026-07-16T12:00:00.000Z", timeZone: "America/New_York" },
+      expect.any(AbortSignal)
+    );
+    expect(suggestion).toMatchObject({
+      recommendedAction: "todo",
+      todo: { date: "2026-07-18", text: "Review the contract" },
+      provider: "openai",
+      model: "action-model"
+    });
+    expect(database.getAiUsageSummary()).toMatchObject({
+      todayRequests: 1,
+      todayInputTokens: 90,
+      todayOutputTokens: 35
+    });
+    expect(database.listDiagnostics({ category: "ai" })).toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: "AI calendar/to-do suggestion created for review" })
+    ]));
+
+    await service.close();
+    database.close();
+  });
+
   it("tests a specific provider's connection without switching which one is active", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
