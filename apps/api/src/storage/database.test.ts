@@ -962,6 +962,192 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("deduplicates draft work across RFC-linked messages and records answered conversations", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Conversation drafts",
+      sourceType: "gmail",
+      fingerprint: "conversation-drafts",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const firstMessageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "conversation-first",
+      internetMessageId: "<conversation-first@example.test>",
+      subject: "Senior TypeScript role",
+      sender: { name: "Recruiter", address: "recruiter@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T12:00:00.000Z",
+      receivedAt: "2026-07-15T12:00:00.000Z",
+      bodyText: "First message",
+      bodyHtml: null,
+      headers: { "message-id": "<conversation-first@example.test>" },
+      sizeBytes: 25,
+      attachments: []
+    });
+    const secondMessageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "conversation-second",
+      internetMessageId: "<conversation-second@example.test>",
+      subject: "Re: Senior TypeScript role",
+      sender: { name: "Recruiter", address: "recruiter@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T13:00:00.000Z",
+      receivedAt: "2026-07-15T13:00:00.000Z",
+      bodyText: "Follow-up",
+      bodyHtml: null,
+      headers: {
+        "message-id": "<conversation-second@example.test>",
+        "in-reply-to": "<conversation-first@example.test>",
+        references: "<conversation-first@example.test>"
+      },
+      sizeBytes: 25,
+      attachments: []
+    });
+    database.completeArchive(archive.id, 0);
+
+    const activeJob = database.createAiJob({
+      messageId: firstMessageId,
+      task: "draft_reply",
+      provider: "openai",
+      model: "draft-model",
+      skills: ["recommend-draft"],
+      prompt: "",
+      promptVersion: "draft-v1",
+      contentHash: "first-hash"
+    });
+    expect(database.getDraftReplyBlocker(secondMessageId)).toMatchObject({
+      reason: "active_conversation_job",
+      jobId: activeJob.id
+    });
+    expect(() => database.createAiJob({
+      messageId: secondMessageId,
+      task: "draft_reply",
+      provider: "openai",
+      model: "draft-model",
+      skills: ["recommend-draft"],
+      prompt: "",
+      promptVersion: "draft-v1",
+      contentHash: "second-hash"
+    })).toThrow();
+    database.cancelAiJob(activeJob.id);
+
+    const connection = database.createGmailConnection({
+      email: "owner@example.test",
+      archiveId: archive.id,
+      folderId: inbox.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canManageCalendar: false,
+      refreshToken: "refresh-token"
+    });
+    const schedule = database.createAiSchedule({
+      name: "Conversation replies",
+      task: "draft_reply",
+      folderId: inbox.id,
+      gmailConnectionId: connection.id,
+      mode: "all",
+      intervalMinutes: 60,
+      provider: "openai",
+      model: "draft-model",
+      skills: ["recommend-draft"],
+      prompt: "",
+      enabled: true
+    });
+    const draft = database.createAutomatedDraft({
+      connectionId: connection.id,
+      sourceMessageId: firstMessageId,
+      scheduleId: schedule.id,
+      to: ["recruiter@example.test"],
+      cc: [],
+      bcc: [],
+      subject: "Re: Senior TypeScript role",
+      bodyText: "Reviewable reply",
+      workRelated: true,
+      developmentOpportunity: true,
+      aiReason: "Recruiter follow-up",
+      aiConfidence: 0.95
+    });
+    expect(database.getDraftReplyBlocker(secondMessageId)).toMatchObject({
+      reason: "existing_draft",
+      draftId: draft.id
+    });
+
+    database.recordConversationReply(secondMessageId, "gmail-sent-id");
+    expect(database.listEmailDrafts()).toEqual([]);
+    expect(database.getDraftReplyBlocker(firstMessageId)).toMatchObject({ reason: "already_replied" });
+    expect(database.getMessageReplyContext(secondMessageId)).toMatchObject({
+      internetMessageId: "<conversation-second@example.test>",
+      references: expect.arrayContaining([
+        "<conversation-first@example.test>",
+        "<conversation-second@example.test>"
+      ])
+    });
+    database.close();
+  });
+
+  it("treats an existing Sent-folder message as an answered conversation", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Sent conversation",
+      sourceType: "gmail",
+      fingerprint: "sent-conversation",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const sent = database.ensureFolder(archive.id, "Sent", "Sent", null);
+    const incomingId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "sent-conversation-incoming",
+      internetMessageId: "<incoming-role@example.test>",
+      subject: "Engineering role",
+      sender: { name: "Recruiter", address: "recruiter@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T12:00:00.000Z",
+      receivedAt: "2026-07-15T12:00:00.000Z",
+      bodyText: "Would you like to discuss?",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 25,
+      attachments: []
+    });
+    database.insertMessage({
+      archiveId: archive.id,
+      folderId: sent.id,
+      sourceKey: "sent-conversation-reply",
+      internetMessageId: "<sent-role@example.test>",
+      subject: "Re: Engineering role",
+      sender: { name: "Owner", address: "owner@example.test" },
+      to: [{ name: "Recruiter", address: "recruiter@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T13:00:00.000Z",
+      receivedAt: "2026-07-15T13:00:00.000Z",
+      bodyText: "Already replied",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 25,
+      attachments: []
+    });
+    database.completeArchive(archive.id, 0);
+
+    expect(database.getDraftReplyBlocker(incomingId)).toMatchObject({ reason: "already_replied" });
+    database.close();
+  });
+
   it("stores per-day to-do items ordered by position and supports editing and removal", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);

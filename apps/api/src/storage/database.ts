@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import BetterSqlite3, { type Database as SqliteDatabase } from "better-sqlite3";
@@ -304,6 +304,20 @@ export interface AutomatedDraftCreateInput {
   aiConfidence: number;
 }
 
+export interface DraftReplyBlocker {
+  conversationKey: string;
+  reason: "existing_draft" | "already_replied" | "active_conversation_job";
+  draftId: string | null;
+  jobId: string | null;
+}
+
+export interface MessageReplyContext {
+  sourceMessageId: string;
+  internetMessageId: string | null;
+  references: string[];
+  gmailThreadId: string | null;
+}
+
 export interface MessageAnalysisUpsertInput extends MessageAnalysisOutput {
   messageId: string;
   model: string;
@@ -399,6 +413,7 @@ export class EmailDatabase {
         folder_id TEXT NOT NULL,
         source_key TEXT NOT NULL,
         internet_message_id TEXT,
+        conversation_key TEXT,
         subject TEXT NOT NULL DEFAULT '',
         sender_name TEXT,
         sender_address TEXT NOT NULL DEFAULT '',
@@ -1119,6 +1134,107 @@ export class EmailDatabase {
       }
       this.db.pragma("user_version = 19");
     }
+
+    const conversationDraftVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (conversationDraftVersion < 20) {
+      const messageColumns = new Set(
+        (this.db.pragma("table_info(messages)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!messageColumns.has("conversation_key")) {
+        this.db.exec("ALTER TABLE messages ADD COLUMN conversation_key TEXT;");
+      }
+      const aiJobColumns = new Set(
+        (this.db.pragma("table_info(ai_jobs)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!aiJobColumns.has("conversation_key")) {
+        this.db.exec("ALTER TABLE ai_jobs ADD COLUMN conversation_key TEXT;");
+      }
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS conversation_replies (
+          conversation_key TEXT PRIMARY KEY,
+          source_message_id TEXT NOT NULL,
+          sent_external_id TEXT,
+          replied_at TEXT NOT NULL,
+          FOREIGN KEY(source_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+      `);
+      this.backfillConversationKeys();
+      this.db.exec(`
+        UPDATE ai_jobs
+        SET conversation_key = (
+          SELECT m.conversation_key FROM messages m WHERE m.id = ai_jobs.message_id
+        )
+        WHERE task = 'draft_reply' AND conversation_key IS NULL;
+
+        WITH ranked AS (
+          SELECT id,
+            ROW_NUMBER() OVER (
+              PARTITION BY conversation_key
+              ORDER BY created_at, id
+            ) AS conversation_order
+          FROM ai_jobs
+          WHERE task = 'draft_reply'
+            AND status IN ('queued', 'running')
+            AND conversation_key IS NOT NULL
+        )
+        UPDATE ai_jobs
+        SET status = 'cancelled',
+            error = 'Cancelled duplicate active draft job during conversation deduplication upgrade',
+            completed_at = COALESCE(completed_at, updated_at)
+        WHERE id IN (SELECT id FROM ranked WHERE conversation_order > 1);
+
+        CREATE INDEX IF NOT EXISTS messages_conversation_idx
+          ON messages(archive_id, conversation_key);
+        CREATE INDEX IF NOT EXISTS ai_jobs_conversation_idx
+          ON ai_jobs(conversation_key, task, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_jobs_active_draft_conversation_idx
+          ON ai_jobs(conversation_key)
+          WHERE task = 'draft_reply'
+            AND status IN ('queued', 'running')
+            AND conversation_key IS NOT NULL;
+      `);
+      this.db.pragma("user_version = 20");
+    }
+  }
+
+  private backfillConversationKeys(): void {
+    const rows = this.db.prepare(`
+      SELECT id, archive_id, internet_message_id, subject, sender_address,
+        to_json, cc_json, bcc_json, headers_json
+      FROM messages
+      ORDER BY
+        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(received_at, sent_at), created_at, id
+    `).all() as Row[];
+    const update = this.db.prepare("UPDATE messages SET conversation_key = ? WHERE id = ?");
+    const apply = this.db.transaction(() => {
+      const keysByMessageId = new Map<string, string>();
+      for (const row of rows) {
+        const archiveId = String(row.archive_id);
+        const headers = parseJson<Record<string, string>>(row.headers_json, {});
+        const referencedKey = referencedMessageIds(headers)
+          .map((messageId) => keysByMessageId.get(normalizeInternetMessageId(messageId)))
+          .find((value): value is string => Boolean(value));
+        const conversationKey = buildConversationKey({
+          archiveId,
+          internetMessageId: row.internet_message_id ? String(row.internet_message_id) : null,
+          subject: String(row.subject ?? ""),
+          senderAddress: String(row.sender_address ?? ""),
+          recipients: [
+            ...parseJson<EmailAddress[]>(row.to_json, []),
+            ...parseJson<EmailAddress[]>(row.cc_json, []),
+            ...parseJson<EmailAddress[]>(row.bcc_json, [])
+          ],
+          headers,
+          referencedKey
+        });
+        update.run(conversationKey, row.id);
+        if (row.internet_message_id) {
+          keysByMessageId.set(normalizeInternetMessageId(String(row.internet_message_id)), conversationKey);
+        }
+      }
+    });
+    apply();
   }
 
   private backfillLegacyAiScheduleRuns(): void {
@@ -1965,16 +2081,21 @@ export class EmailDatabase {
   createAiJob(input: AiJobCreateInput): AiJob {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
+    const task = input.task ?? "analyze";
+    const conversation = task === "draft_reply"
+      ? this.db.prepare("SELECT conversation_key FROM messages WHERE id = ?").get(input.messageId) as Row | undefined
+      : undefined;
     this.db.prepare(`
       INSERT INTO ai_jobs (
-        id, message_id, task, schedule_id, schedule_run_id, gmail_connection_id, resume_id,
+        id, message_id, task, conversation_key, schedule_id, schedule_run_id, gmail_connection_id, resume_id,
         status, provider, model, skills_json, prompt, prompt_version, content_hash,
         attempts, max_attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       id,
       input.messageId,
-      input.task ?? "analyze",
+      task,
+      conversation?.conversation_key ?? null,
       input.scheduleId ?? null,
       input.scheduleRunId ?? null,
       input.gmailConnectionId ?? null,
@@ -2568,6 +2689,119 @@ export class EmailDatabase {
       WHERE d.schedule_id = ? AND d.source_message_id = ?
     `).get(scheduleId, sourceMessageId) as Row | undefined;
     return row ? this.mapEmailDraft(row) : null;
+  }
+
+  getDraftReplyBlocker(messageId: string, excludeJobId?: string): DraftReplyBlocker | null {
+    const message = this.db.prepare(`
+      SELECT conversation_key FROM messages WHERE id = ?
+    `).get(messageId) as Row | undefined;
+    if (!message) throw new Error("Message not found");
+    const conversationKey = message.conversation_key ? String(message.conversation_key) : null;
+    if (!conversationKey) return null;
+
+    const replied = this.db.prepare(`
+      SELECT 1 FROM conversation_replies WHERE conversation_key = ?
+      UNION ALL
+      SELECT 1
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.conversation_key = ? AND lower(trim(f.name)) = 'sent'
+      LIMIT 1
+    `).get(conversationKey, conversationKey);
+    if (replied) {
+      return {
+        conversationKey,
+        reason: "already_replied",
+        draftId: null,
+        jobId: null
+      };
+    }
+
+    const draft = this.db.prepare(`
+      SELECT d.id
+      FROM email_drafts d
+      JOIN messages source_message ON source_message.id = d.source_message_id
+      WHERE source_message.conversation_key = ?
+      ORDER BY d.updated_at DESC, d.id DESC
+      LIMIT 1
+    `).get(conversationKey) as Row | undefined;
+    if (draft) {
+      return {
+        conversationKey,
+        reason: "existing_draft",
+        draftId: String(draft.id),
+        jobId: null
+      };
+    }
+
+    const activeJob = excludeJobId
+      ? this.db.prepare(`
+          SELECT id FROM ai_jobs
+          WHERE conversation_key = ?
+            AND task = 'draft_reply'
+            AND status IN ('queued', 'running')
+            AND id != ?
+          ORDER BY created_at LIMIT 1
+        `).get(conversationKey, excludeJobId) as Row | undefined
+      : this.db.prepare(`
+          SELECT id FROM ai_jobs
+          WHERE conversation_key = ?
+            AND task = 'draft_reply'
+            AND status IN ('queued', 'running')
+          ORDER BY created_at LIMIT 1
+        `).get(conversationKey) as Row | undefined;
+    return activeJob ? {
+      conversationKey,
+      reason: "active_conversation_job",
+      draftId: null,
+      jobId: String(activeJob.id)
+    } : null;
+  }
+
+  getMessageReplyContext(messageId: string): MessageReplyContext | null {
+    const row = this.db.prepare(`
+      SELECT internet_message_id, headers_json FROM messages WHERE id = ?
+    `).get(messageId) as Row | undefined;
+    if (!row) return null;
+    const headers = parseJson<Record<string, string>>(row.headers_json, {});
+    const internetMessageId = row.internet_message_id ? String(row.internet_message_id) : null;
+    return {
+      sourceMessageId: messageId,
+      internetMessageId,
+      references: [...new Set([
+        ...referencedMessageIds(headers),
+        ...(internetMessageId ? [internetMessageId] : [])
+      ])],
+      gmailThreadId: headerValue(headers, "x-archive-mail-gmail-thread-id")
+    };
+  }
+
+  recordConversationReply(sourceMessageId: string, sentExternalId: string | null): void {
+    const record = this.db.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT conversation_key FROM messages WHERE id = ?
+      `).get(sourceMessageId) as Row | undefined;
+      if (!row) throw new Error("Source email not found");
+      const conversationKey = row.conversation_key ? String(row.conversation_key) : null;
+      if (!conversationKey) return;
+      this.db.prepare(`
+        INSERT INTO conversation_replies (
+          conversation_key, source_message_id, sent_external_id, replied_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(conversation_key) DO UPDATE SET
+          source_message_id = excluded.source_message_id,
+          sent_external_id = excluded.sent_external_id,
+          replied_at = excluded.replied_at
+      `).run(conversationKey, sourceMessageId, sentExternalId, new Date().toISOString());
+      this.db.prepare(`
+        DELETE FROM email_drafts
+        WHERE source = 'ai'
+          AND source_message_id IN (
+            SELECT id FROM messages WHERE conversation_key = ?
+          )
+      `).run(conversationKey);
+    });
+    record();
   }
 
   createEmailDraft(input: EmailDraftCreate): EmailDraft {
@@ -3501,21 +3735,45 @@ export class EmailDatabase {
       ? requestedFolder
       : this.getFolder(effectiveFolderId);
     if (!folder) throw new Error("Sender rule mailbox not found");
+    let referencedKey: string | undefined;
+    for (const referencedMessageId of referencedMessageIds(input.headers)) {
+      const referenced = this.db.prepare(`
+        SELECT conversation_key FROM messages
+        WHERE archive_id = ?
+          AND lower(trim(internet_message_id)) = ?
+          AND conversation_key IS NOT NULL
+        LIMIT 1
+      `).get(input.archiveId, normalizeInternetMessageId(referencedMessageId)) as Row | undefined;
+      if (referenced?.conversation_key) {
+        referencedKey = String(referenced.conversation_key);
+        break;
+      }
+    }
+    const conversationKey = buildConversationKey({
+      archiveId: input.archiveId,
+      internetMessageId: input.internetMessageId,
+      subject: input.subject,
+      senderAddress: input.sender.address,
+      recipients: allRecipients,
+      headers: input.headers,
+      referencedKey
+    });
 
     const insert = this.db.transaction(() => {
       const result = this.db.prepare(`
         INSERT OR IGNORE INTO messages (
-          id, archive_id, folder_id, source_key, internet_message_id, subject,
+          id, archive_id, folder_id, source_key, internet_message_id, conversation_key, subject,
           sender_name, sender_address, to_json, cc_json, bcc_json, recipients_text,
           sent_at, received_at, body_text, body_html, headers_json,
           has_attachments, attachment_count, size_bytes, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         input.archiveId,
         effectiveFolderId,
         input.sourceKey,
         input.internetMessageId,
+        conversationKey,
         input.subject,
         input.sender.name,
         input.sender.address,
@@ -4834,13 +5092,63 @@ function safeSenderFolderName(value: string): string {
   return cleaned || "Unknown sender";
 }
 
+function buildConversationKey(input: {
+  archiveId: string;
+  internetMessageId: string | null;
+  subject: string;
+  senderAddress: string;
+  recipients: EmailAddress[];
+  headers: Record<string, string>;
+  referencedKey?: string;
+}): string {
+  const gmailThreadId = headerValue(input.headers, "x-archive-mail-gmail-thread-id")?.trim();
+  if (gmailThreadId) return `${input.archiveId}:gmail:${gmailThreadId}`;
+  if (input.referencedKey) return input.referencedKey;
+  const subject = normalizeConversationSubject(input.subject);
+  const participants = [...new Set([
+    input.senderAddress,
+    ...input.recipients.map((recipient) => recipient.address)
+  ].map((address) => address.trim().toLowerCase()).filter(Boolean))].sort();
+  const fingerprint = createHash("sha256")
+    .update(`${subject}\n${participants.join("\n")}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `${input.archiveId}:fallback:${fingerprint}`;
+}
+
+function normalizeConversationSubject(subject: string): string {
+  return subject
+    .replace(/^\s*(?:(?:re|fw|fwd)(?:\[\d+\])?:\s*)+/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase() || "(no subject)";
+}
+
+function referencedMessageIds(headers: Record<string, string>): string[] {
+  const values = [headerValue(headers, "in-reply-to"), headerValue(headers, "references")]
+    .filter((value): value is string => Boolean(value));
+  return [...new Set(values.flatMap((value) => value.match(/<[^>]+>/g) ?? []))];
+}
+
+function normalizeInternetMessageId(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function headerValue(headers: Record<string, string>, name: string): string | null {
+  const target = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === target) return value;
+  }
+  return null;
+}
+
 function formatAiScheduleRunSummary(
   progress: AiScheduleRunProgress,
   status: AiScheduleRunStatus
 ): string {
   if (status === "queueing") return `Preparing ${progress.totalMessages} messages`;
   const skipped = progress.skippedMessages > 0
-    ? ` · ${progress.skippedMessages} already up to date`
+    ? ` · ${progress.skippedMessages} skipped`
     : "";
   const enqueueErrors = progress.enqueueErrors > 0
     ? ` · ${progress.enqueueErrors} could not be queued`

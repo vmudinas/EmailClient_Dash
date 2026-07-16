@@ -377,6 +377,124 @@ describe("AiScheduleService", () => {
     scheduler.close();
     database.close();
   });
+
+  it("queues only one draft per conversation and reports duplicate chain messages as skipped", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Conversation schedule",
+      sourceType: "gmail",
+      fingerprint: "conversation-schedule",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    database.completeArchive(archive.id, 0);
+    const firstMessageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "conversation-schedule-first",
+      internetMessageId: "<schedule-first@example.test>",
+      subject: "Remote engineering role",
+      sender: { name: "Recruiter", address: "recruiter@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T12:00:00.000Z",
+      receivedAt: "2026-07-15T12:00:00.000Z",
+      bodyText: "Initial role message",
+      bodyHtml: null,
+      headers: { "message-id": "<schedule-first@example.test>" },
+      sizeBytes: 20,
+      attachments: []
+    });
+    const secondMessageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "conversation-schedule-second",
+      internetMessageId: "<schedule-second@example.test>",
+      subject: "Re: Remote engineering role",
+      sender: { name: "Recruiter", address: "recruiter@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T13:00:00.000Z",
+      receivedAt: "2026-07-15T13:00:00.000Z",
+      bodyText: "Following up on the same role",
+      bodyHtml: null,
+      headers: {
+        "message-id": "<schedule-second@example.test>",
+        "in-reply-to": "<schedule-first@example.test>"
+      },
+      sizeBytes: 20,
+      attachments: []
+    });
+    const connection = database.createGmailConnection({
+      email: "owner@example.test",
+      archiveId: archive.id,
+      folderId: inbox.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canManageCalendar: false,
+      refreshToken: "refresh-token"
+    });
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({ apiKey: "sk-test-secret", clearApiKey: false, enabled: true });
+    const draftReply = vi.fn().mockResolvedValue({
+      draft: {
+        workRelated: true,
+        developmentOpportunity: true,
+        reason: "Recruiter conversation",
+        subject: "Remote engineering role",
+        bodyText: "Thank you for reaching out.",
+        confidence: 0.96
+      },
+      usage: { inputTokens: 20, outputTokens: 10 }
+    });
+    const ai = new AiService(database, settings, () => ({
+      analyze: vi.fn(),
+      draftReply,
+      testConnection: vi.fn()
+    }));
+    const scheduler = new AiScheduleService(database, ai);
+    const schedule = database.createAiSchedule({
+      name: "Conversation draft sweep",
+      task: "draft_reply",
+      folderId: inbox.id,
+      gmailConnectionId: connection.id,
+      mode: "all",
+      intervalMinutes: 30,
+      provider: "openai",
+      model: "draft-model",
+      skills: ["recommend-draft"],
+      prompt: "",
+      enabled: true
+    });
+
+    await scheduler.runNow(schedule.id);
+    await vi.waitFor(() => expect(database.listEmailDrafts()).toHaveLength(1));
+    expect(draftReply).toHaveBeenCalledTimes(1);
+    expect([firstMessageId, secondMessageId]).toContain(database.listEmailDrafts()[0]?.sourceMessageId);
+    expect(database.getAiSchedule(schedule.id)?.progress).toMatchObject({
+      totalMessages: 2,
+      queuedJobs: 1,
+      skippedMessages: 1,
+      completed: 1
+    });
+    expect(database.listDiagnostics().some((entry) => entry.context.operation === "draft_skip")).toBe(true);
+
+    await scheduler.runNow(schedule.id);
+    expect(draftReply).toHaveBeenCalledTimes(1);
+    expect(database.getAiSchedule(schedule.id)?.progress).toMatchObject({
+      totalMessages: 2,
+      queuedJobs: 0,
+      skippedMessages: 2
+    });
+
+    await ai.close();
+    scheduler.close();
+    database.close();
+  });
 });
 
 async function waitForAnalysis(database: EmailDatabase, messageId: string) {

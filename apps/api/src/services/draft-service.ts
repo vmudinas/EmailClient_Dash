@@ -64,7 +64,8 @@ export class DraftService {
       bcc: draft.bcc,
       subject: draft.subject,
       bodyText: draft.bodyText,
-      ...(draft.fromAddress ? { fromAddress: draft.fromAddress } : {})
+      ...(draft.fromAddress ? { fromAddress: draft.fromAddress } : {}),
+      ...(draft.sourceMessageId ? { sourceMessageId: draft.sourceMessageId } : {})
     });
     if (!parsed.success) {
       throw new DraftValidationError(parsed.error.issues[0]?.message ?? "Complete the draft before sending");

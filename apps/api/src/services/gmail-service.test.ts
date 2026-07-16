@@ -40,6 +40,7 @@ describe("GmailService", () => {
     const listQueries: string[] = [];
     let revoked = 0;
     let sentRaw: Buffer | null = null;
+    let sentThreadId: string | null = null;
     const rawMime = gmailMessageFixture();
     const fetcher: typeof fetch = async (input, init) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
@@ -74,13 +75,15 @@ describe("GmailService", () => {
       if (url.pathname.endsWith("/users/me/messages/send")) {
         expect(init?.method).toBe("POST");
         expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer access-token");
-        const request = JSON.parse(String(init?.body)) as { raw: string };
+        const request = JSON.parse(String(init?.body)) as { raw: string; threadId?: string };
         sentRaw = Buffer.from(request.raw, "base64url");
+        sentThreadId = request.threadId ?? null;
         return jsonResponse({ id: "gmail-sent-1", threadId: "gmail-thread-1" });
       }
       if (url.pathname.endsWith("/users/me/messages/gmail-message-1")) {
         return jsonResponse({
           id: "gmail-message-1",
+          threadId: "gmail-thread-source",
           raw: rawMime.toString("base64url"),
           labelIds: ["INBOX", "UNREAD"]
         });
@@ -88,6 +91,7 @@ describe("GmailService", () => {
       if (url.pathname.endsWith("/users/me/messages/gmail-sent-1")) {
         return jsonResponse({
           id: "gmail-sent-1",
+          threadId: "gmail-thread-source",
           raw: sentRaw!.toString("base64url"),
           labelIds: ["SENT"]
         });
@@ -150,7 +154,8 @@ describe("GmailService", () => {
       cc: ["copy@example.test"],
       bcc: [],
       subject: "Sent from Archive Mail",
-      bodyText: "This local client sent the message through Gmail."
+      bodyText: "This local client sent the message through Gmail.",
+      sourceMessageId: detail.id
     });
     expect(sent).toEqual({
       id: "gmail-sent-1",
@@ -163,6 +168,10 @@ describe("GmailService", () => {
     expect(parsedSent.cc?.value[0]?.address).toBe("copy@example.test");
     expect(parsedSent.subject).toBe("Sent from Archive Mail");
     expect(parsedSent.text?.trim()).toBe("This local client sent the message through Gmail.");
+    expect(parsedSent.inReplyTo).toBe("<gmail-message-1@example.test>");
+    expect(parsedSent.references).toContain("<gmail-message-1@example.test>");
+    expect(sentThreadId).toBe("gmail-thread-source");
+    expect(database.getDraftReplyBlocker(detail.id)).toMatchObject({ reason: "already_replied" });
     expect(database.getArchive(archive.id)).toMatchObject({ messageCount: 2, unreadCount: 1 });
     expect(database.search({ q: "local client sent" }).items[0]?.message.state.isRead).toBe(true);
 

@@ -49,6 +49,7 @@ interface GmailListResponse {
 
 interface GmailRawMessage {
   id: string;
+  threadId?: string;
   raw?: string;
   labelIds?: string[];
 }
@@ -452,6 +453,12 @@ export class GmailService {
     try {
       const accessToken = await this.accessToken(connection, signal);
       const fromAddress = await this.resolveSendFromAddress(connection, accessToken, signal, message.fromAddress);
+      const replyContext = message.sourceMessageId
+        ? this.database.getMessageReplyContext(message.sourceMessageId)
+        : null;
+      if (message.sourceMessageId && !replyContext) {
+        throw new Error("The source email for this reply no longer exists");
+      }
       const compiled = await nodemailer.createTransport({
         streamTransport: true,
         buffer: true,
@@ -463,6 +470,8 @@ export class GmailService {
         bcc: message.bcc.length > 0 ? message.bcc : undefined,
         subject: message.subject,
         text: message.bodyText,
+        inReplyTo: replyContext?.internetMessageId ?? undefined,
+        references: replyContext?.references.length ? replyContext.references : undefined,
         attachments: attachments.map((attachment) => ({
           filename: attachment.filename,
           contentType: attachment.contentType,
@@ -479,10 +488,33 @@ export class GmailService {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ raw: compiled.message.toString("base64url") })
+          body: JSON.stringify({
+            raw: compiled.message.toString("base64url"),
+            ...(replyContext?.gmailThreadId ? { threadId: replyContext.gmailThreadId } : {})
+          })
         }
       );
       if (!sent.id) throw new Error("Gmail accepted the request without returning a message ID");
+      if (message.sourceMessageId) {
+        try {
+          this.database.recordConversationReply(message.sourceMessageId, sent.id);
+        } catch (error) {
+          this.database.recordDiagnostic({
+            level: "warning",
+            category: "gmail",
+            message: `Reply was sent, but its local conversation marker could not be saved: ${errorMessage(error)}`,
+            stack: error instanceof Error ? error.stack : null,
+            archiveId: connection.archiveId,
+            sourceName: connection.email,
+            context: {
+              connectionId,
+              operation: "reply_marker_save",
+              sourceMessageId: message.sourceMessageId,
+              gmailMessageId: sent.id
+            }
+          });
+        }
+      }
 
       let localCopyImported = false;
       try {
@@ -900,6 +932,9 @@ export class GmailService {
       sourceKey,
       folderPath
     );
+    if (rawMessage.threadId) {
+      normalized.headers["x-archive-mail-gmail-thread-id"] = rawMessage.threadId;
+    }
     const inserted = await this.imports.persistNormalizedMessage({
       archiveId: connection.archiveId,
       message: normalized,

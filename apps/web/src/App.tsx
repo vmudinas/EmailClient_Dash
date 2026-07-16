@@ -890,6 +890,7 @@ export function App() {
       ? target.subject
       : `${prefix}${target.subject}`;
     openCompose(null, {
+      sourceMessageId: mode === "reply" ? target.id : null,
       to: mode === "reply" ? target.sender.address : "",
       subject,
       bodyText: quoted

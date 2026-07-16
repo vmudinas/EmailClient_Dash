@@ -479,6 +479,7 @@ export interface GmailSendRequest {
   subject: string;
   bodyText: string;
   fromAddress?: string;
+  sourceMessageId?: string;
 }
 
 export interface GmailSendResult {
@@ -844,7 +845,8 @@ export const gmailSendRequestSchema = z.object({
   bcc: z.array(gmailRecipientSchema).max(100).default([]),
   subject: z.string().max(998).default(""),
   bodyText: z.string().max(1_000_000).default(""),
-  fromAddress: gmailRecipientSchema.optional()
+  fromAddress: gmailRecipientSchema.optional(),
+  sourceMessageId: z.string().uuid().optional()
 }).strict().refine(
   (value) => value.subject.trim().length > 0 || value.bodyText.trim().length > 0,
   { message: "Add a subject or message body", path: ["bodyText"] }

@@ -1,6 +1,6 @@
 import type { AiJob, AiSchedule } from "@email-client/shared";
 import type { EmailStore } from "../storage/database.js";
-import { AiConfigurationError, type AiService } from "./ai-service.js";
+import { AiConfigurationError, AiDraftSkippedError, type AiService } from "./ai-service.js";
 
 const TICK_INTERVAL_MS = 60_000;
 
@@ -84,6 +84,23 @@ export class AiScheduleService {
           if (job.scheduleRunId === runId) queued += 1;
           else skipped += 1;
         } catch (error) {
+          if (error instanceof AiDraftSkippedError) {
+            skipped += 1;
+            this.database.recordDiagnostic({
+              level: "info",
+              category: "ai",
+              message: `AI draft skipped: ${error.message}`,
+              archiveId: schedule.archiveId,
+              context: {
+                operation: "draft_skip",
+                scheduleId: schedule.id,
+                scheduleRunId: runId,
+                messageId,
+                reason: error.message
+              }
+            });
+            continue;
+          }
           if (error instanceof AiConfigurationError) {
             const progress = this.database.failAiScheduleRun(runId, error.message);
             this.recordRunDiagnostic(schedule, progress.error ? `Failed: ${progress.error}` : "Failed", "warning", null, runId);

@@ -135,6 +135,7 @@ describe("ComposeDialog", () => {
         initialDraft={{
           id: "draft-1",
           source: "ai",
+          sourceMessageId: "11111111-1111-4111-8111-111111111111",
           to: ["recruiter@example.test"],
           subject: "Re: Engineering role",
           bodyText: "Thank you for reaching out.",
@@ -160,7 +161,8 @@ describe("ComposeDialog", () => {
 
     expect(onSave).toHaveBeenCalledWith(CONNECTION.id, expect.objectContaining({
       to: ["recruiter@example.test"],
-      bodyText: "Updated reply."
+      bodyText: "Updated reply.",
+      sourceMessageId: "11111111-1111-4111-8111-111111111111"
     }));
     expect(onSend).not.toHaveBeenCalled();
   });

@@ -100,7 +100,8 @@ export function ComposeDialog({
     bcc: parseRecipients(bcc),
     subject,
     bodyText,
-    ...(fromAddress && fromAddress !== selectedConnection?.email ? { fromAddress } : {})
+    ...(fromAddress && fromAddress !== selectedConnection?.email ? { fromAddress } : {}),
+    ...(initialDraft?.sourceMessageId ? { sourceMessageId: initialDraft.sourceMessageId } : {})
   };
   const ready = Boolean(connectionId)
     && message.to.length > 0

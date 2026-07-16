@@ -1928,7 +1928,7 @@ function AiScheduleProgressReport({
       </div>
       {(progress.skippedMessages > 0 || progress.enqueueErrors > 0 || (task === "draft_reply" && progress.draftsCreated > 0)) && (
         <div className="ai-run-progress-details">
-          {progress.skippedMessages > 0 && <span>{progress.skippedMessages.toLocaleString()} already up to date</span>}
+          {progress.skippedMessages > 0 && <span>{progress.skippedMessages.toLocaleString()} skipped (already handled or up to date)</span>}
           {progress.enqueueErrors > 0 && <span className="error">{progress.enqueueErrors.toLocaleString()} could not be queued</span>}
           {task === "draft_reply" && progress.draftsCreated > 0 && <span>{progress.draftsCreated.toLocaleString()} reviewable drafts created</span>}
         </div>

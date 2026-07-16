@@ -139,12 +139,14 @@ export class AiService {
       skills: [...new Set(options.agent.skills)],
       prompt: options.agent.prompt.trim()
     };
-    this.requireConfiguredFor(agent.provider, true);
     const message = this.database.getMessage(messageId);
     if (!message) throw new AiMessageNotFoundError("Message not found");
     if (!message.sender.address.includes("@")) {
       throw new AiConfigurationError("The source email does not have a replyable sender address");
     }
+    const blocker = this.database.getDraftReplyBlocker(messageId);
+    if (blocker) throw new AiDraftSkippedError(draftBlockerMessage(blocker.reason));
+    this.requireConfiguredFor(agent.provider, true);
     const contentHash = messageContentHash(message);
     const promptVersion = configuredPromptVersion(agent, "draft-reply-v1");
     const existingDraft = this.database.getAutomatedDraft(options.scheduleId, messageId);
@@ -175,7 +177,15 @@ export class AiService {
         contentHash
       });
     } catch (error) {
-      const raced = this.database.getActiveAiJob(messageId, "draft_reply");
+      const conversationBlocker = this.database.getDraftReplyBlocker(messageId);
+      if (conversationBlocker?.reason !== "active_conversation_job" || !conversationBlocker.jobId) {
+        if (conversationBlocker) {
+          throw new AiDraftSkippedError(draftBlockerMessage(conversationBlocker.reason));
+        }
+      }
+      const raced = conversationBlocker?.jobId
+        ? this.database.getAiJob(conversationBlocker.jobId)
+        : this.database.getActiveAiJob(messageId, "draft_reply");
       if (!raced) throw error;
       job = raced;
     }
@@ -367,26 +377,44 @@ export class AiService {
         this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
         let draft: EmailDraft | null = null;
         if (result.draft.workRelated) {
-          const identity = this.draftSettings?.current() ?? DEFAULT_DRAFT_IDENTITY;
-          draft = this.database.createAutomatedDraft({
-            connectionId: job.gmailConnectionId,
-            sourceMessageId: job.messageId,
-            scheduleId: job.scheduleId,
-            fromAddress: identity.defaultFromAddress,
-            to: [message.sender.address],
-            cc: [],
-            bcc: [],
-            subject: applyDraftSenderName(
-              replySubject(result.draft.subject || message.subject),
-              identity.senderName
-            ),
-            bodyText: applyDraftSenderName(result.draft.bodyText, identity.senderName),
-            resumeId: result.draft.developmentOpportunity ? job.resumeId : null,
-            workRelated: true,
-            developmentOpportunity: result.draft.developmentOpportunity,
-            aiReason: result.draft.reason,
-            aiConfidence: result.draft.confidence
-          });
+          const completionBlocker = this.database.getDraftReplyBlocker(job.messageId, job.id);
+          if (completionBlocker) {
+            this.database.recordDiagnostic({
+              level: "info",
+              category: "ai",
+              message: `AI reply draft suppressed: ${draftBlockerMessage(completionBlocker.reason)}`,
+              jobId: job.id,
+              archiveId: message.archiveId,
+              context: {
+                operation: "draft_suppressed",
+                messageId: job.messageId,
+                scheduleId: job.scheduleId,
+                conversationKey: completionBlocker.conversationKey,
+                reason: completionBlocker.reason
+              }
+            });
+          } else {
+            const identity = this.draftSettings?.current() ?? DEFAULT_DRAFT_IDENTITY;
+            draft = this.database.createAutomatedDraft({
+              connectionId: job.gmailConnectionId,
+              sourceMessageId: job.messageId,
+              scheduleId: job.scheduleId,
+              fromAddress: identity.defaultFromAddress,
+              to: [message.sender.address],
+              cc: [],
+              bcc: [],
+              subject: applyDraftSenderName(
+                replySubject(result.draft.subject || message.subject),
+                identity.senderName
+              ),
+              bodyText: applyDraftSenderName(result.draft.bodyText, identity.senderName),
+              resumeId: result.draft.developmentOpportunity ? job.resumeId : null,
+              workRelated: true,
+              developmentOpportunity: result.draft.developmentOpportunity,
+              aiReason: result.draft.reason,
+              aiConfidence: result.draft.confidence
+            });
+          }
         }
         this.database.completeAiJob(job.id);
         this.database.recordDiagnostic({
@@ -481,6 +509,7 @@ export class AiService {
 export class AiConfigurationError extends Error {}
 export class AiBudgetError extends Error {}
 export class AiMessageNotFoundError extends Error {}
+export class AiDraftSkippedError extends Error {}
 export class AiJobNotFoundError extends Error {}
 
 function messageContentHash(message: MessageDetail): string {
@@ -520,4 +549,10 @@ function replySubject(subject: string): string {
 export interface AiDraftStart {
   job: AiJob;
   draft: EmailDraft | null;
+}
+
+function draftBlockerMessage(reason: "existing_draft" | "already_replied" | "active_conversation_job"): string {
+  if (reason === "existing_draft") return "a reviewable draft already exists for this email conversation";
+  if (reason === "already_replied") return "this email conversation already has a sent reply";
+  return "another AI draft job is already active for this email conversation";
 }

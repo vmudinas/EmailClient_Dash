@@ -512,7 +512,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByText("89 queued")).toBeTruthy();
     expect(screen.getByText("1 running")).toBeTruthy();
     expect(screen.getByText("10 completed")).toBeTruthy();
-    expect(screen.getByText("1 already up to date")).toBeTruthy();
+    expect(screen.getByText("1 skipped (already handled or up to date)")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "AI schedule progress" }).getAttribute("aria-valuenow")).toBe("10");
     expect((screen.getByRole("button", { name: "Run Inbox Sweep now" }) as HTMLButtonElement).disabled).toBe(true);
   });
