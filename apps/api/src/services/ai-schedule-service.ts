@@ -1,4 +1,4 @@
-import type { AiSchedule } from "@email-client/shared";
+import type { AiJob, AiSchedule } from "@email-client/shared";
 import type { EmailStore } from "../storage/database.js";
 import { AiConfigurationError, type AiService } from "./ai-service.js";
 
@@ -44,16 +44,23 @@ export class AiScheduleService {
   async runNow(scheduleId: string): Promise<AiSchedule> {
     const schedule = this.database.getAiSchedule(scheduleId);
     if (!schedule) throw new Error("Schedule not found");
+    if (schedule.progress && ["queueing", "processing"].includes(schedule.progress.status)) {
+      throw new Error("Schedule already has a run in progress");
+    }
     await this.runSchedule(schedule, new Date().toISOString());
     return this.database.getAiSchedule(scheduleId)!;
   }
 
   private async runSchedule(schedule: AiSchedule, now: string): Promise<void> {
+    let runId: string | null = null;
     try {
       const messageIds = schedule.messageId
         ? [schedule.messageId]
         : this.database.listMessageIdsForSchedule(schedule.folderId, schedule.mode);
+      runId = this.database.createAiScheduleRun(schedule.id, messageIds.length, now);
       let queued = 0;
+      let skipped = 0;
+      let enqueueErrors = 0;
       for (const messageId of messageIds) {
         try {
           const agent = {
@@ -62,45 +69,56 @@ export class AiScheduleService {
             skills: schedule.skills,
             prompt: schedule.prompt
           };
-          const result = schedule.task === "draft_reply"
+          const job: AiJob = schedule.task === "draft_reply"
             ? this.ai.startDraftReply(messageId, {
                 scheduleId: schedule.id,
+                scheduleRunId: runId,
                 gmailConnectionId: schedule.gmailConnectionId!,
                 resumeId: schedule.resumeId,
                 agent
-              })
-            : this.ai.startAnalysis(messageId, agent);
-          if (result.job.status === "queued") queued += 1;
+              }).job
+            : this.ai.startAnalysis(messageId, agent, {
+                scheduleId: schedule.id,
+                scheduleRunId: runId
+              }).job;
+          if (job.scheduleRunId === runId) queued += 1;
+          else skipped += 1;
         } catch (error) {
           if (error instanceof AiConfigurationError) {
-            this.finishRun(schedule, now, `Skipped: ${error.message}`, "warning");
+            const progress = this.database.failAiScheduleRun(runId, error.message);
+            this.recordRunDiagnostic(schedule, progress.error ? `Failed: ${progress.error}` : "Failed", "warning", null, runId);
             return;
           }
-          // Any other per-message failure (e.g. message deleted mid-run) shouldn't abort the rest of the sweep.
+          enqueueErrors += 1;
         }
       }
-      this.finishRun(
+      const progress = this.database.finishAiScheduleEnqueue(runId, {
+        queuedJobs: queued,
+        skippedMessages: skipped,
+        enqueueErrors
+      });
+      this.recordRunDiagnostic(
         schedule,
-        now,
-        schedule.task === "draft_reply"
-          ? `Queued ${queued} of ${messageIds.length} email${messageIds.length === 1 ? "" : "s"} for draft review`
-          : `Queued ${queued} of ${messageIds.length} message${messageIds.length === 1 ? "" : "s"}`,
-        "info"
+        this.database.getAiSchedule(schedule.id)?.lastRunSummary ?? `Started ${queued} jobs`,
+        progress.status === "completed_with_errors" ? "warning" : "info",
+        null,
+        runId
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "AI schedule run failed";
-      this.finishRun(schedule, now, `Failed: ${message}`, "error", error instanceof Error ? error.stack : null);
+      if (runId) this.database.failAiScheduleRun(runId, message);
+      else this.database.recordAiScheduleRun(schedule.id, now, `Failed: ${message}`);
+      this.recordRunDiagnostic(schedule, `Failed: ${message}`, "error", error instanceof Error ? error.stack ?? null : null, runId);
     }
   }
 
-  private finishRun(
+  private recordRunDiagnostic(
     schedule: AiSchedule,
-    now: string,
     summary: string,
     level: "info" | "warning" | "error",
-    stack: string | null = null
+    stack: string | null,
+    runId: string | null
   ): void {
-    this.database.recordAiScheduleRun(schedule.id, now, summary);
     this.database.recordDiagnostic({
       level,
       category: "ai",
@@ -109,6 +127,7 @@ export class AiScheduleService {
       context: {
         operation: "schedule_run",
         scheduleId: schedule.id,
+        scheduleRunId: runId,
         task: schedule.task,
         folderId: schedule.folderId,
         messageId: schedule.messageId,

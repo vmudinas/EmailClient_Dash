@@ -201,6 +201,7 @@ export interface AiJob extends AiAgentConfig {
   messageId: string;
   task: AiJobTask;
   scheduleId: string | null;
+  scheduleRunId: string | null;
   gmailConnectionId: string | null;
   resumeId: string | null;
   status: AiJobStatus;
@@ -247,6 +248,28 @@ export interface AiMessageState {
 
 export type AiScheduleMode = "all" | "unread";
 export type AiScheduleTask = "analyze" | "draft_reply";
+export type AiScheduleRunStatus = "queueing" | "processing" | "completed" | "completed_with_errors" | "failed";
+
+export interface AiScheduleRunProgress {
+  runId: string;
+  status: AiScheduleRunStatus;
+  totalMessages: number;
+  queuedJobs: number;
+  skippedMessages: number;
+  enqueueErrors: number;
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  processedJobs: number;
+  percent: number;
+  draftsCreated: number;
+  startedAt: string;
+  enqueueCompletedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+}
 
 export interface AiSchedule extends AiAgentConfig {
   id: string;
@@ -267,6 +290,7 @@ export interface AiSchedule extends AiAgentConfig {
   enabled: boolean;
   lastRunAt: string | null;
   lastRunSummary: string | null;
+  progress: AiScheduleRunProgress | null;
   createdAt: string;
   updatedAt: string;
 }

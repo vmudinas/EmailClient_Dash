@@ -78,10 +78,97 @@ describe("AiScheduleService", () => {
 
     const afterRun = database.getAiSchedule(schedule.id)!;
     expect(afterRun.lastRunAt).toBe("2026-07-10T00:00:00.000Z");
-    expect(afterRun.lastRunSummary).toBe("Queued 1 of 1 message");
+    expect(afterRun.lastRunSummary).toBe("Completed 1 of 1 jobs");
+    expect(afterRun.progress).toMatchObject({
+      status: "completed",
+      totalMessages: 1,
+      queuedJobs: 1,
+      completed: 1,
+      processedJobs: 1,
+      percent: 100
+    });
     expect(database.listDiagnostics({ category: "ai" })).toEqual(expect.arrayContaining([
       expect.objectContaining({ level: "info", message: expect.stringContaining("Inbox unread sweep") })
     ]));
+
+    await ai.close();
+    scheduler.close();
+    database.close();
+  });
+
+  it("reports live queued, running, completed, and percent counts for a schedule run", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Progress mail",
+      sourceType: "mbox",
+      fingerprint: "ai-schedule-progress",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    database.completeArchive(archive.id, 0);
+    insertMessage(database, archive.id, inbox.id, "message-1");
+    insertMessage(database, archive.id, inbox.id, "message-2");
+
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({ apiKey: "sk-test-secret", clearApiKey: false, enabled: true });
+    let releaseAnalysis!: (value: {
+      analysis: {
+        summary: string; categories: string[]; priority: "normal"; actionRequired: boolean;
+        actionSummary: null; spamProbability: number; phishingProbability: number;
+        draftRecommended: boolean; confidence: number; signals: string[];
+      };
+      usage: { inputTokens: number; outputTokens: number };
+    }) => void;
+    const pendingAnalysis = new Promise<Parameters<typeof releaseAnalysis>[0]>((resolve) => {
+      releaseAnalysis = resolve;
+    });
+    const analyze = vi.fn().mockReturnValue(pendingAnalysis);
+    const ai = new AiService(database, settings, () => ({ analyze, testConnection: vi.fn() }));
+    const scheduler = new AiScheduleService(database, ai);
+    const schedule = database.createAiSchedule({
+      name: "Progress sweep",
+      folderId: inbox.id,
+      mode: "all",
+      intervalMinutes: 60,
+      provider: "openai",
+      model: "schedule-model",
+      skills: ["summarize"],
+      prompt: "",
+      enabled: true
+    });
+
+    await scheduler.runNow(schedule.id);
+
+    expect(database.getAiSchedule(schedule.id)?.progress).toMatchObject({
+      status: "processing",
+      totalMessages: 2,
+      queuedJobs: 2,
+      queued: 1,
+      running: 1,
+      completed: 0,
+      processedJobs: 0,
+      percent: 0
+    });
+    await expect(scheduler.runNow(schedule.id)).rejects.toThrow("already has a run in progress");
+    expect(database.dueAiSchedules("2099-01-01T00:00:00.000Z")).toEqual([]);
+
+    releaseAnalysis({
+      analysis: {
+        summary: "done", categories: [], priority: "normal", actionRequired: false,
+        actionSummary: null, spamProbability: 0, phishingProbability: 0,
+        draftRecommended: false, confidence: 1, signals: []
+      },
+      usage: { inputTokens: 1, outputTokens: 1 }
+    });
+    await vi.waitFor(() => expect(database.getAiSchedule(schedule.id)?.progress).toMatchObject({
+      status: "completed",
+      queued: 0,
+      running: 0,
+      completed: 2,
+      processedJobs: 2,
+      percent: 100
+    }));
 
     await ai.close();
     scheduler.close();
@@ -174,9 +261,10 @@ describe("AiScheduleService", () => {
 
     expect(analyze).not.toHaveBeenCalled();
     const schedule = database.listAiSchedules()[0]!;
-    expect(schedule.lastRunSummary).toContain("Skipped:");
+    expect(schedule.lastRunSummary).toContain("Failed:");
+    expect(schedule.progress).toMatchObject({ status: "failed", queuedJobs: 0 });
     expect(database.listDiagnostics({ category: "ai" })).toEqual(expect.arrayContaining([
-      expect.objectContaining({ level: "warning", message: expect.stringContaining("Skipped:") })
+      expect.objectContaining({ level: "warning", message: expect.stringContaining("Failed:") })
     ]));
 
     await ai.close();

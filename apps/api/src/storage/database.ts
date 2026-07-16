@@ -14,6 +14,8 @@ import type {
   AiSchedule,
   AiScheduleCreate,
   AiScheduleMode,
+  AiScheduleRunProgress,
+  AiScheduleRunStatus,
   AiScheduleTask,
   AiScheduleUpdate,
   AiUsageSummary,
@@ -258,6 +260,7 @@ export interface AiJobCreateInput {
   messageId: string;
   task?: AiJobTask;
   scheduleId?: string | null;
+  scheduleRunId?: string | null;
   gmailConnectionId?: string | null;
   resumeId?: string | null;
   provider: AiProviderId;
@@ -1044,6 +1047,108 @@ export class EmailDatabase {
         PRAGMA user_version = 16;
       `);
     }
+
+    const aiScheduleProgressVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (aiScheduleProgressVersion < 17) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ai_schedule_runs (
+          id TEXT PRIMARY KEY,
+          schedule_id TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('queueing', 'processing', 'completed', 'completed_with_errors', 'failed')),
+          total_messages INTEGER NOT NULL DEFAULT 0,
+          queued_jobs INTEGER NOT NULL DEFAULT 0,
+          skipped_messages INTEGER NOT NULL DEFAULT 0,
+          enqueue_errors INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT NOT NULL,
+          enqueue_completed_at TEXT,
+          completed_at TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(schedule_id) REFERENCES ai_schedules(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS ai_schedule_runs_schedule_idx
+          ON ai_schedule_runs(schedule_id, started_at DESC);
+      `);
+      const jobColumns = new Set(
+        (this.db.pragma("table_info(ai_jobs)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!jobColumns.has("schedule_run_id")) {
+        this.db.exec("ALTER TABLE ai_jobs ADD COLUMN schedule_run_id TEXT;");
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS ai_jobs_schedule_run_idx
+          ON ai_jobs(schedule_run_id, status, created_at);
+      `);
+      this.backfillLegacyAiScheduleRuns();
+      this.db.pragma("user_version = 17");
+    }
+  }
+
+  private backfillLegacyAiScheduleRuns(): void {
+    const schedules = this.db.prepare(`
+      SELECT id, task, folder_id, provider, model, last_run_at, last_run_summary
+      FROM ai_schedules s
+      WHERE last_run_at IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM ai_schedule_runs r WHERE r.schedule_id = s.id)
+      ORDER BY last_run_at DESC
+    `).all() as Row[];
+
+    for (const schedule of schedules) {
+      const summary = String(schedule.last_run_summary ?? "");
+      const match = summary.match(/Queued\s+(\d+)\s+of\s+(\d+)/i);
+      if (!match) continue;
+      const expectedJobs = Number(match[1]);
+      const totalMessages = Number(match[2]);
+      const startedAt = String(schedule.last_run_at);
+      const candidateJobs = expectedJobs > 0 ? this.db.prepare(`
+        SELECT j.id
+        FROM ai_jobs j
+        JOIN messages m ON m.id = j.message_id
+        WHERE j.schedule_run_id IS NULL
+          AND m.folder_id = ?
+          AND j.task = ?
+          AND j.provider = ?
+          AND j.model = ?
+          AND (j.schedule_id = ? OR (? = 'analyze' AND j.schedule_id IS NULL))
+          AND datetime(j.created_at) >= datetime(?, '-10 minutes')
+        ORDER BY j.created_at DESC
+        LIMIT ?
+      `).all(
+        schedule.folder_id,
+        schedule.task,
+        schedule.provider,
+        schedule.model,
+        schedule.id,
+        schedule.task,
+        startedAt,
+        expectedJobs
+      ) as Row[] : [];
+      const runId = randomUUID();
+      this.db.prepare(`
+        INSERT INTO ai_schedule_runs (
+          id, schedule_id, status, total_messages, queued_jobs, skipped_messages,
+          enqueue_errors, started_at, enqueue_completed_at, created_at, updated_at
+        ) VALUES (?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        runId,
+        schedule.id,
+        totalMessages,
+        candidateJobs.length,
+        Math.max(0, totalMessages - expectedJobs),
+        Math.max(0, expectedJobs - candidateJobs.length),
+        startedAt,
+        startedAt,
+        startedAt,
+        new Date().toISOString()
+      );
+      if (candidateJobs.length > 0) {
+        const placeholders = candidateJobs.map(() => "?").join(", ");
+        this.db.prepare(`UPDATE ai_jobs SET schedule_run_id = ? WHERE id IN (${placeholders})`)
+          .run(runId, ...candidateJobs.map((job) => job.id));
+      }
+      this.refreshAiScheduleRun(runId);
+    }
   }
 
   private moveUndatedMessagesToDedicatedFolders(): number {
@@ -1806,15 +1911,16 @@ export class EmailDatabase {
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO ai_jobs (
-        id, message_id, task, schedule_id, gmail_connection_id, resume_id,
+        id, message_id, task, schedule_id, schedule_run_id, gmail_connection_id, resume_id,
         status, provider, model, skills_json, prompt, prompt_version, content_hash,
         attempts, max_attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       id,
       input.messageId,
       input.task ?? "analyze",
       input.scheduleId ?? null,
+      input.scheduleRunId ?? null,
       input.gmailConnectionId ?? null,
       input.resumeId ?? null,
       input.provider,
@@ -1896,6 +2002,7 @@ export class EmailDatabase {
     `).run(now, now, id);
     const job = this.getAiJob(id);
     if (!job) throw new Error("AI job not found");
+    if (job.scheduleRunId) this.refreshAiScheduleRun(job.scheduleRunId);
     return job;
   }
 
@@ -1917,7 +2024,9 @@ export class EmailDatabase {
       now,
       id
     );
-    return this.getAiJob(id)!;
+    const updated = this.getAiJob(id)!;
+    if (updated.scheduleRunId) this.refreshAiScheduleRun(updated.scheduleRunId);
+    return updated;
   }
 
   cancelAiJob(id: string): AiJob {
@@ -1930,7 +2039,9 @@ export class EmailDatabase {
       SET status = 'cancelled', error = 'Cancelled by user', completed_at = ?, updated_at = ?
       WHERE id = ?
     `).run(now, now, id);
-    return this.getAiJob(id)!;
+    const updated = this.getAiJob(id)!;
+    if (updated.scheduleRunId) this.refreshAiScheduleRun(updated.scheduleRunId);
+    return updated;
   }
 
   getMessageAnalysis(messageId: string): MessageAnalysis | null {
@@ -2156,9 +2267,157 @@ export class EmailDatabase {
     `).run(ranAt, summary, new Date().toISOString(), id);
   }
 
+  createAiScheduleRun(scheduleId: string, totalMessages: number, startedAt: string): string {
+    if (!this.db.prepare("SELECT 1 FROM ai_schedules WHERE id = ?").get(scheduleId)) {
+      throw new Error("Schedule not found");
+    }
+    const runId = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO ai_schedule_runs (
+        id, schedule_id, status, total_messages, started_at, created_at, updated_at
+      ) VALUES (?, ?, 'queueing', ?, ?, ?, ?)
+    `).run(runId, scheduleId, Math.max(0, Math.trunc(totalMessages)), startedAt, now, now);
+    this.db.prepare(`
+      UPDATE ai_schedules
+      SET last_run_at = ?, last_run_summary = ?, updated_at = ?
+      WHERE id = ?
+    `).run(startedAt, `Preparing ${Math.max(0, Math.trunc(totalMessages))} messages`, now, scheduleId);
+    return runId;
+  }
+
+  finishAiScheduleEnqueue(
+    runId: string,
+    counts: { queuedJobs: number; skippedMessages: number; enqueueErrors: number }
+  ): AiScheduleRunProgress {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(`
+      UPDATE ai_schedule_runs SET
+        queued_jobs = ?, skipped_messages = ?, enqueue_errors = ?,
+        enqueue_completed_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'queueing'
+    `).run(
+      Math.max(0, Math.trunc(counts.queuedJobs)),
+      Math.max(0, Math.trunc(counts.skippedMessages)),
+      Math.max(0, Math.trunc(counts.enqueueErrors)),
+      now,
+      now,
+      runId
+    );
+    if (result.changes === 0) throw new Error("AI schedule run not found");
+    return this.refreshAiScheduleRun(runId)!;
+  }
+
+  failAiScheduleRun(runId: string, error: string): AiScheduleRunProgress {
+    const now = new Date().toISOString();
+    const row = this.db.prepare("SELECT schedule_id FROM ai_schedule_runs WHERE id = ?")
+      .get(runId) as Row | undefined;
+    if (!row) throw new Error("AI schedule run not found");
+    const message = error.slice(0, 4_000);
+    this.db.prepare(`
+      UPDATE ai_schedule_runs SET
+        status = 'failed', error = ?, enqueue_completed_at = COALESCE(enqueue_completed_at, ?),
+        completed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(message, now, now, now, runId);
+    this.db.prepare(`
+      UPDATE ai_schedules SET last_run_summary = ?, updated_at = ? WHERE id = ?
+    `).run(`Failed: ${message}`, now, row.schedule_id);
+    return this.getAiScheduleRunProgress(runId)!;
+  }
+
+  getLatestAiScheduleRunProgress(scheduleId: string): AiScheduleRunProgress | null {
+    const row = this.db.prepare(`
+      SELECT id FROM ai_schedule_runs WHERE schedule_id = ?
+      ORDER BY started_at DESC, created_at DESC LIMIT 1
+    `).get(scheduleId) as Row | undefined;
+    return row ? this.getAiScheduleRunProgress(String(row.id)) : null;
+  }
+
+  getAiScheduleRunProgress(runId: string): AiScheduleRunProgress | null {
+    const row = this.db.prepare(`
+      SELECT r.*,
+        COALESCE(SUM(CASE WHEN j.status = 'queued' THEN 1 ELSE 0 END), 0) AS queued_count,
+        COALESCE(SUM(CASE WHEN j.status = 'running' THEN 1 ELSE 0 END), 0) AS running_count,
+        COALESCE(SUM(CASE WHEN j.status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
+        COALESCE(SUM(CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+        COALESCE(SUM(CASE WHEN j.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_count,
+        (
+          SELECT COUNT(DISTINCT d.id)
+          FROM email_drafts d
+          JOIN ai_jobs draft_job
+            ON draft_job.schedule_run_id = r.id
+           AND draft_job.message_id = d.source_message_id
+          WHERE d.schedule_id = r.schedule_id
+            AND d.created_at >= r.started_at
+        ) AS drafts_created
+      FROM ai_schedule_runs r
+      LEFT JOIN ai_jobs j ON j.schedule_run_id = r.id
+      WHERE r.id = ?
+      GROUP BY r.id
+    `).get(runId) as Row | undefined;
+    if (!row) return null;
+    const queuedJobs = Number(row.queued_jobs);
+    const completed = Number(row.completed_count);
+    const failed = Number(row.failed_count);
+    const cancelled = Number(row.cancelled_count);
+    const processedJobs = completed + failed + cancelled;
+    const status = row.status as AiScheduleRunStatus;
+    return {
+      runId: String(row.id),
+      status,
+      totalMessages: Number(row.total_messages),
+      queuedJobs,
+      skippedMessages: Number(row.skipped_messages),
+      enqueueErrors: Number(row.enqueue_errors),
+      queued: Number(row.queued_count),
+      running: Number(row.running_count),
+      completed,
+      failed,
+      cancelled,
+      processedJobs,
+      percent: queuedJobs === 0
+        ? (["completed", "completed_with_errors"].includes(status) ? 100 : 0)
+        : Math.min(100, Math.round((processedJobs / queuedJobs) * 100)),
+      draftsCreated: Number(row.drafts_created),
+      startedAt: String(row.started_at),
+      enqueueCompletedAt: row.enqueue_completed_at ? String(row.enqueue_completed_at) : null,
+      completedAt: row.completed_at ? String(row.completed_at) : null,
+      error: row.error ? String(row.error) : null
+    };
+  }
+
+  private refreshAiScheduleRun(runId: string): AiScheduleRunProgress | null {
+    const progress = this.getAiScheduleRunProgress(runId);
+    if (!progress || progress.status === "failed") return progress;
+    let status: AiScheduleRunStatus = "queueing";
+    let completedAt: string | null = null;
+    if (progress.enqueueCompletedAt) {
+      if (progress.queued > 0 || progress.running > 0) {
+        status = "processing";
+      } else {
+        status = progress.failed > 0 || progress.cancelled > 0 || progress.enqueueErrors > 0
+          ? "completed_with_errors"
+          : "completed";
+        completedAt = progress.completedAt ?? new Date().toISOString();
+      }
+    }
+    const summary = formatAiScheduleRunSummary(progress, status);
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE ai_schedule_runs SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?
+    `).run(status, completedAt, now, runId);
+    this.db.prepare(`
+      UPDATE ai_schedules SET last_run_summary = ?, updated_at = ?
+      WHERE id = (SELECT schedule_id FROM ai_schedule_runs WHERE id = ?)
+    `).run(summary, now, runId);
+    return this.getAiScheduleRunProgress(runId);
+  }
+
   dueAiSchedules(now: string): AiSchedule[] {
     return this.listAiSchedules().filter((schedule) => {
       if (!schedule.enabled) return false;
+      if (schedule.progress && ["queueing", "processing"].includes(schedule.progress.status)) return false;
       if (!schedule.lastRunAt) return true;
       const dueAt = new Date(schedule.lastRunAt).getTime() + schedule.intervalMinutes * 60_000;
       return new Date(now).getTime() >= dueAt;
@@ -4019,6 +4278,7 @@ export class EmailDatabase {
       messageId: String(row.message_id),
       task: row.task as AiJobTask,
       scheduleId: row.schedule_id ? String(row.schedule_id) : null,
+      scheduleRunId: row.schedule_run_id ? String(row.schedule_run_id) : null,
       gmailConnectionId: row.gmail_connection_id ? String(row.gmail_connection_id) : null,
       resumeId: row.resume_id ? String(row.resume_id) : null,
       status: row.status as AiJobStatus,
@@ -4084,6 +4344,7 @@ export class EmailDatabase {
       enabled: Boolean(row.enabled),
       lastRunAt: row.last_run_at ? String(row.last_run_at) : null,
       lastRunSummary: row.last_run_summary ? String(row.last_run_summary) : null,
+      progress: this.getLatestAiScheduleRunProgress(String(row.id)),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
     };
@@ -4398,6 +4659,26 @@ function safeSenderFolderName(value: string): string {
     .trim()
     .slice(0, 100);
   return cleaned || "Unknown sender";
+}
+
+function formatAiScheduleRunSummary(
+  progress: AiScheduleRunProgress,
+  status: AiScheduleRunStatus
+): string {
+  if (status === "queueing") return `Preparing ${progress.totalMessages} messages`;
+  const skipped = progress.skippedMessages > 0
+    ? ` · ${progress.skippedMessages} already up to date`
+    : "";
+  const enqueueErrors = progress.enqueueErrors > 0
+    ? ` · ${progress.enqueueErrors} could not be queued`
+    : "";
+  if (status === "processing") {
+    return `Processed ${progress.processedJobs} of ${progress.queuedJobs} jobs · ${progress.queued} queued · ${progress.running} running · ${progress.failed} failed${skipped}${enqueueErrors}`;
+  }
+  if (status === "completed_with_errors") {
+    return `Finished ${progress.processedJobs} of ${progress.queuedJobs} jobs · ${progress.completed} completed · ${progress.failed} failed · ${progress.cancelled} cancelled${skipped}${enqueueErrors}`;
+  }
+  return `Completed ${progress.completed} of ${progress.queuedJobs} jobs${skipped}`;
 }
 
 export function toFtsQuery(value: string): string {

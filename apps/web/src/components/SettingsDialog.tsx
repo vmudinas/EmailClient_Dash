@@ -43,6 +43,7 @@ import type {
   AiProviderId,
   AiSchedule,
   AiScheduleMode,
+  AiScheduleRunProgress,
   AiScheduleTask,
   Archive as ArchiveModel,
   AuditEvent,
@@ -1291,6 +1292,8 @@ function AiSchedulesSection({
   const [model, setModel] = useState(settings.ai.providers[settings.ai.activeProvider].model);
   const [skills, setSkills] = useState<AiAgentSkillId[]>([...AI_AGENT_SKILL_IDS]);
   const [prompt, setPrompt] = useState("");
+  const hasActiveRun = schedules.some((schedule) => schedule.progress
+    && ["queueing", "processing"].includes(schedule.progress.status));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1312,6 +1315,23 @@ function AiSchedulesSection({
   }, [api, onError]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const loaded = await api.listAiSchedules();
+        if (active) setSchedules(loaded);
+      } catch {
+        // The main request path handles visible errors and expired sessions.
+      }
+    };
+    const timer = window.setInterval(() => { void refresh(); }, hasActiveRun ? 2_000 : 10_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [api, hasActiveRun]);
 
   const changeArchive = async (nextArchiveId: string) => {
     setArchiveId(nextArchiveId);
@@ -1517,7 +1537,7 @@ function AiSchedulesSection({
     try {
       const updated = await api.runAiScheduleNow(schedule.id);
       setSchedules((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
-      onNotice(`Ran "${schedule.name}"${updated.lastRunSummary ? `: ${updated.lastRunSummary}` : "."}`);
+      onNotice(`Started "${schedule.name}". Live progress is shown in its status card.`);
     } catch (runError) {
       onError(errorText(runError));
     } finally {
@@ -1546,11 +1566,14 @@ function AiSchedulesSection({
           <h3><CalendarClock size={16} /> Scheduled AI agents</h3>
           <p>Analyze mail or create reviewable reply drafts. Each schedule keeps its own target, provider, model, skills, prompt, sending account, and optional resume.</p>
         </div>
-        {!showForm && (
+        {!showForm && <div className="settings-title-actions">
+          <button type="button" className="secondary-button" disabled={busy || loading} onClick={() => void load()}>
+            <RefreshCw size={16} /> Refresh status
+          </button>
           <button type="button" className="secondary-button" disabled={busy} onClick={() => void openForm()}>
             <Plus size={16} /> Add schedule
           </button>
-        )}
+        </div>}
       </div>
 
       {showForm && (
@@ -1718,24 +1741,24 @@ function AiSchedulesSection({
                 {schedule.task === "draft_reply" && <small>Send from {schedule.gmailConnectionEmail ?? "Unavailable account"}{schedule.resumeName ? ` · Development resume: ${schedule.resumeName}` : " · No resume"}</small>}
                 <small>{AI_PROVIDER_LABELS[schedule.provider]} · {schedule.model} · {schedule.skills.map((skill) => AI_AGENT_SKILLS.find((entry) => entry.id === skill)?.label ?? skill).join(", ")}</small>
                 {schedule.prompt && <small className="ai-schedule-prompt" title={schedule.prompt}>Prompt: {schedule.prompt}</small>}
-                <small>
-                  {schedule.lastRunAt
-                    ? `Last ran ${formatDate(schedule.lastRunAt)}${schedule.lastRunSummary ? ` — ${schedule.lastRunSummary}` : ""}`
-                    : "Never run yet"}
-                </small>
+                {schedule.progress
+                  ? <AiScheduleProgressReport progress={schedule.progress} task={schedule.task} />
+                  : <small>{schedule.lastRunAt
+                      ? `Last ran ${formatDate(schedule.lastRunAt)}${schedule.lastRunSummary ? ` — ${schedule.lastRunSummary}` : ""}`
+                      : "Never run yet"}</small>}
               </div>
               <div className="ai-schedule-actions">
                 <label className="settings-checkbox">
                   <input type="checkbox" checked={schedule.enabled} disabled={busy} onChange={() => void toggleEnabled(schedule)} />
                   <span>Enabled</span>
                 </label>
-                <button type="button" className="icon-button" disabled={busy} title="Run now" aria-label={`Run ${schedule.name} now`} onClick={() => void runNow(schedule)}>
+                <button type="button" className="icon-button" disabled={busy || isActiveScheduleRun(schedule.progress)} title={isActiveScheduleRun(schedule.progress) ? "A run is already in progress" : "Run now"} aria-label={`Run ${schedule.name} now`} onClick={() => void runNow(schedule)}>
                   <RefreshCw size={15} />
                 </button>
-                <button type="button" className="icon-button" disabled={busy} title="Edit schedule" aria-label={`Edit ${schedule.name}`} onClick={() => openEdit(schedule)}>
+                <button type="button" className="icon-button" disabled={busy || isActiveScheduleRun(schedule.progress)} title="Edit schedule" aria-label={`Edit ${schedule.name}`} onClick={() => openEdit(schedule)}>
                   <Pencil size={15} />
                 </button>
-                <button type="button" className="icon-button" disabled={busy} title="Delete schedule" aria-label={`Delete ${schedule.name}`} onClick={() => void remove(schedule)}>
+                <button type="button" className="icon-button" disabled={busy || isActiveScheduleRun(schedule.progress)} title="Delete schedule" aria-label={`Delete ${schedule.name}`} onClick={() => void remove(schedule)}>
                   <Trash2 size={15} />
                 </button>
               </div>
@@ -1745,6 +1768,87 @@ function AiSchedulesSection({
       )}
     </section>
   );
+}
+
+function AiScheduleProgressReport({
+  progress,
+  task
+}: {
+  progress: AiScheduleRunProgress;
+  task: AiScheduleTask;
+}) {
+  const active = isActiveScheduleRun(progress);
+  const statusLabel = progress.status === "queueing"
+    ? "Queueing messages"
+    : progress.status === "processing"
+      ? "Processing"
+      : progress.status === "completed"
+        ? "Completed"
+        : progress.status === "completed_with_errors"
+          ? "Completed with errors"
+          : "Failed";
+  const elapsedMs = Math.max(0, new Date(progress.completedAt ?? Date.now()).getTime() - new Date(progress.startedAt).getTime());
+  const remainingJobs = Math.max(0, progress.queuedJobs - progress.processedJobs);
+  const etaMs = active && progress.processedJobs > 0
+    ? (elapsedMs / progress.processedJobs) * remainingJobs
+    : null;
+
+  return (
+    <div className={`ai-run-progress ${progress.status}`}>
+      <div className="ai-run-progress-header">
+        <strong>{active && <LoaderCircle className="spin" size={14} />} {statusLabel}</strong>
+        <span>{progress.percent}%</span>
+      </div>
+      <div
+        className="ai-run-progress-track"
+        role="progressbar"
+        aria-label="AI schedule progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress.percent}
+      >
+        <span style={{ width: `${progress.percent}%` }} />
+      </div>
+      <strong className="ai-run-progress-summary">
+        {progress.status === "queueing"
+          ? `${progress.totalMessages.toLocaleString()} messages selected`
+          : `${progress.processedJobs.toLocaleString()} of ${progress.queuedJobs.toLocaleString()} jobs processed`}
+      </strong>
+      <div className="ai-run-progress-counts">
+        <span>{progress.queued.toLocaleString()} queued</span>
+        <span>{progress.running.toLocaleString()} running</span>
+        <span>{progress.completed.toLocaleString()} completed</span>
+        <span className={progress.failed ? "error" : ""}>{progress.failed.toLocaleString()} failed</span>
+        {progress.cancelled > 0 && <span>{progress.cancelled.toLocaleString()} cancelled</span>}
+      </div>
+      {(progress.skippedMessages > 0 || progress.enqueueErrors > 0 || (task === "draft_reply" && progress.draftsCreated > 0)) && (
+        <div className="ai-run-progress-details">
+          {progress.skippedMessages > 0 && <span>{progress.skippedMessages.toLocaleString()} already up to date</span>}
+          {progress.enqueueErrors > 0 && <span className="error">{progress.enqueueErrors.toLocaleString()} could not be queued</span>}
+          {task === "draft_reply" && progress.draftsCreated > 0 && <span>{progress.draftsCreated.toLocaleString()} reviewable drafts created</span>}
+        </div>
+      )}
+      <small>
+        Started {formatDate(progress.startedAt)} · elapsed {formatDuration(elapsedMs)}
+        {etaMs !== null && remainingJobs > 0 ? ` · estimated ${formatDuration(etaMs)} remaining` : ""}
+      </small>
+      {progress.error && <small className="ai-run-progress-error">{progress.error}</small>}
+    </div>
+  );
+}
+
+function isActiveScheduleRun(progress: AiScheduleRunProgress | null): boolean {
+  return Boolean(progress && ["queueing", "processing"].includes(progress.status));
+}
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.round(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
 function formatInterval(minutes: number): string {

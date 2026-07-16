@@ -76,6 +76,7 @@ const CLIENT_DIAGNOSTICS_KEY = "archive-mail-client-diagnostics";
 
 export class ApiClient {
   private accessToken: string;
+  private authorizationRequiredHandler: (() => void) | null = null;
 
   constructor(readonly config: RuntimeConfig) {
     this.accessToken = config.accessToken;
@@ -87,6 +88,10 @@ export class ApiClient {
 
   getAccessToken(): string {
     return this.accessToken;
+  }
+
+  setAuthorizationRequiredHandler(handler: (() => void) | null): void {
+    this.authorizationRequiredHandler = handler;
   }
 
   async login(username: string, pin: string): Promise<AuthLoginResult> {
@@ -789,12 +794,17 @@ export class ApiClient {
           init.body !== undefined && init.body !== null && !(init.body instanceof FormData)
         )
       });
+      if (response.status === 401 && !path.startsWith("/api/auth/")) {
+        this.accessToken = "";
+        this.authorizationRequiredHandler?.();
+      }
       if (!response.ok) throw await responseError(response);
       if (response.status === 204) return undefined as T;
       return response.json() as Promise<T>;
     } catch (error) {
       if (!path.startsWith("/api/diagnostics/client")
         && !path.startsWith("/api/auth/")
+        && !(error instanceof ApiRequestError && error.status === 401)
         && !isAbortError(error)) {
         await this.reportClientIssue(error, {
           path,

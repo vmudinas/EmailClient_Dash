@@ -97,6 +97,27 @@ describe("ApiClient request headers", () => {
     expect(new Headers(init.headers).get("Content-Type")).toBeNull();
   });
 
+  it("clears stale authorization and requests sign-in without reporting a client diagnostic", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: "Authorization required" }),
+      { status: 401, headers: { "Content-Type": "application/json" } }
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "expired-token",
+      platform: "browser"
+    });
+    const authorizationRequired = vi.fn();
+    client.setAuthorizationRequiredHandler(authorizationRequired);
+
+    await expect(client.listArchives()).rejects.toThrow("Authorization required");
+
+    expect(client.getAccessToken()).toBe("");
+    expect(authorizationRequired).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("sends Gmail authorization, outgoing email, and combine requests to local-only routes", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ authorizationUrl: "https://accounts.example/auth", expiresAt: "2026-07-13T01:00:00.000Z" }))

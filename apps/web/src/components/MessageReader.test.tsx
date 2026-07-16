@@ -197,6 +197,7 @@ function analysisState(): AiMessageState {
       messageId: "message-1",
       task: "analyze",
       scheduleId: null,
+      scheduleRunId: null,
       gmailConnectionId: null,
       resumeId: null,
       status: "completed",

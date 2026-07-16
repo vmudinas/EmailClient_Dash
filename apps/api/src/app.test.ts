@@ -223,7 +223,10 @@ describe("Email API AI schedule and insights routes", () => {
       remoteAddress: "127.0.0.1"
     });
     expect(runNow.statusCode).toBe(200);
-    expect(runNow.json()).toMatchObject({ lastRunSummary: "Queued 0 of 0 messages" });
+    expect(runNow.json()).toMatchObject({
+      lastRunSummary: "Completed 0 of 0 jobs",
+      progress: { status: "completed", totalMessages: 0, queuedJobs: 0, percent: 100 }
+    });
 
     const updated = await runtime.app.inject({
       method: "PATCH",

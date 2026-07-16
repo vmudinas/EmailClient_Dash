@@ -361,6 +361,7 @@ describe("SettingsDialog", () => {
       enabled: true,
       lastRunAt: null,
       lastRunSummary: null,
+      progress: null,
       createdAt: "2026-07-15T00:00:00.000Z",
       updatedAt: "2026-07-15T00:00:00.000Z"
     };
@@ -411,6 +412,75 @@ describe("SettingsDialog", () => {
       enabled: true
     }));
     await waitFor(() => expect(screen.getByText("Inbox sweep")).toBeTruthy());
+  });
+
+  it("shows live queued, running, completed, skipped, and percent status for an AI schedule", async () => {
+    const schedule: AiSchedule = {
+      id: "schedule-progress",
+      name: "Inbox Sweep",
+      task: "analyze",
+      folderId: "folder-progress",
+      folderPath: "Gmail-Archive/Inbox",
+      archiveId: "archive-progress",
+      archiveName: "Inbox-1.mbox",
+      messageId: null,
+      messageSubject: null,
+      gmailConnectionId: null,
+      gmailConnectionEmail: null,
+      resumeId: null,
+      resumeName: null,
+      mode: "all",
+      intervalMinutes: 60,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      skills: ["summarize", "categorize", "prioritize"],
+      prompt: "Process the inbox.",
+      enabled: true,
+      lastRunAt: "2026-07-15T23:37:00.000Z",
+      lastRunSummary: "Processed 10 of 100 jobs",
+      progress: {
+        runId: "run-progress",
+        status: "processing",
+        totalMessages: 101,
+        queuedJobs: 100,
+        skippedMessages: 1,
+        enqueueErrors: 0,
+        queued: 89,
+        running: 1,
+        completed: 10,
+        failed: 0,
+        cancelled: 0,
+        processedJobs: 10,
+        percent: 10,
+        draftsCreated: 0,
+        startedAt: "2026-07-15T23:37:00.000Z",
+        enqueueCompletedAt: "2026-07-15T23:37:01.000Z",
+        completedAt: null,
+        error: null
+      },
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T23:38:00.000Z"
+    };
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      listAiSchedules: vi.fn().mockResolvedValue([schedule]),
+      listGmailConnections: vi.fn().mockResolvedValue([]),
+      listResumes: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "AI" }));
+
+    expect(await screen.findByText("Inbox Sweep")).toBeTruthy();
+    expect(screen.getByText("10 of 100 jobs processed")).toBeTruthy();
+    expect(screen.getByText("89 queued")).toBeTruthy();
+    expect(screen.getByText("1 running")).toBeTruthy();
+    expect(screen.getByText("10 completed")).toBeTruthy();
+    expect(screen.getByText("1 already up to date")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "AI schedule progress" }).getAttribute("aria-valuenow")).toBe("10");
+    expect((screen.getByRole("button", { name: "Run Inbox Sweep now" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("configures a specific-email draft task with a Gmail account, resume, skills, and prompt", async () => {
@@ -481,6 +551,7 @@ describe("SettingsDialog", () => {
       enabled: true,
       lastRunAt: null,
       lastRunSummary: null,
+      progress: null,
       createdAt: "2026-07-15T00:00:00.000Z",
       updatedAt: "2026-07-15T00:00:00.000Z"
     };

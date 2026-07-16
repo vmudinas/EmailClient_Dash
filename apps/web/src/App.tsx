@@ -186,6 +186,13 @@ export function App() {
     try {
       const config = await resolveRuntimeConfig();
       const client = new ApiClient(config);
+      client.setAuthorizationRequiredHandler(() => {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        client.setAccessToken("");
+        setSession(null);
+        setSettingsOpen(false);
+        setNotice("Your session expired. Sign in again.");
+      });
       setRuntime(config);
       setApi(client);
       const savedToken = sessionStorage.getItem(SESSION_STORAGE_KEY);

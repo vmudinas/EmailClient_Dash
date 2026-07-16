@@ -43,7 +43,11 @@ export class AiService {
     await this.processing;
   }
 
-  startAnalysis(messageId: string, requestedAgent?: AiAgentConfig): AiAnalysisStart {
+  startAnalysis(
+    messageId: string,
+    requestedAgent?: AiAgentConfig,
+    schedule?: { scheduleId: string; scheduleRunId: string }
+  ): AiAnalysisStart {
     const active = this.settings.current();
     const agent: AiAgentConfig = requestedAgent
       ? {
@@ -81,6 +85,8 @@ export class AiService {
     try {
       job = this.database.createAiJob({
         messageId,
+        scheduleId: schedule?.scheduleId ?? null,
+        scheduleRunId: schedule?.scheduleRunId ?? null,
         provider: agent.provider,
         model: agent.model,
         skills: agent.skills,
@@ -101,6 +107,8 @@ export class AiService {
         operation: "analysis_queue",
         jobId: job.id,
         messageId,
+        scheduleId: schedule?.scheduleId ?? null,
+        scheduleRunId: schedule?.scheduleRunId ?? null,
         provider: agent.provider,
         model: agent.model,
         skills: agent.skills
@@ -112,6 +120,7 @@ export class AiService {
 
   startDraftReply(messageId: string, options: {
     scheduleId: string;
+    scheduleRunId: string;
     gmailConnectionId: string;
     resumeId: string | null;
     agent: AiAgentConfig;
@@ -147,6 +156,7 @@ export class AiService {
         messageId,
         task: "draft_reply",
         scheduleId: options.scheduleId,
+        scheduleRunId: options.scheduleRunId,
         gmailConnectionId: options.gmailConnectionId,
         resumeId: options.resumeId,
         provider: agent.provider,
@@ -170,6 +180,7 @@ export class AiService {
         jobId: job.id,
         messageId,
         scheduleId: options.scheduleId,
+        scheduleRunId: options.scheduleRunId,
         provider: agent.provider,
         model: agent.model,
         skills: agent.skills

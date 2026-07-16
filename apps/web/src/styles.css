@@ -3531,6 +3531,88 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.ai-run-progress {
+  display: grid;
+  gap: 7px;
+  width: min(720px, 100%);
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #b9c8bd;
+  border-radius: 7px;
+  background: #f5f8f5;
+}
+
+.ai-run-progress.completed_with_errors,
+.ai-run-progress.failed {
+  border-color: #d8b1a8;
+  background: #fff7f4;
+}
+
+.ai-run-progress-header,
+.ai-run-progress-counts,
+.ai-run-progress-details,
+.settings-title-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+}
+
+.ai-run-progress-header {
+  justify-content: space-between;
+  color: var(--green-dark);
+  font-size: 11px;
+}
+
+.ai-run-progress-header strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-run-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe7e1;
+}
+
+.ai-run-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+  transition: width 220ms ease;
+}
+
+.ai-run-progress-summary {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.ai-run-progress-counts,
+.ai-run-progress-details {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.ai-run-progress-counts span,
+.ai-run-progress-details span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #e8eeea;
+}
+
+.ai-run-progress .error,
+.ai-run-progress-error {
+  color: var(--danger) !important;
+}
+
+.settings-title-actions {
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+
 .ai-schedule-actions {
   display: flex;
   align-items: center;

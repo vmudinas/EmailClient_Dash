@@ -157,6 +157,71 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("adopts a legacy queued schedule into live run progress during migration", async () => {
+    const dataDir = await temporaryDirectory();
+    let database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Legacy schedule",
+      sourceType: "mbox",
+      fingerprint: "legacy-schedule-progress",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const firstMessageId = insertDatedMessage(database, archive.id, inbox.id, "legacy-1", "2026-07-15T12:00:00.000Z");
+    const secondMessageId = insertDatedMessage(database, archive.id, inbox.id, "legacy-2", "2026-07-15T12:01:00.000Z");
+    database.completeArchive(archive.id, 0);
+    const schedule = database.createAiSchedule({
+      name: "Legacy Inbox Sweep",
+      folderId: inbox.id,
+      mode: "all",
+      intervalMinutes: 60,
+      provider: "deepseek",
+      model: "deepseek-chat",
+      skills: ["summarize"],
+      prompt: "",
+      enabled: true
+    });
+    for (const [index, messageId] of [firstMessageId, secondMessageId].entries()) {
+      database.createAiJob({
+        messageId,
+        provider: "deepseek",
+        model: "deepseek-chat",
+        skills: ["summarize"],
+        prompt: "",
+        promptVersion: "legacy-v1",
+        contentHash: `legacy-hash-${index}`
+      });
+    }
+    const startedAt = new Date().toISOString();
+    database.recordAiScheduleRun(schedule.id, startedAt, "Queued 2 of 3 messages");
+    database.close();
+
+    const rawDatabase = new BetterSqlite3(join(dataDir, "archive-mail.sqlite"));
+    rawDatabase.pragma("user_version = 16");
+    rawDatabase.close();
+
+    database = new EmailDatabase(dataDir);
+    expect(database.getAiSchedule(schedule.id)?.progress).toMatchObject({
+      status: "processing",
+      totalMessages: 3,
+      queuedJobs: 2,
+      skippedMessages: 1,
+      queued: 2,
+      running: 0,
+      percent: 0
+    });
+    const claimed = database.claimNextAiJob()!;
+    database.completeAiJob(claimed.id);
+    expect(database.getAiSchedule(schedule.id)?.progress).toMatchObject({
+      status: "processing",
+      queued: 1,
+      completed: 1,
+      processedJobs: 1,
+      percent: 50
+    });
+    database.close();
+  });
+
   it("turns plain text and phrases into safe FTS expressions", () => {
     expect(toFtsQuery("launch plan")).toBe("\"launch\" AND \"plan\"");
     expect(toFtsQuery("\"launch plan\"")).toBe("\"launch plan\"");
