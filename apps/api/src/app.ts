@@ -35,9 +35,16 @@ import {
   messageActionSuggestionRequestSchema,
   messageCalendarEventCreateSchema,
   messageDraftReplyRequestSchema,
+  messageFollowUpCreateSchema,
+  messageFollowUpPatchSchema,
   messageMoveSchema,
   pinChangeSchema,
   senderFilingArchiveSchema,
+  replyStyleCreateSchema,
+  replyStylePatchSchema,
+  smartMailRuleCreateSchema,
+  smartMailRulePatchSchema,
+  smartMailRuleSuggestionRequestSchema,
   todoCreateSchema,
   todoPatchSchema,
   uploadSessionCreateSchema,
@@ -680,6 +687,65 @@ export class EmailApiRuntime {
       }
     );
 
+    this.app.get<{ Params: { messageId: string } }>(
+      "/api/messages/:messageId/thread",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+        try {
+          return this.database.getMessageThread(request.params.messageId);
+        } catch {
+          return reply.code(404).send({ error: "Message not found" });
+        }
+      }
+    );
+
+    this.app.post<{ Params: { messageId: string }; Body: unknown }>(
+      "/api/messages/:messageId/follow-up",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = messageFollowUpCreateSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid follow-up" });
+        try {
+          return this.database.createMessageFollowUp(request.params.messageId, parsed.data);
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "Message not found" });
+        }
+      }
+    );
+
+    this.app.get<{ Querystring: { status?: string } }>("/api/follow-ups", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      const status = request.query.status;
+      if (status && !["pending", "completed", "dismissed"].includes(status)) {
+        return reply.code(400).send({ error: "Choose a valid follow-up status" });
+      }
+      return this.database.listMessageFollowUps(status as "pending" | "completed" | "dismissed" | undefined);
+    });
+
+    this.app.patch<{ Params: { followUpId: string }; Body: unknown }>(
+      "/api/follow-ups/:followUpId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = messageFollowUpPatchSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid follow-up update" });
+        try {
+          return this.database.updateMessageFollowUp(request.params.followUpId, parsed.data);
+        } catch {
+          return reply.code(404).send({ error: "Follow-up not found" });
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { followUpId: string } }>(
+      "/api/follow-ups/:followUpId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        return this.database.deleteMessageFollowUp(request.params.followUpId)
+          ? reply.code(204).send()
+          : reply.code(404).send({ error: "Follow-up not found" });
+      }
+    );
+
     this.app.patch<{
       Params: { messageId: string };
       Body: unknown;
@@ -803,7 +869,8 @@ export class EmailApiRuntime {
         try {
           const result = this.ai.startMessageDraftReply(request.params.messageId, {
             gmailConnectionId: parsed.data.gmailConnectionId,
-            resumeId: parsed.data.resumeId ?? null
+            resumeId: parsed.data.resumeId ?? null,
+            replyStyleId: parsed.data.replyStyleId ?? null
           });
           return reply.code(result.draft ? 200 : 202).send(result);
         } catch (error) {
@@ -830,6 +897,16 @@ export class EmailApiRuntime {
         }
       }
     );
+
+    this.app.get("/api/ai/review-queue", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      return this.database.getAiReviewQueue();
+    });
+
+    this.app.get("/api/reply-styles", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      return this.database.listReplyStyles();
+    });
 
     this.app.post<{ Params: { jobId: string } }>(
       "/api/ai/jobs/:jobId/cancel",
@@ -1637,6 +1714,94 @@ export class EmailApiRuntime {
       if (!this.requireRole(request, reply, ["admin"])) return;
       return this.database.listAiSchedules();
     });
+
+    this.app.post<{ Body: unknown }>("/api/admin/reply-styles", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = replyStyleCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid reply style" });
+      try {
+        return this.database.createReplyStyle(parsed.data);
+      } catch (error) {
+        return reply.code(409).send({ error: error instanceof Error ? error.message : "Reply style could not be created" });
+      }
+    });
+
+    this.app.patch<{ Params: { styleId: string }; Body: unknown }>(
+      "/api/admin/reply-styles/:styleId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = replyStylePatchSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid reply style update" });
+        try {
+          return this.database.updateReplyStyle(request.params.styleId, parsed.data);
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "Reply style not found" });
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { styleId: string } }>(
+      "/api/admin/reply-styles/:styleId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        return this.database.deleteReplyStyle(request.params.styleId)
+          ? reply.code(204).send()
+          : reply.code(404).send({ error: "Reply style not found" });
+      }
+    );
+
+    this.app.get<{ Querystring: { archiveId?: string } }>("/api/admin/smart-mail-rules", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      return this.database.listSmartMailRules(request.query.archiveId);
+    });
+
+    this.app.post<{ Body: unknown }>("/api/admin/smart-mail-rules/suggest", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = smartMailRuleSuggestionRequestSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Describe a valid mail rule" });
+      try {
+        return await this.ai.suggestSmartMailRule(parsed.data.archiveId, parsed.data.instruction);
+      } catch (error) {
+        if (error instanceof AiBudgetError) return reply.code(429).send({ error: error.message });
+        if (error instanceof AiConfigurationError) return reply.code(503).send({ error: error.message });
+        return reply.code(502).send({ error: error instanceof Error ? error.message : "Mail rule suggestion failed" });
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/admin/smart-mail-rules", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = smartMailRuleCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid mail rule" });
+      try {
+        return this.database.createSmartMailRule(parsed.data);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Mail rule could not be created" });
+      }
+    });
+
+    this.app.patch<{ Params: { ruleId: string }; Body: unknown }>(
+      "/api/admin/smart-mail-rules/:ruleId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = smartMailRulePatchSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid mail rule update" });
+        try {
+          return this.database.updateSmartMailRule(request.params.ruleId, parsed.data);
+        } catch (error) {
+          return reply.code(400).send({ error: error instanceof Error ? error.message : "Mail rule could not be updated" });
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { ruleId: string } }>(
+      "/api/admin/smart-mail-rules/:ruleId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        return this.database.deleteSmartMailRule(request.params.ruleId)
+          ? reply.code(204).send()
+          : reply.code(404).send({ error: "Mail rule not found" });
+      }
+    );
 
     this.app.get("/api/admin/resumes", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;

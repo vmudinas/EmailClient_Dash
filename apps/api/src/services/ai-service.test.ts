@@ -129,7 +129,8 @@ describe("AiService", () => {
     expect(suggestAction).toHaveBeenCalledWith(
       expect.objectContaining({ id: messageId }),
       { now: "2026-07-16T12:00:00.000Z", timeZone: "America/New_York" },
-      expect.any(AbortSignal)
+      expect.any(AbortSignal),
+      expect.objectContaining({ messages: [expect.objectContaining({ id: messageId })] })
     );
     expect(suggestion).toMatchObject({
       recommendedAction: "todo",
@@ -174,6 +175,12 @@ describe("AiService", () => {
       dailyRequestLimit: 10,
       monthlyRequestLimit: 100
     });
+    const replyStyle = database.createReplyStyle({
+      name: "Warm concise",
+      tone: "Warm and direct",
+      instructions: "Use two short paragraphs.",
+      isDefault: true
+    });
     const draftReply = vi.fn().mockResolvedValue({
       draft: {
         workRelated: false,
@@ -193,7 +200,8 @@ describe("AiService", () => {
 
     const started = service.startMessageDraftReply(messageId, {
       gmailConnectionId: connection.id,
-      resumeId: null
+      resumeId: null,
+      replyStyleId: replyStyle.id
     });
     expect(started).toMatchObject({ job: { task: "draft_reply", scheduleId: null }, draft: null });
     await waitForJob(database, started.job!.id, "completed");
@@ -206,16 +214,83 @@ describe("AiService", () => {
       scheduleId: null,
       connectionId: connection.id,
       subject: "Re: Contract review",
-      workRelated: false
+      workRelated: false,
+      replyStyleId: replyStyle.id,
+      replyStyleName: "Warm concise"
     });
+    expect(draftReply).toHaveBeenCalledWith(
+      expect.objectContaining({ id: messageId }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ prompt: expect.stringContaining("Warm concise") }),
+      expect.objectContaining({ messages: [expect.objectContaining({ id: messageId })] })
+    );
 
     const reused = service.startMessageDraftReply(messageId, {
       gmailConnectionId: connection.id,
-      resumeId: null
+      resumeId: null,
+      replyStyleId: replyStyle.id
     });
     expect(reused).toEqual({ job: null, draft: drafts[0] });
     expect(draftReply).toHaveBeenCalledTimes(1);
 
+    await service.close();
+    database.close();
+  });
+
+  it("turns natural language into a reviewed rule using only existing folder paths", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const messageId = insertMessage(database);
+    const message = database.getMessage(messageId)!;
+    const finance = database.ensureFolder(message.archiveId, "Finance", "Finance", null);
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "rule-model",
+      dailyRequestLimit: 10,
+      monthlyRequestLimit: 100
+    });
+    const suggestMailRule = vi.fn().mockResolvedValue({
+      suggestion: {
+        name: "Stripe invoices",
+        match: "all",
+        senderContains: ["stripe.com"],
+        subjectContains: ["invoice"],
+        bodyContains: [],
+        hasAttachments: null,
+        targetFolderPath: "Finance",
+        markRead: true,
+        star: false,
+        explanation: "Matches Stripe invoice messages.",
+        confidence: 0.93
+      },
+      usage: { inputTokens: 60, outputTokens: 30 }
+    });
+    const service = new AiService(database, settings, () => ({
+      analyze: vi.fn(),
+      suggestMailRule,
+      testConnection: vi.fn()
+    }));
+
+    const suggestion = await service.suggestSmartMailRule(
+      message.archiveId,
+      "Move Stripe invoices to Finance and mark them read"
+    );
+
+    expect(suggestMailRule).toHaveBeenCalledWith(
+      "Move Stripe invoices to Finance and mark them read",
+      expect.arrayContaining(["Inbox", "Finance"]),
+      expect.any(AbortSignal)
+    );
+    expect(suggestion).toMatchObject({
+      targetFolderId: finance.id,
+      targetFolderPath: "Finance",
+      conditions: { senderContains: ["stripe.com"], subjectContains: ["invoice"] },
+      markRead: true
+    });
+    expect(database.getAiUsageSummary()).toMatchObject({ todayRequests: 1, todayInputTokens: 60, todayOutputTokens: 30 });
     await service.close();
     database.close();
   });

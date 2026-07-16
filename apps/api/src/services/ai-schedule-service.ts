@@ -75,6 +75,7 @@ export class AiScheduleService {
                 scheduleRunId: runId,
                 gmailConnectionId: schedule.gmailConnectionId!,
                 resumeId: schedule.resumeId,
+                replyStyleId: schedule.replyStyleId,
                 agent
               }).job
             : this.ai.startAnalysis(messageId, agent, {

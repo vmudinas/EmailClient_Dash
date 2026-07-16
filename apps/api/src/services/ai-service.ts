@@ -10,7 +10,8 @@ import type {
   MessageDraftReplyStart,
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
-  MessageDetail
+  MessageDetail,
+  SmartMailRuleSuggestion
 } from "@email-client/shared";
 import { AI_AGENT_SKILL_IDS } from "@email-client/shared";
 import type { EmailStore } from "../storage/database.js";
@@ -74,7 +75,8 @@ export class AiService {
     this.requireConfiguredFor(agent.provider, true);
     const message = this.database.getMessage(messageId);
     if (!message) throw new AiMessageNotFoundError("Message not found");
-    const contentHash = messageContentHash(message);
+    const conversation = this.database.listConversationMessages(messageId);
+    const contentHash = conversationContentHash(conversation);
     const analysis = this.database.getMessageAnalysis(messageId);
     const latest = this.database.getLatestAiJob(messageId);
 
@@ -132,6 +134,7 @@ export class AiService {
     scheduleRunId: string | null;
     gmailConnectionId: string;
     resumeId: string | null;
+    replyStyleId?: string | null;
     agent: AiAgentConfig;
   }): AiDraftStart {
     const agent: AiAgentConfig = {
@@ -148,7 +151,10 @@ export class AiService {
     const blocker = this.database.getDraftReplyBlocker(messageId);
     if (blocker) throw new AiDraftSkippedError(draftBlockerMessage(blocker.reason));
     this.requireConfiguredFor(agent.provider, true);
-    const contentHash = messageContentHash(message);
+    if (options.replyStyleId && !this.database.getReplyStyle(options.replyStyleId)) {
+      throw new AiDraftTargetError("Reply style not found");
+    }
+    const contentHash = conversationContentHash(this.database.listConversationMessages(messageId));
     const promptVersion = configuredPromptVersion(agent, "draft-reply-v1");
     const existingDraft = options.scheduleId
       ? this.database.getAutomatedDraft(options.scheduleId, messageId)
@@ -176,6 +182,7 @@ export class AiService {
         scheduleRunId: options.scheduleRunId,
         gmailConnectionId: options.gmailConnectionId,
         resumeId: options.resumeId,
+        replyStyleId: options.replyStyleId ?? null,
         provider: agent.provider,
         model: agent.model,
         skills: agent.skills,
@@ -218,6 +225,7 @@ export class AiService {
   startMessageDraftReply(messageId: string, input: {
     gmailConnectionId: string;
     resumeId: string | null;
+    replyStyleId?: string | null;
   }): MessageDraftReplyStart {
     const message = this.database.getMessage(messageId);
     if (!message) throw new AiMessageNotFoundError("Message not found");
@@ -236,6 +244,9 @@ export class AiService {
     if (input.resumeId && !this.database.getResumeAsset(input.resumeId)) {
       throw new AiDraftTargetError("Resume not found");
     }
+    if (input.replyStyleId && !this.database.getReplyStyle(input.replyStyleId)) {
+      throw new AiDraftTargetError("Reply style not found");
+    }
 
     const current = this.settings.current();
     return this.startDraftReply(messageId, {
@@ -243,6 +254,7 @@ export class AiService {
       scheduleRunId: null,
       gmailConnectionId: input.gmailConnectionId,
       resumeId: input.resumeId,
+      replyStyleId: input.replyStyleId ?? null,
       agent: {
         provider: current.provider,
         model: current.model,
@@ -299,7 +311,13 @@ export class AiService {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 45_000);
     try {
-      const result = await provider.suggestAction(message, context, controller.signal);
+      const conversation = this.database.listConversationMessages(messageId);
+      const result = await provider.suggestAction(
+        message,
+        context,
+        controller.signal,
+        { messages: conversation }
+      );
       this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
       this.database.recordDiagnostic({
         level: "info",
@@ -319,6 +337,54 @@ export class AiService {
         ...result.suggestion,
         provider: target.provider,
         model: target.model
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async suggestSmartMailRule(archiveId: string, instruction: string): Promise<SmartMailRuleSuggestion> {
+    const target = this.requireConfiguredFor(this.settings.current().provider, true);
+    const folders = this.database.listFolders(archiveId);
+    if (folders.length === 0) throw new AiConfigurationError("The selected archive has no mailboxes");
+    if (!this.database.consumeAiRequest(target.dailyRequestLimit, target.monthlyRequestLimit)) {
+      throw new AiBudgetError(
+        `AI request limit reached (${target.dailyRequestLimit}/day or ${target.monthlyRequestLimit}/month)`
+      );
+    }
+    const provider = this.providerFactory(target.provider, target.apiKey!, target.model);
+    if (!provider.suggestMailRule) {
+      throw new AiConfigurationError("The selected AI provider does not support mail rule suggestions");
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45_000);
+    try {
+      const result = await provider.suggestMailRule(
+        instruction,
+        folders.map((folder) => folder.path),
+        controller.signal
+      );
+      this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
+      const requestedPath = result.suggestion.targetFolderPath?.trim().toLowerCase() ?? null;
+      const targetFolder = requestedPath
+        ? folders.find((folder) => folder.path.trim().toLowerCase() === requestedPath) ?? null
+        : null;
+      return {
+        name: result.suggestion.name,
+        instruction,
+        conditions: {
+          match: result.suggestion.match,
+          senderContains: result.suggestion.senderContains,
+          subjectContains: result.suggestion.subjectContains,
+          bodyContains: result.suggestion.bodyContains,
+          hasAttachments: result.suggestion.hasAttachments
+        },
+        targetFolderId: targetFolder?.id ?? null,
+        targetFolderPath: targetFolder?.path ?? null,
+        markRead: result.suggestion.markRead,
+        star: result.suggestion.star,
+        explanation: result.suggestion.explanation,
+        confidence: result.suggestion.confidence
       };
     } finally {
       clearTimeout(timeout);
@@ -394,8 +460,9 @@ export class AiService {
       const current = this.requireConfiguredFor(job.provider, true);
       const message = this.database.getMessage(job.messageId);
       if (!message) throw new AiMessageNotFoundError("Message no longer exists");
-      if (messageContentHash(message) !== job.contentHash) {
-        throw new AiConfigurationError("Message content changed; start a new analysis");
+      const conversation = this.database.listConversationMessages(job.messageId);
+      if (conversationContentHash(conversation) !== job.contentHash) {
+        throw new AiConfigurationError("Email conversation changed; start a new analysis");
       }
       const allowed = this.database.consumeAiRequest(
         current.dailyRequestLimit,
@@ -412,10 +479,18 @@ export class AiService {
           throw new AiConfigurationError("Draft job is missing its Gmail account");
         }
         if (!provider.draftReply) throw new AiConfigurationError("The AI provider does not support draft tasks");
+        const replyStyle = job.replyStyleId ? this.database.getReplyStyle(job.replyStyleId) : null;
+        const stylePrompt = replyStyle
+          ? [
+              job.prompt,
+              `Reply style "${replyStyle.name}" (${replyStyle.tone}): ${replyStyle.instructions}`
+            ].filter(Boolean).join("\n\n")
+          : job.prompt;
         const result = await provider.draftReply(
           message,
           controller.signal,
-          { skills: job.skills, prompt: job.prompt }
+          { skills: job.skills, prompt: stylePrompt },
+          { messages: conversation }
         );
         if (this.database.getAiJob(job.id)?.status === "cancelled") return;
         this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
@@ -453,6 +528,7 @@ export class AiService {
               ),
               bodyText: applyDraftSenderName(result.draft.bodyText, identity.senderName),
               resumeId: result.draft.developmentOpportunity ? job.resumeId : null,
+              replyStyleId: replyStyle?.id ?? null,
               workRelated: result.draft.workRelated,
               developmentOpportunity: result.draft.developmentOpportunity,
               aiReason: result.draft.reason,
@@ -485,7 +561,8 @@ export class AiService {
       const result = await provider.analyze(
         message,
         controller.signal,
-        { skills: job.skills, prompt: job.prompt }
+        { skills: job.skills, prompt: job.prompt },
+        { messages: conversation }
       );
       if (this.database.getAiJob(job.id)?.status === "cancelled") return;
       this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
@@ -494,6 +571,7 @@ export class AiService {
         model: job.model,
         promptVersion: job.promptVersion,
         contentHash: job.contentHash,
+        threadMessageCount: conversation.length,
         ...result.analysis
       });
       this.database.completeAiJob(job.id);
@@ -557,8 +635,9 @@ export class AiDraftSkippedError extends Error {}
 export class AiDraftTargetError extends Error {}
 export class AiJobNotFoundError extends Error {}
 
-function messageContentHash(message: MessageDetail): string {
-  return createHash("sha256").update(JSON.stringify({
+function conversationContentHash(messages: MessageDetail[]): string {
+  return createHash("sha256").update(JSON.stringify(messages.map((message) => ({
+    id: message.id,
     subject: message.subject,
     sender: message.sender,
     to: message.to,
@@ -568,7 +647,7 @@ function messageContentHash(message: MessageDetail): string {
     receivedAt: message.receivedAt,
     bodyText: message.bodyText,
     attachmentNames: message.attachments.map((attachment) => attachment.filename)
-  })).digest("hex");
+  })))).digest("hex");
 }
 
 function configuredPromptVersion(agent: AiAgentConfig, base = AI_PROMPT_VERSION): string {

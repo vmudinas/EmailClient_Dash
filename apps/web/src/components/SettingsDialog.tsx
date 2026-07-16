@@ -53,15 +53,18 @@ import type {
   Folder,
   GmailConnection,
   MessageSummary,
+  ReplyStyle,
   ResumeAsset,
   SenderFilingStatus,
+  SmartMailRule,
+  SmartMailRuleSuggestion,
   UserSummary
 } from "@email-client/shared";
 import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "drafts" | "sender-filing" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "database" | "gmail" | "drafts" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -78,7 +81,9 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "database", label: "Database", icon: Database },
   { id: "gmail", label: "Gmail", icon: MailCheck },
   { id: "drafts", label: "Drafts", icon: FileEdit },
+  { id: "reply-styles", label: "Reply styles", icon: Sparkles },
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
+  { id: "smart-rules", label: "Smart rules", icon: MailCheck },
   { id: "ai", label: "AI", icon: BrainCircuit },
   { id: "resumes", label: "Resumes", icon: Paperclip },
   { id: "insights", label: "Insights", icon: BarChart3 },
@@ -194,6 +199,12 @@ export function SettingsDialog({
                     onNotice={showNotice}
                   />
                 )}
+                {section === "reply-styles" && (
+                  <ReplyStylesPanel api={api!} busy={busy} onBusy={setBusy} onError={setError} onNotice={showNotice} />
+                )}
+                {section === "smart-rules" && (
+                  <SmartMailRulesPanel api={api!} busy={busy} onBusy={setBusy} onError={setError} onNotice={showNotice} />
+                )}
                 {section === "ai" && settings && (
                   <AiPanel
                     api={api!}
@@ -240,6 +251,303 @@ export function SettingsDialog({
         </div>
       </section>
     </div>
+  );
+}
+
+function ReplyStylesPanel({
+  api,
+  busy,
+  onBusy,
+  onError,
+  onNotice
+}: {
+  api: ApiClient;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+}) {
+  const [styles, setStyles] = useState<ReplyStyle[]>([]);
+  const [editing, setEditing] = useState<ReplyStyle | null>(null);
+  const [name, setName] = useState("");
+  const [tone, setTone] = useState("");
+  const [instructions, setInstructions] = useState("");
+  const [isDefault, setIsDefault] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setStyles(await api.listReplyStyles());
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [api, onError]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const reset = () => {
+    setEditing(null);
+    setName("");
+    setTone("");
+    setInstructions("");
+    setIsDefault(false);
+  };
+
+  const edit = (style: ReplyStyle) => {
+    setEditing(style);
+    setName(style.name);
+    setTone(style.tone);
+    setInstructions(style.instructions);
+    setIsDefault(style.isDefault);
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    onBusy(true);
+    onError("");
+    try {
+      const input = { name: name.trim(), tone: tone.trim(), instructions: instructions.trim(), isDefault };
+      const saved = editing
+        ? await api.updateReplyStyle(editing.id, input)
+        : await api.createReplyStyle(input);
+      await load();
+      reset();
+      onNotice(`Reply style "${saved.name}" ${editing ? "updated" : "created"}.`);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const remove = async (style: ReplyStyle) => {
+    if (!window.confirm(`Delete the reply style "${style.name}"? Existing drafts keep their text.`)) return;
+    onBusy(true);
+    try {
+      await api.deleteReplyStyle(style.id);
+      await load();
+      if (editing?.id === style.id) reset();
+      onNotice(`Reply style "${style.name}" deleted.`);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3>Personalized reply styles</h3>
+      <p>Create reusable tone and writing profiles for manual AI drafts and scheduled draft agents. The selected profile becomes a controlled prompt layer and never bypasses draft review.</p>
+      <form className="settings-form" onSubmit={(event) => void save(event)}>
+        <div className="settings-form-grid">
+          <label>Style name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Warm recruiter reply" disabled={busy} /></label>
+          <label>Tone<input value={tone} onChange={(event) => setTone(event.target.value)} placeholder="Warm, confident, concise" disabled={busy} /></label>
+        </div>
+        <label>Writing instructions<textarea rows={5} value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Use short paragraphs, acknowledge the sender, and end with one clear next step." disabled={busy} /></label>
+        <label className="settings-checkbox"><input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} disabled={busy} /><span><strong>Default style</strong><small>Preselected for new on-demand and scheduled drafts.</small></span></label>
+        <div className="settings-button-row">
+          <button className="primary-button compact" disabled={busy || !name.trim() || !tone.trim() || !instructions.trim()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} {editing ? "Save style" : "Add style"}</button>
+          {editing && <button type="button" className="secondary-button" disabled={busy} onClick={reset}>Cancel</button>}
+        </div>
+      </form>
+      {loading ? <div className="settings-loading"><LoaderCircle className="spin" size={18} /> Loading reply styles</div> : (
+        <ul className="reply-style-list">
+          {styles.map((style) => (
+            <li key={style.id}>
+              <Sparkles size={17} />
+              <div><strong>{style.name}{style.isDefault ? " · Default" : ""}</strong><span>{style.tone}</span><small>{style.instructions}</small></div>
+              <button type="button" className="icon-button" disabled={busy} onClick={() => edit(style)} title="Edit style" aria-label={`Edit ${style.name}`}><Pencil size={15} /></button>
+              <button type="button" className="icon-button" disabled={busy} onClick={() => void remove(style)} title="Delete style" aria-label={`Delete ${style.name}`}><Trash2 size={15} /></button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+function SmartMailRulesPanel({
+  api,
+  busy,
+  onBusy,
+  onError,
+  onNotice
+}: {
+  api: ApiClient;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+}) {
+  const [archives, setArchives] = useState<ArchiveModel[]>([]);
+  const [archiveId, setArchiveId] = useState("");
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [rules, setRules] = useState<SmartMailRule[]>([]);
+  const [instruction, setInstruction] = useState("");
+  const [suggestion, setSuggestion] = useState<SmartMailRuleSuggestion | null>(null);
+  const [applyExisting, setApplyExisting] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [suggesting, setSuggesting] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void api.listArchives().then((items) => {
+      if (!active) return;
+      const ready = items.filter((archive) => ["ready", "ready_with_errors"].includes(archive.status));
+      setArchives(ready);
+      setArchiveId(ready[0]?.id ?? "");
+    }).catch((error) => { if (active) onError(errorText(error)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [api, onError]);
+
+  const loadArchive = useCallback(async (selectedArchiveId: string) => {
+    if (!selectedArchiveId) {
+      setFolders([]);
+      setRules([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [nextFolders, nextRules] = await Promise.all([
+        api.listFolders(selectedArchiveId),
+        api.listSmartMailRules(selectedArchiveId)
+      ]);
+      setFolders(nextFolders);
+      setRules(nextRules);
+      setSuggestion(null);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [api, onError]);
+
+  useEffect(() => { void loadArchive(archiveId); }, [archiveId, loadArchive]);
+
+  const suggest = async () => {
+    if (!archiveId || !instruction.trim()) return;
+    setSuggesting(true);
+    onError("");
+    try {
+      setSuggestion(await api.suggestSmartMailRule({ archiveId, instruction: instruction.trim() }));
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
+  const save = async () => {
+    if (!suggestion) return;
+    onBusy(true);
+    onError("");
+    try {
+      const saved = await api.createSmartMailRule({
+        archiveId,
+        name: suggestion.name,
+        instruction: suggestion.instruction,
+        conditions: suggestion.conditions,
+        targetFolderId: suggestion.targetFolderId,
+        markRead: suggestion.markRead,
+        star: suggestion.star,
+        enabled: true,
+        applyExisting
+      });
+      await loadArchive(archiveId);
+      setInstruction("");
+      setSuggestion(null);
+      setApplyExisting(false);
+      onNotice(`Smart rule "${saved.name}" saved${applyExisting ? " and applied to current Inbox mail" : ""}.`);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const toggle = async (rule: SmartMailRule) => {
+    onBusy(true);
+    try {
+      const updated = await api.updateSmartMailRule(rule.id, { enabled: !rule.enabled });
+      setRules((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const remove = async (rule: SmartMailRule) => {
+    if (!window.confirm(`Delete the smart rule "${rule.name}"? Previously filed mail stays where it is.`)) return;
+    onBusy(true);
+    try {
+      await api.deleteSmartMailRule(rule.id);
+      setRules((current) => current.filter((entry) => entry.id !== rule.id));
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const updateSuggestionConditions = (field: "senderContains" | "subjectContains" | "bodyContains", value: string) => {
+    setSuggestion((current) => current ? {
+      ...current,
+      conditions: {
+        ...current.conditions,
+        [field]: value.split(",").map((entry) => entry.trim()).filter(Boolean)
+      }
+    } : current);
+  };
+
+  return (
+    <>
+      <h3>Natural-language mail rules</h3>
+      <p>Describe how new Inbox mail should be organized. AI converts the request into literal, inspectable conditions; you review every condition and action before activation.</p>
+      <div className="settings-warning neutral"><ShieldCheck size={17} /><span>Rules run locally only when mail enters Inbox. They never execute email instructions, use regular expressions, or change Gmail server-side filters.</span></div>
+      <div className="settings-form">
+        <label>Archive<select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={busy || loading}>{archives.map((archive) => <option key={archive.id} value={archive.id}>{archive.name}</option>)}</select></label>
+        <label>Describe the rule<textarea rows={4} value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="Move invoices from Stripe to Finance, mark them read, and star messages with an attachment." disabled={busy || suggesting} /></label>
+        <div className="settings-button-row"><button type="button" className="primary-button compact" disabled={busy || suggesting || !archiveId || !instruction.trim()} onClick={() => void suggest()}>{suggesting ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />} Preview rule with AI</button></div>
+      </div>
+      {suggestion && (
+        <section className="smart-rule-preview">
+          <div className="settings-title-row"><div><h4>Review suggested rule</h4><p>{suggestion.explanation} · {(suggestion.confidence * 100).toFixed(0)}% confidence</p></div></div>
+          <div className="settings-form">
+            <div className="settings-form-grid">
+              <label>Name<input value={suggestion.name} onChange={(event) => setSuggestion({ ...suggestion, name: event.target.value })} /></label>
+              <label>Match<select value={suggestion.conditions.match} onChange={(event) => setSuggestion({ ...suggestion, conditions: { ...suggestion.conditions, match: event.target.value as "all" | "any" } })}><option value="all">All populated conditions</option><option value="any">Any populated condition</option></select></label>
+            </div>
+            <label>Sender contains<input value={suggestion.conditions.senderContains.join(", ")} onChange={(event) => updateSuggestionConditions("senderContains", event.target.value)} placeholder="example.com, sender@example.com" /></label>
+            <label>Subject contains<input value={suggestion.conditions.subjectContains.join(", ")} onChange={(event) => updateSuggestionConditions("subjectContains", event.target.value)} /></label>
+            <label>Body contains<input value={suggestion.conditions.bodyContains.join(", ")} onChange={(event) => updateSuggestionConditions("bodyContains", event.target.value)} /></label>
+            <div className="settings-form-grid">
+              <label>Attachment condition<select value={suggestion.conditions.hasAttachments === null ? "any" : suggestion.conditions.hasAttachments ? "yes" : "no"} onChange={(event) => setSuggestion({ ...suggestion, conditions: { ...suggestion.conditions, hasAttachments: event.target.value === "any" ? null : event.target.value === "yes" } })}><option value="any">Any</option><option value="yes">Has attachments</option><option value="no">No attachments</option></select></label>
+              <label>Move to<select value={suggestion.targetFolderId ?? ""} onChange={(event) => { const target = folders.find((folder) => folder.id === event.target.value) ?? null; setSuggestion({ ...suggestion, targetFolderId: target?.id ?? null, targetFolderPath: target?.path ?? null }); }}><option value="">Do not move</option>{folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}</select></label>
+            </div>
+            <div className="smart-rule-actions"><label className="settings-checkbox"><input type="checkbox" checked={suggestion.markRead} onChange={(event) => setSuggestion({ ...suggestion, markRead: event.target.checked })} /><span>Mark read</span></label><label className="settings-checkbox"><input type="checkbox" checked={suggestion.star} onChange={(event) => setSuggestion({ ...suggestion, star: event.target.checked })} /><span>Star</span></label><label className="settings-checkbox"><input type="checkbox" checked={applyExisting} onChange={(event) => setApplyExisting(event.target.checked)} /><span>Apply to current Inbox mail</span></label></div>
+            <div className="settings-button-row"><button type="button" className="primary-button compact" disabled={busy} onClick={() => void save()}><Save size={16} /> Activate reviewed rule</button><button type="button" className="secondary-button" disabled={busy} onClick={() => setSuggestion(null)}>Discard</button></div>
+          </div>
+        </section>
+      )}
+      {loading ? <div className="settings-loading"><LoaderCircle className="spin" size={18} /> Loading smart rules</div> : rules.length === 0 ? <p className="settings-empty">No natural-language rules are active for this archive.</p> : (
+        <ul className="smart-rule-list">
+          {rules.map((rule) => (
+            <li key={rule.id}>
+              <div><strong>{rule.name}</strong><span>{rule.instruction}</span><small>{rule.conditions.match === "all" ? "All" : "Any"} conditions · {rule.targetFolderPath ? `Move to ${rule.targetFolderPath}` : "No move"}{rule.markRead ? " · Mark read" : ""}{rule.star ? " · Star" : ""} · {rule.matchedMessages.toLocaleString()} matched</small></div>
+              <label className="settings-checkbox"><input type="checkbox" checked={rule.enabled} disabled={busy} onChange={() => void toggle(rule)} /><span>Enabled</span></label>
+              <button type="button" className="icon-button" disabled={busy} onClick={() => void remove(rule)} title="Delete rule" aria-label={`Delete ${rule.name}`}><Trash2 size={15} /></button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 
@@ -1387,9 +1695,11 @@ function AiSchedulesSection({
   const [messageSearchBusy, setMessageSearchBusy] = useState(false);
   const [connections, setConnections] = useState<GmailConnection[]>([]);
   const [resumes, setResumes] = useState<ResumeAsset[]>([]);
+  const [replyStyles, setReplyStyles] = useState<ReplyStyle[]>([]);
   const [task, setTask] = useState<AiScheduleTask>("analyze");
   const [gmailConnectionId, setGmailConnectionId] = useState("");
   const [resumeId, setResumeId] = useState("");
+  const [replyStyleId, setReplyStyleId] = useState("");
   const [name, setName] = useState("");
   const [mode, setMode] = useState<AiScheduleMode>("unread");
   const [intervalMinutes, setIntervalMinutes] = useState(60);
@@ -1404,14 +1714,19 @@ function AiSchedulesSection({
     setLoading(true);
     onError("");
     try {
-      const [loadedSchedules, loadedConnections, loadedResumes] = await Promise.all([
+      const replyStylesRequest = typeof api.listReplyStyles === "function"
+        ? api.listReplyStyles()
+        : Promise.resolve([]);
+      const [loadedSchedules, loadedConnections, loadedResumes, loadedReplyStyles] = await Promise.all([
         api.listAiSchedules(),
         api.listGmailConnections(),
-        api.listResumes()
+        api.listResumes(),
+        replyStylesRequest
       ]);
       setSchedules(loadedSchedules);
       setConnections(loadedConnections.filter((connection) => connection.canSend));
       setResumes(loadedResumes);
+      setReplyStyles(loadedReplyStyles);
     } catch (loadError) {
       onError(errorText(loadError));
     } finally {
@@ -1495,6 +1810,7 @@ function AiSchedulesSection({
     setMessages([]);
     setGmailConnectionId(connections[0]?.id ?? "");
     setResumeId("");
+    setReplyStyleId(replyStyles.find((style) => style.isDefault)?.id ?? "");
     setName("");
     setMode("unread");
     setIntervalMinutes(60);
@@ -1546,6 +1862,7 @@ function AiSchedulesSection({
     }).catch((loadError) => onError(errorText(loadError)));
     setGmailConnectionId(schedule.gmailConnectionId ?? connections[0]?.id ?? "");
     setResumeId(schedule.resumeId ?? "");
+    setReplyStyleId(schedule.replyStyleId ?? "");
     setMode(schedule.mode);
     setIntervalMinutes(schedule.intervalMinutes);
     setProvider(schedule.provider);
@@ -1588,6 +1905,7 @@ function AiSchedulesSection({
         messageId: messageId || null,
         gmailConnectionId: task === "draft_reply" ? gmailConnectionId : null,
         resumeId: task === "draft_reply" && resumeId ? resumeId : null,
+        replyStyleId: task === "draft_reply" && replyStyleId ? replyStyleId : null,
         provider,
         model: model.trim(),
         skills,
@@ -1775,6 +2093,13 @@ function AiSchedulesSection({
                 </select>
                 <small className="settings-hint">Attached only when the email is classified as a development opportunity.</small>
               </label>
+              <label>Reply style
+                <select value={replyStyleId} onChange={(event) => setReplyStyleId(event.target.value)} disabled={busy}>
+                  <option value="">Provider default</option>
+                  {replyStyles.map((style) => <option key={style.id} value={style.id}>{style.name} · {style.tone}</option>)}
+                </select>
+                <small className="settings-hint">Applies your reusable writing profile to every generated draft.</small>
+              </label>
             </div>
           )}
           <div className="settings-form-grid">
@@ -1843,7 +2168,7 @@ function AiSchedulesSection({
                   {schedule.messageId ? ` / ${schedule.messageSubject ?? "Selected email"}` : ` · ${schedule.mode === "unread" ? "Unread only" : "Everything"}`}
                   {` · Every ${formatInterval(schedule.intervalMinutes)}`}
                 </span>
-                {schedule.task === "draft_reply" && <small>Send from {schedule.gmailConnectionEmail ?? "Unavailable account"}{schedule.resumeName ? ` · Development resume: ${schedule.resumeName}` : " · No resume"}</small>}
+                {schedule.task === "draft_reply" && <small>Send from {schedule.gmailConnectionEmail ?? "Unavailable account"}{schedule.resumeName ? ` · Development resume: ${schedule.resumeName}` : " · No resume"}{schedule.replyStyleName ? ` · Style: ${schedule.replyStyleName}` : ""}</small>}
                 <small>{AI_PROVIDER_LABELS[schedule.provider]} · {schedule.model} · {schedule.skills.map((skill) => AI_AGENT_SKILLS.find((entry) => entry.id === skill)?.label ?? skill).join(", ")}</small>
                 {schedule.prompt && <small className="ai-schedule-prompt" title={schedule.prompt}>Prompt: {schedule.prompt}</small>}
                 {schedule.progress

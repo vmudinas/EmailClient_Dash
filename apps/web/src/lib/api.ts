@@ -6,6 +6,7 @@ import type {
   AiMessageState,
   AiModelOption,
   AiProviderId,
+  AiReviewQueue,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleUpdate,
@@ -36,6 +37,10 @@ import type {
   LocalMessageStatePatch,
   MailboxMergeResult,
   MessageDetail,
+  MessageFollowUp,
+  MessageFollowUpCreate,
+  MessageFollowUpPatch,
+  MessageThread,
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
   MessageDraftReplyRequest,
@@ -43,11 +48,19 @@ import type {
   MessageSummary,
   RuntimeConfig,
   ResumeAsset,
+  ReplyStyle,
+  ReplyStyleCreate,
+  ReplyStylePatch,
   SearchFilters,
   SearchHit,
   SenderFilingStatus,
   SenderSpamRuleResult,
   SharingState,
+  SmartMailRule,
+  SmartMailRuleCreate,
+  SmartMailRulePatch,
+  SmartMailRuleSuggestion,
+  SmartMailRuleSuggestionRequest,
   TodoCreate,
   TodoItem,
   TodoPatch,
@@ -333,6 +346,32 @@ export class ApiClient {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}`);
   }
 
+  getMessageThread(messageId: string): Promise<MessageThread> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/thread`);
+  }
+
+  createMessageFollowUp(messageId: string, input: MessageFollowUpCreate): Promise<MessageFollowUp> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/follow-up`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  listFollowUps(status?: MessageFollowUp["status"]): Promise<MessageFollowUp[]> {
+    return this.request(`/api/follow-ups${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+  }
+
+  updateFollowUp(id: string, patch: MessageFollowUpPatch): Promise<MessageFollowUp> {
+    return this.request(`/api/follow-ups/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+  }
+
+  deleteFollowUp(id: string): Promise<void> {
+    return this.request(`/api/follow-ups/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
   getMessageAiState(messageId: string): Promise<AiMessageState> {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/ai`);
   }
@@ -371,6 +410,55 @@ export class ApiClient {
     return this.request(`/api/ai/jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: "POST"
     });
+  }
+
+  getAiReviewQueue(): Promise<AiReviewQueue> {
+    return this.request("/api/ai/review-queue");
+  }
+
+  listReplyStyles(): Promise<ReplyStyle[]> {
+    return this.request("/api/reply-styles");
+  }
+
+  createReplyStyle(input: ReplyStyleCreate): Promise<ReplyStyle> {
+    return this.request("/api/admin/reply-styles", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateReplyStyle(id: string, patch: ReplyStylePatch): Promise<ReplyStyle> {
+    return this.request(`/api/admin/reply-styles/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+  }
+
+  deleteReplyStyle(id: string): Promise<void> {
+    return this.request(`/api/admin/reply-styles/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  listSmartMailRules(archiveId?: string): Promise<SmartMailRule[]> {
+    return this.request(`/api/admin/smart-mail-rules${archiveId ? `?archiveId=${encodeURIComponent(archiveId)}` : ""}`);
+  }
+
+  suggestSmartMailRule(input: SmartMailRuleSuggestionRequest): Promise<SmartMailRuleSuggestion> {
+    return this.request("/api/admin/smart-mail-rules/suggest", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  createSmartMailRule(input: SmartMailRuleCreate): Promise<SmartMailRule> {
+    return this.request("/api/admin/smart-mail-rules", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateSmartMailRule(id: string, patch: SmartMailRulePatch): Promise<SmartMailRule> {
+    return this.request(`/api/admin/smart-mail-rules/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+  }
+
+  deleteSmartMailRule(id: string): Promise<void> {
+    return this.request(`/api/admin/smart-mail-rules/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   updateMessageState(

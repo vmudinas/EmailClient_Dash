@@ -180,7 +180,7 @@ AI analysis is optional and disabled by default. It can use the OpenAI API and/o
 
 DeepSeek's model lineup changes over time; `deepseek-chat` and `deepseek-reasoner` retire on 2026-07-24 in favor of `deepseek-v4-flash` and `deepseek-v4-pro`, which is why the model list is fetched live from DeepSeek rather than hardcoded. Pricing shown next to each model is a reference snapshot baked into the app, not a live quote — check [platform.deepseek.com/api-docs/pricing](https://api-docs.deepseek.com/quick_start/pricing) for current rates before relying on it for cost decisions.
 
-The first phase returns a structured local result with a summary, categories, priority, action recommendation, spam and phishing probabilities, draft recommendation, confidence, and supporting signals. Analysis is a suggestion and can be wrong. It never automatically sends, deletes, moves, labels, or rewrites email.
+The first phase returns a structured local result with a summary, categories, priority, action recommendation, spam and phishing probabilities, draft recommendation, confidence, and supporting signals. When a message belongs to a thread, analysis and draft generation include up to 20 chronological messages so the result reflects the conversation instead of treating one reply in isolation. Analysis is a suggestion and can be wrong. It never automatically sends, deletes, moves, labels, or rewrites email.
 
 Analysis runs through a persistent SQLite job queue. Jobs survive restarts, transient provider failures retry once, active jobs can be cancelled, and current results are reused when the message, model, and prompt version have not changed. Job states and redacted failures appear in **Diagnostics > AI analysis**. Daily and monthly request limits are enforced before each provider request; request and token usage appears in Admin settings.
 
@@ -205,12 +205,20 @@ Below the provider cards, **Admin settings > AI > Scheduled AI agents** lets you
 3. Set an interval in minutes (e.g. `60` for hourly, `1440` for daily).
 4. Choose the agent's provider and model. This selection is pinned to the schedule and does not change when the manual-analysis Active provider changes.
 5. Select one or more agent skills (summary, categorization, priority, action extraction, spam/phishing checks, and reply recommendation), then optionally add a schedule-specific prompt.
-6. For a draft task, choose the Gmail sending account and optionally a resume uploaded under **Admin settings > Resumes**. The resume is selected only for development opportunities.
+6. For a draft task, choose the Gmail sending account, a saved reply style, and optionally a resume uploaded under **Admin settings > Resumes**. The resume is selected only for development opportunities.
 7. Save. The schedule runs with that exact agent configuration, respects the same daily/monthly request limits, and skips messages already processed with the same content and configuration.
 
 Draft tasks classify each email as work-related and development-related. Work-related email produces a local reply draft; non-work email produces no draft. Development drafts reference the selected resume. Schedules never send email or resumes automatically: use the top-bar Drafts panel to review and send.
 
 Each schedule can be edited, toggled on/off, triggered immediately with **Run now**, or deleted. The list shows its task, target, provider, model, skills, prompt, sending account/resume when applicable, last-run time, and status summary.
+
+### AI workflow tools
+
+- **Thread-level AI:** Open a message to expand its conversation context. Analysis, AI actions, and reply drafts use that context and avoid generating another reply after the conversation has already been answered.
+- **Follow-up tracker:** Choose **Follow up** on a message, set a date/time and note, and review pending items in the AI Review Queue. A pending follow-up completes automatically when a sent reply is recorded for that conversation.
+- **AI Review Queue:** Use the brain button in the top toolbar to review generated drafts, messages needing a decision, and due or upcoming follow-ups in one place. The badge shows the current review count.
+- **Smart mail rules:** Under **Admin settings > Smart rules**, describe a rule in natural language, review and edit the AI-generated conditions/actions, then activate it. Rules can move matching local Inbox mail to an existing folder, mark it read, or star it; they never send or delete email. You can optionally apply a reviewed rule to existing messages.
+- **Reply styles:** Under **Admin settings > Reply styles**, save reusable tone and writing instructions and select a default. Manual and scheduled AI drafts can pin a specific style, and the selected style is recorded with the draft for review.
 
 ## Insights
 

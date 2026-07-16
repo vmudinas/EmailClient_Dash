@@ -1169,6 +1169,224 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("tracks a whole conversation, keeps one pending follow-up, and completes it after reply", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Thread follow-ups",
+      sourceType: "gmail",
+      fingerprint: "thread-follow-ups",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const firstId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "thread-follow-up-first",
+      internetMessageId: "<thread-follow-up-first@example.test>",
+      subject: "Project decision",
+      sender: { name: "Client", address: "client@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T12:00:00.000Z",
+      receivedAt: "2026-07-15T12:00:00.000Z",
+      bodyText: "Can you confirm the decision?",
+      bodyHtml: null,
+      headers: { "message-id": "<thread-follow-up-first@example.test>" },
+      sizeBytes: 25,
+      attachments: []
+    });
+    const secondId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "thread-follow-up-second",
+      internetMessageId: "<thread-follow-up-second@example.test>",
+      subject: "Re: Project decision",
+      sender: { name: "Client", address: "client@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T13:00:00.000Z",
+      receivedAt: "2026-07-15T13:00:00.000Z",
+      bodyText: "Following up on the decision.",
+      bodyHtml: null,
+      headers: {
+        "message-id": "<thread-follow-up-second@example.test>",
+        "in-reply-to": "<thread-follow-up-first@example.test>"
+      },
+      sizeBytes: 25,
+      attachments: []
+    });
+    database.completeArchive(archive.id, 0);
+
+    expect(database.getMessageThread(secondId)).toMatchObject({
+      totalMessages: 2,
+      messages: [{ id: firstId }, { id: secondId }]
+    });
+    const firstFollowUp = database.createMessageFollowUp(firstId, {
+      dueAt: "2026-07-17T13:00:00.000Z",
+      note: "Confirm the project decision"
+    });
+    const updatedFollowUp = database.createMessageFollowUp(secondId, {
+      dueAt: "2026-07-18T13:00:00.000Z",
+      note: "Reply to the latest message"
+    });
+    expect(updatedFollowUp.id).toBe(firstFollowUp.id);
+    expect(database.getMessage(firstId)?.hasPendingFollowUp).toBe(true);
+    expect(database.getMessage(secondId)?.hasPendingFollowUp).toBe(true);
+    expect(database.getAiReviewQueue().followUps).toEqual([
+      expect.objectContaining({ id: firstFollowUp.id, messageId: secondId })
+    ]);
+
+    database.recordConversationReply(secondId, "sent-thread-follow-up");
+    expect(database.getMessageFollowUp(firstFollowUp.id)).toMatchObject({
+      status: "completed",
+      completedAt: expect.any(String)
+    });
+    expect(database.getMessage(firstId)?.hasPendingFollowUp).toBe(false);
+    database.close();
+  });
+
+  it("stores reusable reply styles and carries them into scheduled and generated drafts", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Reply styles",
+      sourceType: "gmail",
+      fingerprint: "reply-styles",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = insertSenderMessage(database, archive.id, inbox.id, "styled-message", "Recruiter", "recruiter@example.test");
+    database.completeArchive(archive.id, 0);
+    const connection = database.createGmailConnection({
+      email: "owner@example.test",
+      archiveId: archive.id,
+      folderId: inbox.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canManageCalendar: false,
+      refreshToken: "reply-style-refresh"
+    });
+    const style = database.createReplyStyle({
+      name: "Warm concise",
+      tone: "Warm and direct",
+      instructions: "Use two short paragraphs and one clear next step.",
+      isDefault: true
+    });
+    const schedule = database.createAiSchedule({
+      name: "Styled drafts",
+      task: "draft_reply",
+      folderId: inbox.id,
+      gmailConnectionId: connection.id,
+      replyStyleId: style.id,
+      mode: "all",
+      intervalMinutes: 60,
+      provider: "openai",
+      model: "draft-model",
+      skills: ["recommend-draft"],
+      prompt: "",
+      enabled: true
+    });
+    const draft = database.createAutomatedDraft({
+      connectionId: connection.id,
+      sourceMessageId: messageId,
+      scheduleId: schedule.id,
+      replyStyleId: style.id,
+      to: ["recruiter@example.test"],
+      cc: [],
+      bcc: [],
+      subject: "Re: styled-message",
+      bodyText: "Thank you. I am interested.",
+      workRelated: true,
+      developmentOpportunity: true,
+      aiReason: "Recruiting message",
+      aiConfidence: 0.95
+    });
+
+    expect(schedule).toMatchObject({ replyStyleId: style.id, replyStyleName: "Warm concise" });
+    expect(draft).toMatchObject({ replyStyleId: style.id, replyStyleName: "Warm concise" });
+    expect(database.updateReplyStyle(style.id, { tone: "Friendly and direct" }).tone).toBe("Friendly and direct");
+    expect(database.listReplyStyles()[0]).toMatchObject({ id: style.id, isDefault: true });
+    database.close();
+  });
+
+  it("applies reviewed smart rules to existing and future Inbox mail", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Smart rules",
+      sourceType: "gmail",
+      fingerprint: "smart-rules",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const finance = database.ensureFolder(archive.id, "Finance", "Finance", null);
+    const existingId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "existing-invoice",
+      internetMessageId: null,
+      subject: "Stripe invoice 1042",
+      sender: { name: "Stripe", address: "billing@stripe.com" },
+      to: [], cc: [], bcc: [],
+      sentAt: "2026-07-15T12:00:00.000Z",
+      receivedAt: "2026-07-15T12:00:00.000Z",
+      bodyText: "Your monthly invoice is attached.",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 25,
+      attachments: []
+    });
+    const rule = database.createSmartMailRule({
+      archiveId: archive.id,
+      name: "Stripe invoices",
+      instruction: "Move Stripe invoices to Finance, mark read, and star them.",
+      conditions: {
+        match: "all",
+        senderContains: ["stripe.com"],
+        subjectContains: ["invoice"],
+        bodyContains: [],
+        hasAttachments: null
+      },
+      targetFolderId: finance.id,
+      markRead: true,
+      star: true,
+      enabled: true,
+      applyExisting: true
+    });
+    expect(database.getMessage(existingId)).toMatchObject({
+      folderPath: "Finance",
+      state: { isRead: true, isStarred: true }
+    });
+    const futureId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "future-invoice",
+      internetMessageId: null,
+      subject: "Invoice available",
+      sender: { name: "Stripe", address: "notices@stripe.com" },
+      to: [], cc: [], bcc: [],
+      sentAt: "2026-07-16T12:00:00.000Z",
+      receivedAt: "2026-07-16T12:00:00.000Z",
+      bodyText: "A new invoice is ready.",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 25,
+      attachments: []
+    });
+    const unrelatedId = insertSenderMessage(database, archive.id, inbox.id, "team-update", "Team", "team@example.test");
+    expect(database.getMessage(futureId)).toMatchObject({
+      folderPath: "Finance",
+      state: { isRead: true, isStarred: true }
+    });
+    expect(database.getMessage(unrelatedId)?.folderPath).toBe("Inbox");
+    expect(database.getSmartMailRule(rule.id)?.matchedMessages).toBe(2);
+    database.close();
+  });
+
   it("stores per-day to-do items ordered by position and supports editing and removal", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);

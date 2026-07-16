@@ -176,7 +176,8 @@ describe("MessageReader AI analysis", () => {
 
     await waitFor(() => expect(api.startMessageDraftReply).toHaveBeenCalledWith(MESSAGE.id, {
       gmailConnectionId: connection.id,
-      resumeId: "00000000-0000-4000-8000-000000000002"
+      resumeId: "00000000-0000-4000-8000-000000000002",
+      replyStyleId: null
     }));
     await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(AI_DRAFT));
   });

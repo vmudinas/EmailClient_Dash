@@ -9,6 +9,7 @@ import {
   Archive,
   Activity,
   BookOpen,
+  BrainCircuit,
   CalendarDays,
   FileEdit,
   Filter,
@@ -28,6 +29,7 @@ import {
 } from "lucide-react";
 import type {
   Archive as ArchiveModel,
+  AiReviewQueue,
   AuthSessionInfo,
   DiagnosticsSnapshot,
   EmailDraft,
@@ -70,6 +72,7 @@ import { DraftsDialog } from "./components/DraftsDialog.js";
 import { GuideDialog } from "./components/GuideDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
+import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
 type MobileView = "folders" | "messages" | "reader";
@@ -140,6 +143,10 @@ export function App() {
   const [draftsLoading, setDraftsLoading] = useState(false);
   const [draftsBusy, setDraftsBusy] = useState(false);
   const [draftsError, setDraftsError] = useState("");
+  const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<AiReviewQueue | null>(null);
+  const [reviewQueueLoading, setReviewQueueLoading] = useState(false);
+  const [reviewFollowUpBusyId, setReviewFollowUpBusyId] = useState<string | null>(null);
   const [moveBusy, setMoveBusy] = useState(false);
   const [spamBusy, setSpamBusy] = useState(false);
   const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
@@ -172,7 +179,7 @@ export function App() {
 
   const updateMessageIndicators = useCallback((
     messageId: string,
-    patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean }
+    patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean; hasPendingFollowUp?: boolean }
   ) => {
     setItems((current) => current.map((item) => item.message.id === messageId
       ? { ...item, message: { ...item.message, ...patch } }
@@ -492,7 +499,7 @@ export function App() {
     }
   }, [items, runtime?.platform]);
 
-  const openMessage = async (summary: MessageSummary, moveMobile = true) => {
+  const openMessage = async (summary: Pick<MessageSummary, "id">, moveMobile = true) => {
     if (!api) return;
     setSelectedMessageId(summary.id);
     if (moveMobile) setMobileView("reader");
@@ -823,6 +830,44 @@ export function App() {
   const openDrafts = () => {
     setDraftsOpen(true);
     void loadDrafts();
+  };
+
+  const refreshReviewQueue = useCallback(async () => {
+    if (!api) return;
+    setReviewQueueLoading(true);
+    try {
+      setReviewQueue(await api.getAiReviewQueue());
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "AI review queue could not be loaded");
+    } finally {
+      setReviewQueueLoading(false);
+    }
+  }, [api, showError]);
+
+  useEffect(() => {
+    if (!api || !session) return;
+    void refreshReviewQueue();
+    const interval = window.setInterval(() => void refreshReviewQueue(), 30_000);
+    return () => window.clearInterval(interval);
+  }, [api, session?.id, refreshReviewQueue]);
+
+  const openReviewQueue = () => {
+    setReviewQueueOpen(true);
+    void refreshReviewQueue();
+  };
+
+  const completeReviewFollowUp = async (followUpId: string, messageId: string) => {
+    if (!api || readOnly) return;
+    setReviewFollowUpBusyId(followUpId);
+    try {
+      await api.updateFollowUp(followUpId, { status: "completed" });
+      updateMessageIndicators(messageId, { hasPendingFollowUp: false });
+      await refreshReviewQueue();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Follow-up could not be completed");
+    } finally {
+      setReviewFollowUpBusyId(null);
+    }
   };
 
   const editSavedDraft = (draft: EmailDraft) => {
@@ -1294,6 +1339,10 @@ export function App() {
               <FileEdit size={18} />
             </button>
           )}
+          <button className="icon-button review-queue-trigger" onClick={openReviewQueue} title="Open AI review queue" aria-label="Open AI review queue">
+            <BrainCircuit size={18} />
+            {(reviewQueue?.totalItems ?? 0) > 0 && <span className="diagnostic-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
+          </button>
           {!readOnly && (
             <button className="icon-button compose-trigger" onClick={() => openCompose()} title="Compose email" aria-label="Compose email">
               <MailPlus size={18} />
@@ -1505,6 +1554,24 @@ export function App() {
         onEdit={editSavedDraft}
         onSend={(draft) => void sendSavedDraft(draft)}
         onDelete={(draft) => void deleteSavedDraft(draft)}
+      />
+      <AiReviewQueueDialog
+        open={reviewQueueOpen}
+        queue={reviewQueue}
+        loading={reviewQueueLoading}
+        busyFollowUpId={reviewFollowUpBusyId}
+        readOnly={readOnly}
+        onClose={() => setReviewQueueOpen(false)}
+        onRefresh={() => void refreshReviewQueue()}
+        onOpenDraft={(draft) => {
+          setReviewQueueOpen(false);
+          openGeneratedDraft(draft);
+        }}
+        onOpenMessage={(target) => {
+          setReviewQueueOpen(false);
+          void openMessage(target);
+        }}
+        onCompleteFollowUp={(followUp) => void completeReviewFollowUp(followUp.id, followUp.messageId)}
       />
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
       {isAdmin && (

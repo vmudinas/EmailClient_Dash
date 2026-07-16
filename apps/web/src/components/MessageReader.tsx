@@ -3,6 +3,7 @@ import DOMPurify from "dompurify";
 import {
   ArrowLeft,
   Archive as ArchiveIcon,
+  BellPlus,
   BrainCircuit,
   CalendarPlus,
   Check,
@@ -46,12 +47,14 @@ import type {
   LocalMessageStatePatch,
   MessageActionSuggestion,
   MessageAnalysis,
-  MessageDetail
+  MessageDetail,
+  MessageThread
 } from "@email-client/shared";
 import { displayAddress, formatBytes, formatDate, formatTimeOfDay, initials } from "../lib/format.js";
 import type { ApiClient } from "../lib/api.js";
 import { MessageActionDialog } from "./MessageActionDialog.js";
 import { AiDraftReplyDialog } from "./AiDraftReplyDialog.js";
+import { FollowUpDialog } from "./FollowUpDialog.js";
 
 interface MessageReaderProps {
   message: MessageDetail | null;
@@ -69,7 +72,7 @@ interface MessageReaderProps {
   onArchive(message: MessageDetail): Promise<void>;
   onSpamSender(message: MessageDetail): Promise<void>;
   onOpenDraft(draft: EmailDraft): void;
-  onIndicatorsChange(messageId: string, patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean }): void;
+  onIndicatorsChange(messageId: string, patch: { hasAiAnalysis?: boolean; hasCalendarEvent?: boolean; hasPendingFollowUp?: boolean }): void;
   moveBusy: boolean;
   spamBusy: boolean;
 }
@@ -105,6 +108,8 @@ export function MessageReader({
   const [actionLoading, setActionLoading] = useState(false);
   const [actionNotice, setActionNotice] = useState("");
   const [draftDialogOpen, setDraftDialogOpen] = useState(false);
+  const [followUpDialogOpen, setFollowUpDialogOpen] = useState(false);
+  const [thread, setThread] = useState<MessageThread | null>(null);
   const [draftJob, setDraftJob] = useState<AiJob | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -132,6 +137,8 @@ export function MessageReader({
     setActionSuggestion(null);
     setActionNotice("");
     setDraftDialogOpen(false);
+    setFollowUpDialogOpen(false);
+    setThread(null);
     setDraftJob(null);
     handledDraftJobRef.current = null;
     if (!api || !message?.id) return () => { active = false; };
@@ -151,6 +158,12 @@ export function MessageReader({
       })
       .catch((error) => { if (active) setAiError(errorText(error)); })
       .finally(() => { if (active) setAiLoading(false); });
+    const threadRequest = typeof api.getMessageThread === "function"
+      ? api.getMessageThread(message.id)
+      : Promise.resolve(null);
+    void threadRequest
+      .then((value) => { if (active) setThread(value); })
+      .catch(() => { if (active) setThread(null); });
     return () => { active = false; };
   }, [api, message?.id]);
 
@@ -427,6 +440,7 @@ export function MessageReader({
         {(aiState.analysis || aiState.job || aiError) && (
           <AiAnalysisPanel
             state={aiState}
+            thread={thread}
             loading={aiLoading}
             error={aiError}
             readOnly={readOnly}
@@ -447,6 +461,7 @@ export function MessageReader({
                   else onError("Connect or reauthorize Gmail with send permission to create a draft.");
                 }}
                 onPlan={() => void suggestAction()}
+                onFollowUp={() => setFollowUpDialogOpen(true)}
                 onReply={() => onReply(message)}
                 onForward={() => onForward(message)}
                 onLoadFolders={onLoadFolders}
@@ -527,6 +542,21 @@ export function MessageReader({
           />
         )}
 
+        {api && (
+          <FollowUpDialog
+            open={followUpDialogOpen}
+            api={api}
+            messageId={message.id}
+            subject={message.subject}
+            suggestedNote={aiState.analysis?.actionSummary}
+            onClose={() => setFollowUpDialogOpen(false)}
+            onCreated={() => {
+              setActionNotice("Follow-up saved for this conversation.");
+              onIndicatorsChange(message.id, { hasPendingFollowUp: true });
+            }}
+          />
+        )}
+
         {!readOnly && (
           <section className="local-notes">
             <div className="notes-heading">
@@ -577,6 +607,7 @@ export function MessageReader({
 
 function AiAnalysisPanel({
   state,
+  thread,
   loading,
   error,
   readOnly,
@@ -584,6 +615,7 @@ function AiAnalysisPanel({
   actions
 }: {
   state: AiMessageState;
+  thread: MessageThread | null;
   loading: boolean;
   error: string;
   readOnly: boolean;
@@ -603,7 +635,7 @@ function AiAnalysisPanel({
       {active && (
         <div className="ai-analysis-status" role="status">
           <LoaderCircle className="spin" size={17} />
-          <span>{job.status === "queued" ? "Queued for local processing" : "Analyzing this email"}</span>
+          <span>{job.status === "queued" ? "Queued for local processing" : "Analyzing this conversation"}</span>
         </div>
       )}
       {job?.status === "failed" && (
@@ -615,6 +647,18 @@ function AiAnalysisPanel({
       {error && <div className="ai-analysis-error" role="alert"><CircleAlert size={17} /><span>{error}</span></div>}
       {analysis && (
         <div className="ai-analysis-content">
+          {((analysis.threadMessageCount ?? 1) > 1 || (thread?.totalMessages ?? 0) > 1) && (
+            <details className="ai-thread-context">
+              <summary>{analysis.threadMessageCount ?? thread?.totalMessages ?? 1} messages analyzed in this conversation</summary>
+              <ol>
+                {thread?.messages.map((entry) => (
+                  <li key={entry.id} className={entry.id === state.analysis?.messageId ? "selected" : ""}>
+                    <span>{displayAddress(entry.sender)}</span><strong>{entry.subject}</strong><time>{formatDate(entry.receivedAt ?? entry.sentAt)}</time>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
           <p className="ai-summary">{analysis.summary}</p>
           <div className="ai-analysis-badges">
             <span className={`ai-priority priority-${analysis.priority}`}>{analysis.priority} priority</span>
@@ -651,6 +695,7 @@ function AiMessageActions({
   spamBusy,
   onDraft,
   onPlan,
+  onFollowUp,
   onReply,
   onForward,
   onLoadFolders,
@@ -671,6 +716,7 @@ function AiMessageActions({
   spamBusy: boolean;
   onDraft(): void;
   onPlan(): void;
+  onFollowUp(): void;
   onReply(): void;
   onForward(): void;
   onLoadFolders(archiveId: string): Promise<Folder[]>;
@@ -791,6 +837,9 @@ function AiMessageActions({
         {planning ? <LoaderCircle className="spin" size={15} /> : <CalendarPlus size={15} />}
         {planning ? "Finding dates" : "Plan"}
       </button>
+      <button type="button" className="secondary-button compact" onClick={onFollowUp} disabled={analysisBusy}>
+        <BellPlus size={15} /> Follow up
+      </button>
       <div className="ai-more-menu" ref={containerRef}>
         <button
           type="button"
@@ -839,8 +888,8 @@ function AiMessageActions({
                 <button className="ai-more-item" role="menuitem" onClick={() => { close(); onForward(); }}>
                   <Forward size={16} /><span><strong>Forward</strong><small>Add context before sending</small></span>
                 </button>
-                <button className="ai-more-item" role="menuitem" disabled={planning || analysisBusy} onClick={() => { close(); onPlan(); }}>
-                  <CalendarPlus size={16} /><span><strong>Create follow-up</strong><small>Review an event or reminder</small></span>
+                <button className="ai-more-item" role="menuitem" disabled={analysisBusy} onClick={() => { close(); onFollowUp(); }}>
+                  <BellPlus size={16} /><span><strong>Create follow-up</strong><small>Remind me until this thread is answered</small></span>
                 </button>
                 <button className="ai-more-item" role="menuitem" onClick={() => void copy(analysis.summary, "AI summary copied.")}>
                   <ClipboardCopy size={16} /><span><strong>Copy summary</strong><small>Copy the AI synopsis</small></span>

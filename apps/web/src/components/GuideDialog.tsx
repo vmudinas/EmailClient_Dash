@@ -142,15 +142,18 @@ function GuideContent({ section }: { section: GuideSection }) {
           <li>Save the key, choose a model and request limits, enable AI, then test the connection.</li>
           <li>Open an email and choose Analyze. The result is stored locally and can be viewed again without another request.</li>
         </ol>
-        <div className="guide-assurance"><ShieldCheck size={18} /><span>Only the selected message fields and attachment names are sent. Requests use <code>store: false</code>; API keys and message bodies are excluded from diagnostics.</span></div>
+        <div className="guide-assurance"><ShieldCheck size={18} /><span>The selected message and up to 20 messages from its conversation are supplied for context. Requests use <code>store: false</code>; API keys and message bodies are excluded from diagnostics.</span></div>
         <h4>Jobs and limits</h4>
         <p>Analysis runs as a durable background job. Queued, running, failed, cancelled, and completed states remain visible in Diagnostics. Daily and monthly request limits are enforced before a request is sent.</p>
         <h4>Draft identity</h4>
         <p>Admin settings and Drafts controls the default verified send-as address and the name that replaces <code>[Name]</code> placeholders. Saved drafts can be reviewed or sent directly from the Drafts list after confirmation.</p>
-        <p>After analysis, use Draft reply to choose a sending account and optional résumé. The generated draft opens in the existing review composer and is never sent automatically. Plan opens the editable calendar/to-do suggestion, while More contains manual reply, forward, follow-up, copy, attachment, contact, unsubscribe, move, archive, and Spam actions when relevant.</p>
+        <p>After analysis, use Draft reply to choose a sending account, optional résumé, and personalized reply style. The generated draft opens in the existing review composer and is never sent automatically. Plan opens the editable calendar/to-do suggestion, while Follow up tracks the conversation until you reply.</p>
         <p>AI draft schedules create at most one active job or reviewable draft per email conversation. Conversations with a recorded reply or matching Sent message are skipped, and the exact skip reason is written to Diagnostics.</p>
+        <h4>Review queue and workflows</h4>
+        <p>The brain button in the top bar opens one queue for AI drafts, actionable or high-priority analyses, and pending follow-ups. Follow-ups complete automatically after a reply is sent and can also be completed manually.</p>
+        <p>Admin settings and Reply styles stores reusable tone profiles. Smart rules converts a plain-language filing request into literal sender, subject, body, and attachment conditions. Review the destination and actions before activation; enabled rules then apply locally to new Inbox mail.</p>
         <h4>Safety boundary</h4>
-        <p>AI results are suggestions and can be wrong. This version does not automatically send, delete, move, label, or rewrite email.</p>
+        <p>AI results are suggestions and can be wrong. AI never sends or deletes email. A smart rule can move, mark read, or star local Inbox mail only after an administrator reviews and activates the structured rule.</p>
       </>
     );
   }

@@ -98,6 +98,7 @@ export interface MessageSummary {
   attachmentCount: number;
   hasAiAnalysis?: boolean;
   hasCalendarEvent?: boolean;
+  hasPendingFollowUp?: boolean;
   state: LocalMessageState;
 }
 
@@ -208,6 +209,7 @@ export interface AiJob extends AiAgentConfig {
   scheduleRunId: string | null;
   gmailConnectionId: string | null;
   resumeId: string | null;
+  replyStyleId?: string | null;
   status: AiJobStatus;
   promptVersion: string;
   contentHash: string;
@@ -233,6 +235,7 @@ export interface MessageAnalysis {
   draftRecommended: boolean;
   confidence: number;
   signals: string[];
+  threadMessageCount?: number;
   model: string;
   promptVersion: string;
   contentHash: string;
@@ -289,6 +292,8 @@ export interface AiSchedule extends AiAgentConfig {
   gmailConnectionEmail: string | null;
   resumeId: string | null;
   resumeName: string | null;
+  replyStyleId?: string | null;
+  replyStyleName?: string | null;
   mode: AiScheduleMode;
   intervalMinutes: number;
   enabled: boolean;
@@ -306,6 +311,7 @@ export const aiScheduleCreateSchema = z.object({
   messageId: z.string().uuid().nullable().optional(),
   gmailConnectionId: z.string().uuid().nullable().optional(),
   resumeId: z.string().uuid().nullable().optional(),
+  replyStyleId: z.string().uuid().nullable().optional(),
   mode: z.enum(["all", "unread"]),
   intervalMinutes: z.number().int().min(5).max(43_200),
   provider: z.enum(AI_PROVIDER_IDS),
@@ -327,6 +333,7 @@ export const aiScheduleUpdateSchema = z.object({
   messageId: z.string().uuid().nullable().optional(),
   gmailConnectionId: z.string().uuid().nullable().optional(),
   resumeId: z.string().uuid().nullable().optional(),
+  replyStyleId: z.string().uuid().nullable().optional(),
   mode: z.enum(["all", "unread"]).optional(),
   intervalMinutes: z.number().int().min(5).max(43_200).optional(),
   provider: z.enum(AI_PROVIDER_IDS).optional(),
@@ -371,6 +378,8 @@ export interface EmailDraft {
   resumeId: string | null;
   resumeName: string | null;
   resumeFilename: string | null;
+  replyStyleId?: string | null;
+  replyStyleName?: string | null;
   workRelated: boolean | null;
   developmentOpportunity: boolean | null;
   aiReason: string | null;
@@ -383,6 +392,179 @@ export interface MessageDraftReplyStart {
   job: AiJob | null;
   draft: EmailDraft | null;
 }
+
+export interface MessageThread {
+  messageId: string;
+  totalMessages: number;
+  messages: MessageSummary[];
+}
+
+export type MessageFollowUpStatus = "pending" | "completed" | "dismissed";
+
+export interface MessageFollowUp {
+  id: string;
+  messageId: string;
+  subject: string;
+  sender: EmailAddress;
+  dueAt: string;
+  note: string;
+  status: MessageFollowUpStatus;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const messageFollowUpCreateSchema = z.object({
+  dueAt: z.string().datetime({ offset: true }),
+  note: z.string().trim().max(2_000).default("")
+}).strict();
+
+export type MessageFollowUpCreate = z.infer<typeof messageFollowUpCreateSchema>;
+
+export const messageFollowUpPatchSchema = z.object({
+  dueAt: z.string().datetime({ offset: true }).optional(),
+  note: z.string().trim().max(2_000).optional(),
+  status: z.enum(["pending", "completed", "dismissed"]).optional()
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one follow-up field is required"
+);
+
+export type MessageFollowUpPatch = z.infer<typeof messageFollowUpPatchSchema>;
+
+export interface ReplyStyle {
+  id: string;
+  name: string;
+  tone: string;
+  instructions: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const replyStyleCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  tone: z.string().trim().min(1).max(120),
+  instructions: z.string().trim().min(1).max(4_000),
+  isDefault: z.boolean().default(false)
+}).strict();
+
+export type ReplyStyleCreate = z.infer<typeof replyStyleCreateSchema>;
+
+export const replyStylePatchSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  tone: z.string().trim().min(1).max(120).optional(),
+  instructions: z.string().trim().min(1).max(4_000).optional(),
+  isDefault: z.boolean().optional()
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one reply style field is required"
+);
+
+export type ReplyStylePatch = z.infer<typeof replyStylePatchSchema>;
+
+export interface AiReviewAnalysisItem {
+  message: MessageSummary;
+  analysis: MessageAnalysis;
+}
+
+export interface AiReviewQueue {
+  drafts: EmailDraft[];
+  analyses: AiReviewAnalysisItem[];
+  followUps: MessageFollowUp[];
+  totalItems: number;
+}
+
+export interface SmartMailRuleConditions {
+  match: "all" | "any";
+  senderContains: string[];
+  subjectContains: string[];
+  bodyContains: string[];
+  hasAttachments: boolean | null;
+}
+
+export interface SmartMailRule {
+  id: string;
+  archiveId: string;
+  archiveName: string;
+  name: string;
+  instruction: string;
+  conditions: SmartMailRuleConditions;
+  targetFolderId: string | null;
+  targetFolderPath: string | null;
+  markRead: boolean;
+  star: boolean;
+  enabled: boolean;
+  matchedMessages: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SmartMailRuleSuggestion {
+  name: string;
+  instruction: string;
+  conditions: SmartMailRuleConditions;
+  targetFolderId: string | null;
+  targetFolderPath: string | null;
+  markRead: boolean;
+  star: boolean;
+  explanation: string;
+  confidence: number;
+}
+
+const smartMailRuleConditionsSchema = z.object({
+  match: z.enum(["all", "any"]),
+  senderContains: z.array(z.string().trim().min(1).max(320)).max(20),
+  subjectContains: z.array(z.string().trim().min(1).max(240)).max(20),
+  bodyContains: z.array(z.string().trim().min(1).max(240)).max(20),
+  hasAttachments: z.boolean().nullable()
+}).strict().refine(
+  (value) => value.senderContains.length > 0
+    || value.subjectContains.length > 0
+    || value.bodyContains.length > 0
+    || value.hasAttachments !== null,
+  "Add at least one rule condition"
+);
+
+export const smartMailRuleSuggestionRequestSchema = z.object({
+  archiveId: z.string().uuid(),
+  instruction: z.string().trim().min(3).max(4_000)
+}).strict();
+
+export type SmartMailRuleSuggestionRequest = z.infer<typeof smartMailRuleSuggestionRequestSchema>;
+
+export const smartMailRuleCreateSchema = z.object({
+  archiveId: z.string().uuid(),
+  name: z.string().trim().min(1).max(120),
+  instruction: z.string().trim().min(3).max(4_000),
+  conditions: smartMailRuleConditionsSchema,
+  targetFolderId: z.string().uuid().nullable(),
+  markRead: z.boolean(),
+  star: z.boolean(),
+  enabled: z.boolean().default(true),
+  applyExisting: z.boolean().default(false)
+}).strict().refine(
+  (value) => Boolean(value.targetFolderId) || value.markRead || value.star,
+  "Choose at least one rule action"
+);
+
+export type SmartMailRuleCreate = z.infer<typeof smartMailRuleCreateSchema>;
+
+export const smartMailRulePatchSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  instruction: z.string().trim().min(3).max(4_000).optional(),
+  conditions: smartMailRuleConditionsSchema.optional(),
+  targetFolderId: z.string().uuid().nullable().optional(),
+  markRead: z.boolean().optional(),
+  star: z.boolean().optional(),
+  enabled: z.boolean().optional(),
+  applyExisting: z.boolean().optional()
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one rule field is required"
+);
+
+export type SmartMailRulePatch = z.infer<typeof smartMailRulePatchSchema>;
 
 export interface DraftIdentitySettings {
   defaultFromAddress: string;
@@ -577,7 +759,8 @@ export type MessageActionSuggestionRequest = z.infer<typeof messageActionSuggest
 
 export const messageDraftReplyRequestSchema = z.object({
   gmailConnectionId: z.string().uuid(),
-  resumeId: z.string().uuid().nullable().optional()
+  resumeId: z.string().uuid().nullable().optional(),
+  replyStyleId: z.string().uuid().nullable().optional()
 }).strict();
 
 export type MessageDraftReplyRequest = z.infer<typeof messageDraftReplyRequestSchema>;
@@ -1073,6 +1256,31 @@ export const messageActionSuggestionOutputSchema = z.object({
 });
 
 export type MessageActionSuggestionOutput = z.infer<typeof messageActionSuggestionOutputSchema>;
+
+export const smartMailRuleSuggestionOutputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  match: z.enum(["all", "any"]),
+  senderContains: z.array(z.string().trim().min(1).max(320)).max(20),
+  subjectContains: z.array(z.string().trim().min(1).max(240)).max(20),
+  bodyContains: z.array(z.string().trim().min(1).max(240)).max(20),
+  hasAttachments: z.boolean().nullable(),
+  targetFolderPath: z.string().trim().max(500).nullable(),
+  markRead: z.boolean(),
+  star: z.boolean(),
+  explanation: z.string().trim().min(1).max(1_000),
+  confidence: z.number().min(0).max(1)
+}).strict().refine(
+  (value) => value.senderContains.length > 0
+    || value.subjectContains.length > 0
+    || value.bodyContains.length > 0
+    || value.hasAttachments !== null,
+  "A suggested rule needs at least one condition"
+).refine(
+  (value) => Boolean(value.targetFolderPath) || value.markRead || value.star,
+  "A suggested rule needs at least one action"
+);
+
+export type SmartMailRuleSuggestionOutput = z.infer<typeof smartMailRuleSuggestionOutputSchema>;
 
 export interface DesktopBridge {
   getRuntimeConfig(): Promise<RuntimeConfig>;

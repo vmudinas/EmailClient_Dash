@@ -72,7 +72,8 @@ describe("AiScheduleService", () => {
     expect(analyze).toHaveBeenCalledWith(
       expect.objectContaining({ id: unreadId }),
       expect.any(AbortSignal),
-      { skills: ["summarize", "extract-actions"], prompt: "Focus on deadlines and explicit commitments." }
+      { skills: ["summarize", "extract-actions"], prompt: "Focus on deadlines and explicit commitments." },
+      expect.objectContaining({ messages: [expect.objectContaining({ id: unreadId })] })
     );
     expect(database.getMessageAnalysis(unreadId)).toMatchObject({ summary: "Automated summary" });
     expect(database.getMessageAnalysis(readId)).toBeNull();
@@ -354,7 +355,8 @@ describe("AiScheduleService", () => {
     expect(draftReply).toHaveBeenCalledWith(
       expect.objectContaining({ id: messageId }),
       expect.any(AbortSignal),
-      { skills: ["recommend-draft", "prioritize"], prompt: "Keep replies brief and professional." }
+      { skills: ["recommend-draft", "prioritize"], prompt: "Keep replies brief and professional." },
+      expect.objectContaining({ messages: [expect.objectContaining({ id: messageId })] })
     );
     expect(database.listEmailDrafts()[0]).toMatchObject({
       source: "ai",

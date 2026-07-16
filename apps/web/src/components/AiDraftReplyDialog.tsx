@@ -3,6 +3,7 @@ import { CircleAlert, FileEdit, LoaderCircle, Paperclip, ShieldCheck, X } from "
 import type {
   GmailConnection,
   MessageDraftReplyStart,
+  ReplyStyle,
   ResumeAsset
 } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
@@ -30,6 +31,8 @@ export function AiDraftReplyDialog({
   const [connectionId, setConnectionId] = useState("");
   const [resumeId, setResumeId] = useState("");
   const [resumes, setResumes] = useState<ResumeAsset[]>([]);
+  const [replyStyles, setReplyStyles] = useState<ReplyStyle[]>([]);
+  const [replyStyleId, setReplyStyleId] = useState("");
   const [loadingResumes, setLoadingResumes] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -42,6 +45,7 @@ export function AiDraftReplyDialog({
         ?? ""
     );
     setResumeId("");
+    setReplyStyleId("");
     setError("");
   }, [open, archiveId, senders]);
 
@@ -49,9 +53,21 @@ export function AiDraftReplyDialog({
     if (!open) return;
     let active = true;
     setLoadingResumes(true);
-    void api.listAvailableResumes()
-      .then((items) => { if (active) setResumes(items); })
-      .catch(() => { if (active) setResumes([]); })
+    const replyStylesRequest = typeof api.listReplyStyles === "function"
+      ? api.listReplyStyles()
+      : Promise.resolve([]);
+    void Promise.all([api.listAvailableResumes(), replyStylesRequest])
+      .then(([items, styles]) => {
+        if (!active) return;
+        setResumes(items);
+        setReplyStyles(styles);
+        setReplyStyleId(styles.find((style) => style.isDefault)?.id ?? "");
+      })
+      .catch(() => {
+        if (!active) return;
+        setResumes([]);
+        setReplyStyles([]);
+      })
       .finally(() => { if (active) setLoadingResumes(false); });
     return () => { active = false; };
   }, [api, open]);
@@ -65,7 +81,8 @@ export function AiDraftReplyDialog({
     try {
       const result = await api.startMessageDraftReply(messageId, {
         gmailConnectionId: connectionId,
-        resumeId: resumeId || null
+        resumeId: resumeId || null,
+        replyStyleId: replyStyleId || null
       });
       onStarted(result);
       onClose();
@@ -113,6 +130,14 @@ export function AiDraftReplyDialog({
                   <option value="">No résumé</option>
                   {resumes.map((resume) => (
                     <option key={resume.id} value={resume.id}>{resume.name} · {resume.filename}</option>
+                  ))}
+                </select>
+              </label>
+              <label>Reply style
+                <select value={replyStyleId} onChange={(event) => setReplyStyleId(event.target.value)} disabled={busy || loadingResumes}>
+                  <option value="">Provider default</option>
+                  {replyStyles.map((style) => (
+                    <option key={style.id} value={style.id}>{style.name} · {style.tone}</option>
                   ))}
                 </select>
               </label>

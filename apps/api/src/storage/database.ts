@@ -11,6 +11,7 @@ import type {
   AiJobStatus,
   AiPriority,
   AiProviderId,
+  AiReviewQueue,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleMode,
@@ -48,7 +49,14 @@ import type {
   MessageDetail,
   MessageAnalysis,
   MessageAnalysisOutput,
+  MessageFollowUp,
+  MessageFollowUpCreate,
+  MessageFollowUpPatch,
   MessageSummary,
+  MessageThread,
+  ReplyStyle,
+  ReplyStyleCreate,
+  ReplyStylePatch,
   ResumeAsset,
   SearchFilters,
   SearchHit,
@@ -56,6 +64,9 @@ import type {
   SenderFilingStatus,
   SenderSpamRuleResult,
   SessionRole,
+  SmartMailRule,
+  SmartMailRuleCreate,
+  SmartMailRulePatch,
   TodoCreate,
   TodoItem,
   TodoPatch,
@@ -265,6 +276,7 @@ export interface AiJobCreateInput {
   scheduleRunId?: string | null;
   gmailConnectionId?: string | null;
   resumeId?: string | null;
+  replyStyleId?: string | null;
   provider: AiProviderId;
   model: string;
   skills: AiAgentSkillId[];
@@ -298,6 +310,7 @@ export interface AutomatedDraftCreateInput {
   subject: string;
   bodyText: string;
   resumeId?: string | null;
+  replyStyleId?: string | null;
   workRelated: boolean;
   developmentOpportunity: boolean;
   aiReason: string;
@@ -320,6 +333,7 @@ export interface MessageReplyContext {
 
 export interface MessageAnalysisUpsertInput extends MessageAnalysisOutput {
   messageId: string;
+  threadMessageCount?: number;
   model: string;
   promptVersion: string;
   contentHash: string;
@@ -1194,6 +1208,99 @@ export class EmailDatabase {
             AND conversation_key IS NOT NULL;
       `);
       this.db.pragma("user_version = 20");
+    }
+
+    const workflowEnhancementsVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (workflowEnhancementsVersion < 21) {
+      const jobColumns = new Set(
+        (this.db.pragma("table_info(ai_jobs)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!jobColumns.has("reply_style_id")) {
+        this.db.exec("ALTER TABLE ai_jobs ADD COLUMN reply_style_id TEXT;");
+      }
+      const scheduleColumns = new Set(
+        (this.db.pragma("table_info(ai_schedules)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!scheduleColumns.has("reply_style_id")) {
+        this.db.exec("ALTER TABLE ai_schedules ADD COLUMN reply_style_id TEXT;");
+      }
+      const draftColumns = new Set(
+        (this.db.pragma("table_info(email_drafts)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!draftColumns.has("reply_style_id")) {
+        this.db.exec("ALTER TABLE email_drafts ADD COLUMN reply_style_id TEXT;");
+      }
+      const analysisColumns = new Set(
+        (this.db.pragma("table_info(ai_message_analysis)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!analysisColumns.has("thread_message_count")) {
+        this.db.exec("ALTER TABLE ai_message_analysis ADD COLUMN thread_message_count INTEGER NOT NULL DEFAULT 1;");
+      }
+      const now = new Date().toISOString();
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS reply_styles (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          tone TEXT NOT NULL,
+          instructions TEXT NOT NULL,
+          is_default INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS reply_styles_name_idx ON reply_styles(lower(name));
+        CREATE UNIQUE INDEX IF NOT EXISTS reply_styles_default_idx ON reply_styles(is_default) WHERE is_default = 1;
+
+        CREATE TABLE IF NOT EXISTS message_follow_ups (
+          id TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          conversation_key TEXT NOT NULL,
+          due_at TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed', 'dismissed')),
+          completed_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS message_follow_ups_due_idx ON message_follow_ups(status, due_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS message_follow_ups_pending_conversation_idx
+          ON message_follow_ups(conversation_key) WHERE status = 'pending';
+
+        CREATE TABLE IF NOT EXISTS smart_mail_rules (
+          id TEXT PRIMARY KEY,
+          archive_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          instruction TEXT NOT NULL,
+          match_mode TEXT NOT NULL CHECK(match_mode IN ('all', 'any')),
+          sender_contains_json TEXT NOT NULL DEFAULT '[]',
+          subject_contains_json TEXT NOT NULL DEFAULT '[]',
+          body_contains_json TEXT NOT NULL DEFAULT '[]',
+          has_attachments INTEGER,
+          target_folder_id TEXT,
+          mark_read INTEGER NOT NULL DEFAULT 0,
+          star INTEGER NOT NULL DEFAULT 0,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          matched_messages INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(archive_id) REFERENCES archives(id) ON DELETE CASCADE,
+          FOREIGN KEY(target_folder_id) REFERENCES folders(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS smart_mail_rules_archive_idx
+          ON smart_mail_rules(archive_id, enabled, created_at);
+      `);
+      if (!this.db.prepare("SELECT 1 FROM reply_styles LIMIT 1").get()) {
+        this.db.prepare(`
+          INSERT INTO reply_styles (id, name, tone, instructions, is_default, created_at, updated_at)
+          VALUES (?, 'Professional', 'Professional and friendly', ?, 1, ?, ?)
+        `).run(
+          randomUUID(),
+          "Write concise, courteous replies. Use plain language, preserve factual accuracy, and end with a clear next step when appropriate.",
+          now,
+          now
+        );
+      }
+      this.db.pragma("user_version = 21");
     }
   }
 
@@ -2087,10 +2194,10 @@ export class EmailDatabase {
       : undefined;
     this.db.prepare(`
       INSERT INTO ai_jobs (
-        id, message_id, task, conversation_key, schedule_id, schedule_run_id, gmail_connection_id, resume_id,
+        id, message_id, task, conversation_key, schedule_id, schedule_run_id, gmail_connection_id, resume_id, reply_style_id,
         status, provider, model, skills_json, prompt, prompt_version, content_hash,
         attempts, max_attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       id,
       input.messageId,
@@ -2100,6 +2207,7 @@ export class EmailDatabase {
       input.scheduleRunId ?? null,
       input.gmailConnectionId ?? null,
       input.resumeId ?? null,
+      input.replyStyleId ?? null,
       input.provider,
       input.model,
       JSON.stringify(input.skills),
@@ -2235,9 +2343,9 @@ export class EmailDatabase {
       INSERT INTO ai_message_analysis (
         id, message_id, summary, categories_json, priority, action_required,
         action_summary, spam_probability, phishing_probability, draft_recommended,
-        confidence, signals_json, model, prompt_version, content_hash,
+        confidence, signals_json, thread_message_count, model, prompt_version, content_hash,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(message_id) DO UPDATE SET
         summary = excluded.summary,
         categories_json = excluded.categories_json,
@@ -2249,6 +2357,7 @@ export class EmailDatabase {
         draft_recommended = excluded.draft_recommended,
         confidence = excluded.confidence,
         signals_json = excluded.signals_json,
+        thread_message_count = excluded.thread_message_count,
         model = excluded.model,
         prompt_version = excluded.prompt_version,
         content_hash = excluded.content_hash,
@@ -2266,6 +2375,7 @@ export class EmailDatabase {
       input.draftRecommended ? 1 : 0,
       input.confidence,
       JSON.stringify(input.signals),
+      input.threadMessageCount ?? 1,
       input.model,
       input.promptVersion,
       input.contentHash,
@@ -2334,13 +2444,15 @@ export class EmailDatabase {
   listAiSchedules(): AiSchedule[] {
     return (this.db.prepare(`
       SELECT s.*, f.path AS folder_path, f.archive_id AS archive_id, a.name AS archive_name,
-        m.subject AS message_subject, gc.email AS gmail_connection_email, r.name AS resume_name
+        m.subject AS message_subject, gc.email AS gmail_connection_email, r.name AS resume_name,
+        rs.name AS reply_style_name
       FROM ai_schedules s
       JOIN folders f ON f.id = s.folder_id
       JOIN archives a ON a.id = f.archive_id
       LEFT JOIN messages m ON m.id = s.message_id
       LEFT JOIN gmail_connections gc ON gc.id = s.gmail_connection_id
       LEFT JOIN resume_assets r ON r.id = s.resume_id
+      LEFT JOIN reply_styles rs ON rs.id = s.reply_style_id
       ORDER BY s.created_at DESC
     `).all() as Row[]).map((row) => this.mapAiSchedule(row));
   }
@@ -2348,13 +2460,15 @@ export class EmailDatabase {
   getAiSchedule(id: string): AiSchedule | null {
     const row = this.db.prepare(`
       SELECT s.*, f.path AS folder_path, f.archive_id AS archive_id, a.name AS archive_name,
-        m.subject AS message_subject, gc.email AS gmail_connection_email, r.name AS resume_name
+        m.subject AS message_subject, gc.email AS gmail_connection_email, r.name AS resume_name,
+        rs.name AS reply_style_name
       FROM ai_schedules s
       JOIN folders f ON f.id = s.folder_id
       JOIN archives a ON a.id = f.archive_id
       LEFT JOIN messages m ON m.id = s.message_id
       LEFT JOIN gmail_connections gc ON gc.id = s.gmail_connection_id
       LEFT JOIN resume_assets r ON r.id = s.resume_id
+      LEFT JOIN reply_styles rs ON rs.id = s.reply_style_id
       WHERE s.id = ?
     `).get(id) as Row | undefined;
     return row ? this.mapAiSchedule(row) : null;
@@ -2366,16 +2480,17 @@ export class EmailDatabase {
       task: input.task ?? "analyze",
       messageId: input.messageId ?? null,
       gmailConnectionId: input.gmailConnectionId ?? null,
-      resumeId: input.resumeId ?? null
+      resumeId: input.resumeId ?? null,
+      replyStyleId: input.replyStyleId ?? null
     });
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO ai_schedules (
-        id, name, task, folder_id, message_id, gmail_connection_id, resume_id,
+        id, name, task, folder_id, message_id, gmail_connection_id, resume_id, reply_style_id,
         mode, interval_minutes, provider, model, skills_json, prompt,
         enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.name,
@@ -2384,6 +2499,7 @@ export class EmailDatabase {
       input.messageId ?? null,
       input.gmailConnectionId ?? null,
       input.resumeId ?? null,
+      input.replyStyleId ?? null,
       input.mode,
       input.intervalMinutes,
       input.provider,
@@ -2407,7 +2523,8 @@ export class EmailDatabase {
       gmailConnectionId: input.gmailConnectionId === undefined
         ? existing.gmailConnectionId
         : input.gmailConnectionId,
-      resumeId: input.resumeId === undefined ? existing.resumeId : input.resumeId
+      resumeId: input.resumeId === undefined ? existing.resumeId : input.resumeId,
+      replyStyleId: input.replyStyleId === undefined ? existing.replyStyleId ?? null : input.replyStyleId
     });
     const columns: string[] = [];
     const values: unknown[] = [];
@@ -2421,6 +2538,7 @@ export class EmailDatabase {
     if (input.messageId !== undefined) set("message_id", input.messageId);
     if (input.gmailConnectionId !== undefined) set("gmail_connection_id", input.gmailConnectionId);
     if (input.resumeId !== undefined) set("resume_id", input.resumeId);
+    if (input.replyStyleId !== undefined) set("reply_style_id", input.replyStyleId);
     if (input.mode !== undefined) set("mode", input.mode);
     if (input.intervalMinutes !== undefined) set("interval_minutes", input.intervalMinutes);
     if (input.provider !== undefined) set("provider", input.provider);
@@ -2800,6 +2918,12 @@ export class EmailDatabase {
             SELECT id FROM messages WHERE conversation_key = ?
           )
       `).run(conversationKey);
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE message_follow_ups
+        SET status = 'completed', completed_at = ?, updated_at = ?
+        WHERE conversation_key = ? AND status = 'pending'
+      `).run(now, now, conversationKey);
     });
     record();
   }
@@ -2831,15 +2955,20 @@ export class EmailDatabase {
   }
 
   createAutomatedDraft(input: AutomatedDraftCreateInput): EmailDraft {
-    this.validateEmailDraftTargets(input.connectionId, input.sourceMessageId, input.resumeId ?? null);
+    this.validateEmailDraftTargets(
+      input.connectionId,
+      input.sourceMessageId,
+      input.resumeId ?? null,
+      input.replyStyleId ?? null
+    );
     const id = randomUUID();
     const now = new Date().toISOString();
     const result = this.db.prepare(`
       INSERT OR IGNORE INTO email_drafts (
         id, connection_id, source_message_id, schedule_id, source, from_address,
-        to_json, cc_json, bcc_json, subject, body_text, resume_id,
+        to_json, cc_json, bcc_json, subject, body_text, resume_id, reply_style_id,
         work_related, development_opportunity, ai_reason, ai_confidence, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'ai', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, 'ai', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.connectionId,
@@ -2852,6 +2981,7 @@ export class EmailDatabase {
       input.subject,
       input.bodyText,
       input.resumeId ?? null,
+      input.replyStyleId ?? null,
       input.workRelated ? 1 : 0,
       input.developmentOpportunity ? 1 : 0,
       input.aiReason,
@@ -2904,19 +3034,22 @@ export class EmailDatabase {
   private emailDraftSelect(): string {
     return `
       SELECT d.*, gc.email AS connection_email, m.subject AS source_message_subject,
-        s.name AS schedule_name, r.name AS resume_name, r.filename AS resume_filename
+        s.name AS schedule_name, r.name AS resume_name, r.filename AS resume_filename,
+        rs.name AS reply_style_name
       FROM email_drafts d
       JOIN gmail_connections gc ON gc.id = d.connection_id
       LEFT JOIN messages m ON m.id = d.source_message_id
       LEFT JOIN ai_schedules s ON s.id = d.schedule_id
       LEFT JOIN resume_assets r ON r.id = d.resume_id
+      LEFT JOIN reply_styles rs ON rs.id = d.reply_style_id
     `;
   }
 
   private validateEmailDraftTargets(
     connectionId: string,
     sourceMessageId: string | null,
-    resumeId: string | null
+    resumeId: string | null,
+    replyStyleId: string | null = null
   ): void {
     const connection = this.db.prepare("SELECT can_send FROM gmail_connections WHERE id = ?")
       .get(connectionId) as Row | undefined;
@@ -2928,6 +3061,9 @@ export class EmailDatabase {
     if (resumeId && !this.db.prepare("SELECT 1 FROM resume_assets WHERE id = ?").get(resumeId)) {
       throw new Error("Resume not found");
     }
+    if (replyStyleId && !this.db.prepare("SELECT 1 FROM reply_styles WHERE id = ?").get(replyStyleId)) {
+      throw new Error("Reply style not found");
+    }
   }
 
   private validateAiScheduleTargets(input: {
@@ -2936,6 +3072,7 @@ export class EmailDatabase {
     messageId: string | null;
     gmailConnectionId: string | null;
     resumeId: string | null;
+    replyStyleId: string | null;
   }): void {
     const folder = this.db.prepare("SELECT id FROM folders WHERE id = ?").get(input.folderId);
     if (!folder) throw new Error("Mailbox not found");
@@ -2953,6 +3090,9 @@ export class EmailDatabase {
     }
     if (input.resumeId && !this.db.prepare("SELECT 1 FROM resume_assets WHERE id = ?").get(input.resumeId)) {
       throw new Error("Resume not found");
+    }
+    if (input.replyStyleId && !this.db.prepare("SELECT 1 FROM reply_styles WHERE id = ?").get(input.replyStyleId)) {
+      throw new Error("Reply style not found");
     }
   }
 
@@ -3270,6 +3410,161 @@ export class EmailDatabase {
     }
     this.db.prepare("DELETE FROM sender_filing_rules WHERE archive_id = ?").run(archiveId);
     return this.getSenderFilingStatus(archiveId);
+  }
+
+  listSmartMailRules(archiveId?: string): SmartMailRule[] {
+    const rows = archiveId
+      ? this.db.prepare(`${this.smartMailRuleSelect()} WHERE r.archive_id = ? ORDER BY r.created_at DESC`)
+          .all(archiveId) as Row[]
+      : this.db.prepare(`${this.smartMailRuleSelect()} ORDER BY a.name COLLATE NOCASE, r.created_at DESC`)
+          .all() as Row[];
+    return rows.map((row) => this.mapSmartMailRule(row));
+  }
+
+  getSmartMailRule(id: string): SmartMailRule | null {
+    const row = this.db.prepare(`${this.smartMailRuleSelect()} WHERE r.id = ?`).get(id) as Row | undefined;
+    return row ? this.mapSmartMailRule(row) : null;
+  }
+
+  createSmartMailRule(input: SmartMailRuleCreate): SmartMailRule {
+    this.validateSmartMailRuleTarget(input.archiveId, input.targetFolderId);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO smart_mail_rules (
+        id, archive_id, name, instruction, match_mode, sender_contains_json,
+        subject_contains_json, body_contains_json, has_attachments, target_folder_id,
+        mark_read, star, enabled, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.archiveId,
+      input.name,
+      input.instruction,
+      input.conditions.match,
+      JSON.stringify(input.conditions.senderContains),
+      JSON.stringify(input.conditions.subjectContains),
+      JSON.stringify(input.conditions.bodyContains),
+      input.conditions.hasAttachments === null ? null : input.conditions.hasAttachments ? 1 : 0,
+      input.targetFolderId,
+      input.markRead ? 1 : 0,
+      input.star ? 1 : 0,
+      input.enabled ? 1 : 0,
+      now,
+      now
+    );
+    if (input.applyExisting && input.enabled) this.applySmartMailRuleToExisting(id);
+    return this.getSmartMailRule(id)!;
+  }
+
+  updateSmartMailRule(id: string, patch: SmartMailRulePatch): SmartMailRule {
+    const existing = this.getSmartMailRule(id);
+    if (!existing) throw new Error("Mail rule not found");
+    const targetFolderId = patch.targetFolderId === undefined ? existing.targetFolderId : patch.targetFolderId;
+    this.validateSmartMailRuleTarget(existing.archiveId, targetFolderId);
+    const nextMarkRead = patch.markRead ?? existing.markRead;
+    const nextStar = patch.star ?? existing.star;
+    if (!targetFolderId && !nextMarkRead && !nextStar) throw new Error("Choose at least one rule action");
+    const columns: string[] = [];
+    const values: unknown[] = [];
+    const set = (column: string, value: unknown) => {
+      columns.push(`${column} = ?`);
+      values.push(value);
+    };
+    if (patch.name !== undefined) set("name", patch.name);
+    if (patch.instruction !== undefined) set("instruction", patch.instruction);
+    if (patch.conditions !== undefined) {
+      set("match_mode", patch.conditions.match);
+      set("sender_contains_json", JSON.stringify(patch.conditions.senderContains));
+      set("subject_contains_json", JSON.stringify(patch.conditions.subjectContains));
+      set("body_contains_json", JSON.stringify(patch.conditions.bodyContains));
+      set("has_attachments", patch.conditions.hasAttachments === null
+        ? null
+        : patch.conditions.hasAttachments ? 1 : 0);
+    }
+    if (patch.targetFolderId !== undefined) set("target_folder_id", patch.targetFolderId);
+    if (patch.markRead !== undefined) set("mark_read", patch.markRead ? 1 : 0);
+    if (patch.star !== undefined) set("star", patch.star ? 1 : 0);
+    if (patch.enabled !== undefined) set("enabled", patch.enabled ? 1 : 0);
+    set("updated_at", new Date().toISOString());
+    values.push(id);
+    this.db.prepare(`UPDATE smart_mail_rules SET ${columns.join(", ")} WHERE id = ?`).run(...values);
+    if (patch.applyExisting && (patch.enabled ?? existing.enabled)) this.applySmartMailRuleToExisting(id);
+    return this.getSmartMailRule(id)!;
+  }
+
+  deleteSmartMailRule(id: string): boolean {
+    return this.db.prepare("DELETE FROM smart_mail_rules WHERE id = ?").run(id).changes > 0;
+  }
+
+  applySmartMailRuleToExisting(id: string): number {
+    const rule = this.getSmartMailRule(id);
+    if (!rule) throw new Error("Mail rule not found");
+    if (!rule.enabled) return 0;
+    const rows = this.db.prepare(`
+      SELECT m.id, m.sender_address, m.subject, m.body_text, m.has_attachments
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.archive_id = ? AND lower(trim(f.name)) = 'inbox'
+    `).all(rule.archiveId) as Row[];
+    const matching = rows.filter((row) => smartMailRuleMatches(rule, {
+      senderAddress: String(row.sender_address ?? ""),
+      subject: String(row.subject ?? ""),
+      bodyText: String(row.body_text ?? ""),
+      hasAttachments: Boolean(row.has_attachments)
+    }));
+    const apply = this.db.transaction(() => {
+      for (const row of matching) {
+        const messageId = String(row.id);
+        if (rule.targetFolderId) {
+          const target = this.getFolder(rule.targetFolderId)!;
+          this.db.prepare("UPDATE messages SET folder_id = ? WHERE id = ?").run(rule.targetFolderId, messageId);
+          this.db.prepare("UPDATE message_fts SET folder = ? WHERE message_id = ?")
+            .run(target.path, messageId);
+        }
+        if (rule.markRead || rule.star) {
+          this.db.prepare(`
+            UPDATE message_state SET
+              is_read = CASE WHEN ? THEN 1 ELSE is_read END,
+              is_starred = CASE WHEN ? THEN 1 ELSE is_starred END,
+              updated_at = ?
+            WHERE message_id = ?
+          `).run(rule.markRead ? 1 : 0, rule.star ? 1 : 0, new Date().toISOString(), messageId);
+        }
+      }
+      if (matching.length > 0) {
+        this.db.prepare(`
+          UPDATE smart_mail_rules
+          SET matched_messages = matched_messages + ?, updated_at = ? WHERE id = ?
+        `).run(matching.length, new Date().toISOString(), id);
+        this.db.prepare(`
+          UPDATE folders SET message_count = (
+            SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+          ) WHERE archive_id = ?
+        `).run(rule.archiveId);
+      }
+    });
+    apply();
+    return matching.length;
+  }
+
+  private smartMailRuleSelect(): string {
+    return `
+      SELECT r.*, a.name AS archive_name, f.path AS target_folder_path
+      FROM smart_mail_rules r
+      JOIN archives a ON a.id = r.archive_id
+      LEFT JOIN folders f ON f.id = r.target_folder_id
+    `;
+  }
+
+  private validateSmartMailRuleTarget(archiveId: string, folderId: string | null): void {
+    if (!this.db.prepare("SELECT 1 FROM archives WHERE id = ?").get(archiveId)) {
+      throw new Error("Archive not found");
+    }
+    if (!folderId) return;
+    if (!this.db.prepare("SELECT 1 FROM folders WHERE id = ? AND archive_id = ?").get(folderId, archiveId)) {
+      throw new Error("Rule destination must be in the selected archive");
+    }
   }
 
   markSenderAsSpam(messageId: string): SenderSpamRuleResult {
@@ -3739,7 +4034,8 @@ export class EmailDatabase {
       throw new Error("Message folder does not belong to the archive");
     }
     const senderAddress = input.sender.address.trim().toLowerCase();
-    const matchingRule = requestedFolder.name.trim().toLowerCase() === "inbox" && senderAddress
+    const isInbox = requestedFolder.name.trim().toLowerCase() === "inbox";
+    const matchingRule = isInbox && senderAddress
       ? this.db.prepare(`
           SELECT r.folder_id FROM sender_filing_rules r
           JOIN folders f ON f.id = r.folder_id
@@ -3747,7 +4043,18 @@ export class EmailDatabase {
           LIMIT 1
         `).get(input.archiveId, senderAddress, input.archiveId) as Row | undefined
       : undefined;
-    const effectiveFolderId = matchingRule ? String(matchingRule.folder_id) : input.folderId;
+    const matchingSmartRules = isInbox
+      ? this.listSmartMailRules(input.archiveId).filter((rule) => rule.enabled && smartMailRuleMatches(rule, {
+          senderAddress: input.sender.address,
+          subject: input.subject,
+          bodyText: input.bodyText,
+          hasAttachments: input.attachments.length > 0
+        }))
+      : [];
+    const smartTargetFolderId = matchingSmartRules.find((rule) => rule.targetFolderId)?.targetFolderId ?? null;
+    const effectiveFolderId = matchingRule
+      ? String(matchingRule.folder_id)
+      : smartTargetFolderId ?? input.folderId;
     const folder = effectiveFolderId === input.folderId
       ? requestedFolder
       : this.getFolder(effectiveFolderId);
@@ -3817,6 +4124,19 @@ export class EmailDatabase {
       }
 
       this.db.prepare("INSERT INTO message_state (message_id) VALUES (?)").run(id);
+      const smartMarkRead = matchingSmartRules.some((rule) => rule.markRead);
+      const smartStar = matchingSmartRules.some((rule) => rule.star);
+      if (smartMarkRead || smartStar) {
+        this.db.prepare(`
+          UPDATE message_state SET is_read = ?, is_starred = ?, updated_at = ? WHERE message_id = ?
+        `).run(smartMarkRead ? 1 : 0, smartStar ? 1 : 0, now, id);
+      }
+      for (const rule of matchingSmartRules) {
+        this.db.prepare(`
+          UPDATE smart_mail_rules
+          SET matched_messages = matched_messages + 1, updated_at = ? WHERE id = ?
+        `).run(now, rule.id);
+      }
       this.db.prepare(`
         INSERT INTO message_fts (message_id, subject, sender, recipients, folder, body)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -3944,6 +4264,207 @@ export class EmailDatabase {
       headers: parseJson<Record<string, string>>(row.headers_json, {}),
       attachments: this.listAttachments(id)
     };
+  }
+
+  getMessageThread(messageId: string, limit = 50): MessageThread {
+    const source = this.db.prepare("SELECT conversation_key FROM messages WHERE id = ?")
+      .get(messageId) as Row | undefined;
+    if (!source) throw new Error("Message not found");
+    const conversationKey = source.conversation_key ? String(source.conversation_key) : null;
+    if (!conversationKey) {
+      const message = this.getMessage(messageId)!;
+      return { messageId, totalMessages: 1, messages: [message] };
+    }
+    const safeLimit = Math.min(100, Math.max(1, Math.trunc(limit)));
+    const totalMessages = Number((this.db.prepare(`
+      SELECT COUNT(*) AS count FROM messages WHERE conversation_key = ?
+    `).get(conversationKey) as Row).count);
+    const rows = this.db.prepare(`
+      SELECT ${MESSAGE_SUMMARY_COLUMNS}
+      ${MESSAGE_SUMMARY_JOINS}
+      WHERE m.conversation_key = ?
+      ORDER BY COALESCE(m.received_at, m.sent_at, m.created_at), m.id
+      LIMIT ?
+    `).all(conversationKey, safeLimit) as Row[];
+    return {
+      messageId,
+      totalMessages,
+      messages: rows.map((row) => this.mapMessageSummary(row))
+    };
+  }
+
+  listConversationMessages(messageId: string, limit = 20): MessageDetail[] {
+    const source = this.db.prepare("SELECT conversation_key FROM messages WHERE id = ?")
+      .get(messageId) as Row | undefined;
+    if (!source) throw new Error("Message not found");
+    const conversationKey = source.conversation_key ? String(source.conversation_key) : null;
+    if (!conversationKey) return [this.getMessage(messageId)!];
+    const safeLimit = Math.min(50, Math.max(1, Math.trunc(limit)));
+    const rows = this.db.prepare(`
+      SELECT id FROM messages
+      WHERE conversation_key = ?
+      ORDER BY COALESCE(received_at, sent_at, created_at) DESC, id DESC
+      LIMIT ?
+    `).all(conversationKey, safeLimit) as Row[];
+    return rows.reverse().map((row) => this.getMessage(String(row.id))!);
+  }
+
+  createMessageFollowUp(messageId: string, input: MessageFollowUpCreate): MessageFollowUp {
+    const message = this.db.prepare("SELECT conversation_key FROM messages WHERE id = ?")
+      .get(messageId) as Row | undefined;
+    if (!message) throw new Error("Message not found");
+    const conversationKey = String(message.conversation_key || messageId);
+    const now = new Date().toISOString();
+    const existing = this.db.prepare(`
+      SELECT id FROM message_follow_ups WHERE conversation_key = ? AND status = 'pending'
+    `).get(conversationKey) as Row | undefined;
+    const id = existing ? String(existing.id) : randomUUID();
+    if (existing) {
+      this.db.prepare(`
+        UPDATE message_follow_ups
+        SET message_id = ?, due_at = ?, note = ?, updated_at = ?
+        WHERE id = ?
+      `).run(messageId, input.dueAt, input.note, now, id);
+    } else {
+      this.db.prepare(`
+        INSERT INTO message_follow_ups (
+          id, message_id, conversation_key, due_at, note, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+      `).run(id, messageId, conversationKey, input.dueAt, input.note, now, now);
+    }
+    return this.getMessageFollowUp(id)!;
+  }
+
+  listMessageFollowUps(status?: MessageFollowUp["status"]): MessageFollowUp[] {
+    const rows = status
+      ? this.db.prepare(`${this.messageFollowUpSelect()} WHERE fu.status = ? ORDER BY fu.due_at, fu.created_at`)
+          .all(status) as Row[]
+      : this.db.prepare(`${this.messageFollowUpSelect()} ORDER BY CASE fu.status WHEN 'pending' THEN 0 ELSE 1 END, fu.due_at, fu.created_at`)
+          .all() as Row[];
+    return rows.map((row) => this.mapMessageFollowUp(row));
+  }
+
+  getMessageFollowUp(id: string): MessageFollowUp | null {
+    const row = this.db.prepare(`${this.messageFollowUpSelect()} WHERE fu.id = ?`).get(id) as Row | undefined;
+    return row ? this.mapMessageFollowUp(row) : null;
+  }
+
+  updateMessageFollowUp(id: string, patch: MessageFollowUpPatch): MessageFollowUp {
+    const existing = this.getMessageFollowUp(id);
+    if (!existing) throw new Error("Follow-up not found");
+    const columns: string[] = [];
+    const values: unknown[] = [];
+    const set = (column: string, value: unknown) => {
+      columns.push(`${column} = ?`);
+      values.push(value);
+    };
+    if (patch.dueAt !== undefined) set("due_at", patch.dueAt);
+    if (patch.note !== undefined) set("note", patch.note);
+    if (patch.status !== undefined) {
+      set("status", patch.status);
+      set("completed_at", patch.status === "completed" ? new Date().toISOString() : null);
+    }
+    set("updated_at", new Date().toISOString());
+    values.push(id);
+    this.db.prepare(`UPDATE message_follow_ups SET ${columns.join(", ")} WHERE id = ?`).run(...values);
+    return this.getMessageFollowUp(id)!;
+  }
+
+  deleteMessageFollowUp(id: string): boolean {
+    return this.db.prepare("DELETE FROM message_follow_ups WHERE id = ?").run(id).changes > 0;
+  }
+
+  listReplyStyles(): ReplyStyle[] {
+    return (this.db.prepare(`
+      SELECT * FROM reply_styles ORDER BY is_default DESC, name COLLATE NOCASE
+    `).all() as Row[]).map((row) => this.mapReplyStyle(row));
+  }
+
+  getReplyStyle(id: string): ReplyStyle | null {
+    const row = this.db.prepare("SELECT * FROM reply_styles WHERE id = ?").get(id) as Row | undefined;
+    return row ? this.mapReplyStyle(row) : null;
+  }
+
+  createReplyStyle(input: ReplyStyleCreate): ReplyStyle {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const create = this.db.transaction(() => {
+      if (input.isDefault) this.db.prepare("UPDATE reply_styles SET is_default = 0, updated_at = ?").run(now);
+      this.db.prepare(`
+        INSERT INTO reply_styles (id, name, tone, instructions, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(id, input.name, input.tone, input.instructions, input.isDefault ? 1 : 0, now, now);
+    });
+    create();
+    return this.getReplyStyle(id)!;
+  }
+
+  updateReplyStyle(id: string, patch: ReplyStylePatch): ReplyStyle {
+    const existing = this.getReplyStyle(id);
+    if (!existing) throw new Error("Reply style not found");
+    const now = new Date().toISOString();
+    const update = this.db.transaction(() => {
+      if (patch.isDefault) this.db.prepare("UPDATE reply_styles SET is_default = 0, updated_at = ?").run(now);
+      const columns: string[] = [];
+      const values: unknown[] = [];
+      if (patch.name !== undefined) { columns.push("name = ?"); values.push(patch.name); }
+      if (patch.tone !== undefined) { columns.push("tone = ?"); values.push(patch.tone); }
+      if (patch.instructions !== undefined) { columns.push("instructions = ?"); values.push(patch.instructions); }
+      if (patch.isDefault !== undefined) { columns.push("is_default = ?"); values.push(patch.isDefault ? 1 : 0); }
+      columns.push("updated_at = ?");
+      values.push(now, id);
+      this.db.prepare(`UPDATE reply_styles SET ${columns.join(", ")} WHERE id = ?`).run(...values);
+    });
+    update();
+    return this.getReplyStyle(id)!;
+  }
+
+  deleteReplyStyle(id: string): boolean {
+    const remove = this.db.transaction(() => {
+      this.db.prepare("UPDATE ai_schedules SET reply_style_id = NULL WHERE reply_style_id = ?").run(id);
+      this.db.prepare("UPDATE ai_jobs SET reply_style_id = NULL WHERE reply_style_id = ?").run(id);
+      this.db.prepare("UPDATE email_drafts SET reply_style_id = NULL WHERE reply_style_id = ?").run(id);
+      return this.db.prepare("DELETE FROM reply_styles WHERE id = ?").run(id).changes > 0;
+    });
+    return remove();
+  }
+
+  getAiReviewQueue(limit = 100): AiReviewQueue {
+    const safeLimit = Math.min(250, Math.max(1, Math.trunc(limit)));
+    const drafts = this.listEmailDrafts().filter((draft) => draft.source === "ai").slice(0, safeLimit);
+    const analysisRows = this.db.prepare(`
+      SELECT a.message_id
+      FROM ai_message_analysis a
+      JOIN messages m ON m.id = a.message_id
+      JOIN folders f ON f.id = m.folder_id
+      WHERE (a.action_required = 1 OR a.draft_recommended = 1 OR a.priority IN ('high', 'urgent'))
+        AND lower(trim(f.name)) != 'spam'
+        AND NOT EXISTS (
+          SELECT 1 FROM conversation_replies cr WHERE cr.conversation_key = m.conversation_key
+        )
+      ORDER BY CASE a.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, a.updated_at DESC
+      LIMIT ?
+    `).all(safeLimit) as Row[];
+    const analyses = analysisRows.flatMap((row) => {
+      const message = this.getMessage(String(row.message_id));
+      const analysis = this.getMessageAnalysis(String(row.message_id));
+      return message && analysis ? [{ message, analysis }] : [];
+    });
+    const followUps = this.listMessageFollowUps("pending").slice(0, safeLimit);
+    return {
+      drafts,
+      analyses,
+      followUps,
+      totalItems: drafts.length + analyses.length + followUps.length
+    };
+  }
+
+  private messageFollowUpSelect(): string {
+    return `
+      SELECT fu.*, m.subject, m.sender_name, m.sender_address
+      FROM message_follow_ups fu
+      JOIN messages m ON m.id = fu.message_id
+    `;
   }
 
   listAttachments(messageId: string): Attachment[] {
@@ -4704,6 +5225,7 @@ export class EmailDatabase {
       scheduleRunId: row.schedule_run_id ? String(row.schedule_run_id) : null,
       gmailConnectionId: row.gmail_connection_id ? String(row.gmail_connection_id) : null,
       resumeId: row.resume_id ? String(row.resume_id) : null,
+      replyStyleId: row.reply_style_id ? String(row.reply_style_id) : null,
       status: row.status as AiJobStatus,
       provider: row.provider as AiProviderId,
       model: String(row.model),
@@ -4735,6 +5257,7 @@ export class EmailDatabase {
       draftRecommended: Boolean(row.draft_recommended),
       confidence: Number(row.confidence),
       signals: parseJson<string[]>(row.signals_json, []),
+      threadMessageCount: Number(row.thread_message_count ?? 1),
       model: String(row.model),
       promptVersion: String(row.prompt_version),
       contentHash: String(row.content_hash),
@@ -4758,6 +5281,8 @@ export class EmailDatabase {
       gmailConnectionEmail: row.gmail_connection_email ? String(row.gmail_connection_email) : null,
       resumeId: row.resume_id ? String(row.resume_id) : null,
       resumeName: row.resume_name ? String(row.resume_name) : null,
+      replyStyleId: row.reply_style_id ? String(row.reply_style_id) : null,
+      replyStyleName: row.reply_style_name ? String(row.reply_style_name) : null,
       mode: row.mode as AiScheduleMode,
       intervalMinutes: Number(row.interval_minutes),
       provider: row.provider as AiProviderId,
@@ -4812,6 +5337,8 @@ export class EmailDatabase {
       resumeId: row.resume_id ? String(row.resume_id) : null,
       resumeName: row.resume_name ? String(row.resume_name) : null,
       resumeFilename: row.resume_filename ? String(row.resume_filename) : null,
+      replyStyleId: row.reply_style_id ? String(row.reply_style_id) : null,
+      replyStyleName: row.reply_style_name ? String(row.reply_style_name) : null,
       workRelated: row.work_related === null || row.work_related === undefined
         ? null
         : Boolean(row.work_related),
@@ -4822,6 +5349,63 @@ export class EmailDatabase {
       aiConfidence: row.ai_confidence === null || row.ai_confidence === undefined
         ? null
         : Number(row.ai_confidence),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    };
+  }
+
+  private mapMessageFollowUp(row: Row): MessageFollowUp {
+    return {
+      id: String(row.id),
+      messageId: String(row.message_id),
+      subject: String(row.subject || "(No subject)"),
+      sender: {
+        name: row.sender_name ? String(row.sender_name) : null,
+        address: String(row.sender_address ?? "")
+      },
+      dueAt: String(row.due_at),
+      note: String(row.note ?? ""),
+      status: row.status as MessageFollowUp["status"],
+      completedAt: row.completed_at ? String(row.completed_at) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    };
+  }
+
+  private mapReplyStyle(row: Row): ReplyStyle {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      tone: String(row.tone),
+      instructions: String(row.instructions),
+      isDefault: Boolean(row.is_default),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
+    };
+  }
+
+  private mapSmartMailRule(row: Row): SmartMailRule {
+    return {
+      id: String(row.id),
+      archiveId: String(row.archive_id),
+      archiveName: String(row.archive_name),
+      name: String(row.name),
+      instruction: String(row.instruction),
+      conditions: {
+        match: row.match_mode === "any" ? "any" : "all",
+        senderContains: parseJson<string[]>(row.sender_contains_json, []),
+        subjectContains: parseJson<string[]>(row.subject_contains_json, []),
+        bodyContains: parseJson<string[]>(row.body_contains_json, []),
+        hasAttachments: row.has_attachments === null || row.has_attachments === undefined
+          ? null
+          : Boolean(row.has_attachments)
+      },
+      targetFolderId: row.target_folder_id ? String(row.target_folder_id) : null,
+      targetFolderPath: row.target_folder_path ? String(row.target_folder_path) : null,
+      markRead: Boolean(row.mark_read),
+      star: Boolean(row.star),
+      enabled: Boolean(row.enabled),
+      matchedMessages: Number(row.matched_messages),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
     };
@@ -4890,6 +5474,7 @@ export class EmailDatabase {
       attachmentCount: Number(row.attachment_count),
       hasAiAnalysis: Boolean(row.has_ai_analysis),
       hasCalendarEvent: Boolean(row.has_calendar_event),
+      hasPendingFollowUp: Boolean(row.has_pending_follow_up),
       state: this.mapState(row)
     };
   }
@@ -5019,6 +5604,10 @@ const MESSAGE_SUMMARY_COLUMNS = `
   m.attachment_count,
   EXISTS(SELECT 1 FROM ai_message_analysis analysis WHERE analysis.message_id = m.id) AS has_ai_analysis,
   EXISTS(SELECT 1 FROM message_calendar_events linked_event WHERE linked_event.message_id = m.id) AS has_calendar_event,
+  EXISTS(
+    SELECT 1 FROM message_follow_ups follow_up
+    WHERE follow_up.conversation_key = m.conversation_key AND follow_up.status = 'pending'
+  ) AS has_pending_follow_up,
   COALESCE(s.is_read, 0) AS is_read,
   COALESCE(s.is_starred, 0) AS is_starred,
   COALESCE(s.tags_json, '[]') AS tags_json,
@@ -5107,6 +5696,30 @@ function safeSenderFolderName(value: string): string {
     .trim()
     .slice(0, 100);
   return cleaned || "Unknown sender";
+}
+
+function smartMailRuleMatches(
+  rule: Pick<SmartMailRule, "conditions">,
+  message: { senderAddress: string; subject: string; bodyText: string; hasAttachments: boolean }
+): boolean {
+  const checks: boolean[] = [];
+  const includesAny = (value: string, needles: string[]) => {
+    const normalized = value.toLowerCase();
+    return needles.some((needle) => normalized.includes(needle.trim().toLowerCase()));
+  };
+  if (rule.conditions.senderContains.length > 0) {
+    checks.push(includesAny(message.senderAddress, rule.conditions.senderContains));
+  }
+  if (rule.conditions.subjectContains.length > 0) {
+    checks.push(includesAny(message.subject, rule.conditions.subjectContains));
+  }
+  if (rule.conditions.bodyContains.length > 0) {
+    checks.push(includesAny(message.bodyText, rule.conditions.bodyContains));
+  }
+  if (rule.conditions.hasAttachments !== null) {
+    checks.push(message.hasAttachments === rule.conditions.hasAttachments);
+  }
+  return checks.length > 0 && (rule.conditions.match === "any" ? checks.some(Boolean) : checks.every(Boolean));
 }
 
 function buildConversationKey(input: {
