@@ -571,8 +571,13 @@ textarea:focus-visible {
   position: relative;
 }
 
+.folder-entry > .folder-row {
+  padding-right: 40px;
+}
+
 .folder-entry:hover .folder-row,
-.folder-entry:focus-within .folder-row {
+.folder-entry:focus-within .folder-row,
+.folder-entry > .folder-row.selected {
   padding-right: 99px;
 }
 
