@@ -11,6 +11,24 @@ describe("message categories", () => {
 
   it("classifies imported mail with deterministic header and sender signals", () => {
     expect(classifyInboxCategory({
+      senderAddress: "billing@utility.example",
+      subject: "Your utility bill is ready",
+      bodyText: "Payment due July 30",
+      headers: { "x-archive-mail-gmail-label-ids": "CATEGORY_UPDATES" }
+    })).toBe("bills");
+    expect(classifyInboxCategory({
+      senderAddress: "notifications@mychart.example",
+      subject: "New lab results in your patient portal",
+      bodyText: "Your doctor posted a result.",
+      headers: { "x-archive-mail-gmail-label-ids": "CATEGORY_UPDATES" }
+    })).toBe("medical");
+    expect(classifyInboxCategory({
+      senderAddress: "tracking@fedex.com",
+      subject: "Your package is out for delivery",
+      bodyText: "Tracking number 123",
+      headers: { "x-archive-mail-gmail-label-ids": "CATEGORY_UPDATES" }
+    })).toBe("mail_tracking");
+    expect(classifyInboxCategory({
       senderAddress: "news@store.example",
       subject: "Weekend sale",
       bodyText: "Save 30% today",
@@ -27,7 +45,7 @@ describe("message categories", () => {
       subject: "Your monthly statement is ready",
       bodyText: "",
       headers: {}
-    })).toBe("updates");
+    })).toBe("bills");
     expect(classifyInboxCategory({
       senderAddress: "manager@example.com",
       subject: "Project plan",

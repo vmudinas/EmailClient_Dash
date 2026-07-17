@@ -144,6 +144,8 @@ To backfill an account beyond its original recent-mail query, open **Admin setti
 
 Gmail's own folder/label structure is mirrored locally underneath the account's local folder: **Inbox**, **Sent**, **Drafts**, **Spam**, and **Trash** each become their own local sub-folder, and custom Gmail labels (including `Parent/Child`-style nested labels) become nested local folders under the same name. A message with no matching label — for example mail archived out of the Inbox without any other label — is filed under **Archived**. To make this possible, sync queries widen to include Spam and Trash, which Gmail's API excludes by default.
 
+Inbox mail is presented under seven category tabs: **Primary**, **Promotions**, **Social**, **Updates**, **Bills**, **Medical**, and **Mail/Tracking**. Gmail's category labels seed the standard four categories, while deterministic sender, subject, header, and body signals identify bills, healthcare messages, and shipment tracking. Existing archives are reclassified automatically during database migration.
+
 Use **Compose** in the top toolbar or the send button beside a connected Gmail account to send a plain-text email. Gmail creates the remote Sent copy, and Archive Mail immediately imports that server-provided copy into the connection's local destination. Existing connections created before send support was added remain read-only until the same account is authorized again.
 
 Compose includes **Save draft**. Open the Drafts button in the top toolbar to review, edit, delete, or send saved and AI-generated drafts. Drafts are stored locally; sending uses the selected Gmail account. If an AI development draft has a resume selected, the resume is attached to the MIME message only when the reviewed draft is sent.

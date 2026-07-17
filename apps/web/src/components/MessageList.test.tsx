@@ -131,7 +131,15 @@ describe("MessageList drag and drop", () => {
         onMobileBack={vi.fn()}
         inboxCategories={{
           active: "primary",
-          counts: { primary: 12, promotions: 8, social: 4, updates: 6 },
+          counts: {
+            primary: 12,
+            promotions: 8,
+            social: 4,
+            updates: 6,
+            bills: 3,
+            medical: 2,
+            mail_tracking: 5
+          },
           onSelect: onSelectCategory
         }}
         {...BULK_SELECTION_PROPS}
@@ -141,6 +149,8 @@ describe("MessageList drag and drop", () => {
     expect(screen.getByRole("button", { name: "Primary, 12 messages" }).getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Social, 4 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("social");
+    fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 5 messages" }));
+    expect(onSelectCategory).toHaveBeenCalledWith("mail_tracking");
     expect(screen.getByText("No primary messages")).toBeTruthy();
   });
 });

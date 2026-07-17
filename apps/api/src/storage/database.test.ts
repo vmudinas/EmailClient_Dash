@@ -139,18 +139,71 @@ describe("EmailDatabase", () => {
     insertDatedMessage(database, archive.id, inbox.id, "promotion", "2026-07-03T12:00:00.000Z", undefined, "promotions");
     insertDatedMessage(database, archive.id, inbox.id, "social", "2026-07-02T12:00:00.000Z", undefined, "social");
     insertDatedMessage(database, archive.id, inbox.id, "update", "2026-07-01T12:00:00.000Z", undefined, "updates");
+    insertDatedMessage(database, archive.id, inbox.id, "bill", "2026-06-30T12:00:00.000Z", undefined, "bills");
+    insertDatedMessage(database, archive.id, inbox.id, "medical", "2026-06-29T12:00:00.000Z", undefined, "medical");
+    insertDatedMessage(database, archive.id, inbox.id, "tracking", "2026-06-28T12:00:00.000Z", undefined, "mail_tracking");
 
     expect(database.countInboxCategories({ folderId: inbox.id })).toEqual({
       primary: 1,
       promotions: 1,
       social: 1,
-      updates: 1
+      updates: 1,
+      bills: 1,
+      medical: 1,
+      mail_tracking: 1
     });
     expect(database.listMessages({ folderId: inbox.id, inboxCategory: "social" }).items.map((message) => message.subject))
       .toEqual(["social"]);
     expect(database.search({ q: "ordering-marker", folderId: inbox.id, inboxCategory: "updates" }).items.map((hit) => hit.message.subject))
       .toEqual(["update"]);
     database.close();
+  });
+
+  it("expands legacy Inbox categories without losing message state", async () => {
+    const dataDir = await temporaryDirectory();
+    let database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Legacy categories",
+      sourceType: "mbox",
+      fingerprint: "legacy-categories",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const inbox = database.createFolder(archive.id, "Inbox");
+    const messageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "legacy-bill",
+      internetMessageId: null,
+      subject: "Your utility bill is ready",
+      sender: { name: "Utility", address: "billing@utility.example" },
+      to: [], cc: [], bcc: [],
+      sentAt: null,
+      receivedAt: "2026-07-17T12:00:00.000Z",
+      bodyText: "The balance is due July 30.",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 25,
+      attachments: []
+    });
+    database.updateMessageState(messageId, { isRead: true, isStarred: true, note: "Keep this" });
+    database.close();
+
+    const legacyDatabase = new BetterSqlite3(join(dataDir, "archive-mail.sqlite"));
+    legacyDatabase.prepare("UPDATE messages SET inbox_category = 'updates' WHERE id = ?").run(messageId);
+    legacyDatabase.pragma("user_version = 27");
+    legacyDatabase.close();
+
+    database = new EmailDatabase(dataDir);
+    expect(database.getMessage(messageId)).toMatchObject({
+      inboxCategory: "bills",
+      state: { isRead: true, isStarred: true, note: "Keep this" }
+    });
+    database.close();
+
+    const migratedDatabase = new BetterSqlite3(join(dataDir, "archive-mail.sqlite"));
+    expect(migratedDatabase.pragma("foreign_key_check")).toEqual([]);
+    migratedDatabase.close();
   });
 
   it("migrates existing undated mail into a dedicated child mailbox", async () => {
@@ -1909,7 +1962,7 @@ function insertDatedMessage(
   sourceKey: string,
   receivedAt: string | null,
   sentAt: string | null = receivedAt,
-  inboxCategory?: "primary" | "promotions" | "social" | "updates"
+  inboxCategory?: "primary" | "promotions" | "social" | "updates" | "bills" | "medical" | "mail_tracking"
 ): string {
   return database.insertMessage({
     archiveId,

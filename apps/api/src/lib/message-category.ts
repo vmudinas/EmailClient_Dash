@@ -22,6 +22,10 @@ const SOCIAL_DOMAINS = [
 const PROMOTION_TERMS = /\b(coupon|deal|discount|exclusive offer|flash sale|free shipping|limited time|newsletter|promo(?:tion)?|save \d+%|sale|special offer|unsubscribe)\b/i;
 const SOCIAL_TERMS = /\b(commented|connection request|friend request|invited you|liked your|mentioned you|new connection|new follower|new post|shared a post|tagged you)\b/i;
 const UPDATE_TERMS = /\b(account alert|appointment|confirmation|delivery|digest|invoice|order|password|payment|receipt|reservation|security|shipment|shipping|statement|status update|tracking|verification|verify)\b/i;
+const BILL_TERMS = /\b(amount due|auto-?pay|balance due|bill(?:ing)?|credit card statement|invoice|mortgage|payment due|rent due|statement (?:is )?ready|tax notice|utility bill)\b/i;
+const MEDICAL_TERMS = /\b(clinic|dental|dentist|doctor|health(?:care)?|hospital|lab results?|medical|mychart|patient portal|pharmacy|prescription|telehealth|vaccin(?:e|ation))\b/i;
+const TRACKING_TERMS = /\b(arriv(?:al|es|ing)|delivered|in transit|out for delivery|package|parcel|shipment|shipped|tracking(?: number| update)?)\b/i;
+const TRACKING_DOMAINS = ["dhl.com", "fedex.com", "ups.com", "usps.com"];
 
 export function gmailInboxCategory(labelIds: readonly string[]): InboxCategory {
   if (labelIds.includes("CATEGORY_PROMOTIONS")) return "promotions";
@@ -36,7 +40,6 @@ export function classifyInboxCategory(input: MessageCategoryInput): InboxCategor
     ?.split(",")
     .map((label) => label.trim())
     .filter(Boolean);
-  if (gmailLabels?.length) return gmailInboxCategory(gmailLabels);
 
   const sender = input.senderAddress.trim().toLowerCase();
   const subject = input.subject.trim();
@@ -44,6 +47,16 @@ export function classifyInboxCategory(input: MessageCategoryInput): InboxCategor
   const senderDomain = sender.split("@").at(-1) ?? "";
   const senderName = sender.split("@")[0] ?? "";
   const precedence = headers.get("precedence")?.toLowerCase() ?? "";
+  const categoryText = `${sender} ${subject} ${bodySample}`;
+
+  if (MEDICAL_TERMS.test(categoryText)) return "medical";
+  if (BILL_TERMS.test(categoryText)) return "bills";
+  if (TRACKING_DOMAINS.some((domain) => senderDomain === domain || senderDomain.endsWith(`.${domain}`))
+    || TRACKING_TERMS.test(`${subject} ${bodySample}`)) {
+    return "mail_tracking";
+  }
+
+  if (gmailLabels?.length) return gmailInboxCategory(gmailLabels);
 
   if (SOCIAL_DOMAINS.some((domain) => senderDomain === domain || senderDomain.endsWith(`.${domain}`))
     || SOCIAL_TERMS.test(subject)) {

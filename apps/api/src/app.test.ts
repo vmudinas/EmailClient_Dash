@@ -2069,7 +2069,15 @@ describe("Email API Inbox category routes", () => {
     });
 
     expect(filtered.json()).toMatchObject({ items: [{ subject: "social", inboxCategory: "social" }] });
-    expect(counts.json()).toEqual({ primary: 1, promotions: 0, social: 1, updates: 0 });
+    expect(counts.json()).toEqual({
+      primary: 1,
+      promotions: 0,
+      social: 1,
+      updates: 0,
+      bills: 0,
+      medical: 0,
+      mail_tracking: 0
+    });
     expect(invalid.statusCode).toBe(400);
   });
 });

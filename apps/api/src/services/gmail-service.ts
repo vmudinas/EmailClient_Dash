@@ -11,7 +11,7 @@ import type {
 } from "@email-client/shared";
 import { normalizeRfc822Message } from "../importers/mbox-importer.js";
 import type { RawAttachment } from "../importers/types.js";
-import { gmailInboxCategory } from "../lib/message-category.js";
+import { classifyInboxCategory, gmailInboxCategory } from "../lib/message-category.js";
 import {
   type EmailStore,
   type GmailConnectionRecord,
@@ -880,7 +880,7 @@ export class GmailService {
             controller.signal
           );
           const labelIds = rawMessage.labelIds ?? [];
-          this.database.updateMessageInboxCategoryBySourceKey(
+          this.database.updateMessageGmailInboxCategoryBySourceKey(
             connection.archiveId,
             sourceKey,
             gmailInboxCategory(labelIds)
@@ -1140,11 +1140,16 @@ export class GmailService {
       folderPath
     );
     const labelIds = rawMessage.labelIds ?? [];
-    normalized.inboxCategory = gmailInboxCategory(labelIds);
     normalized.headers["x-archive-mail-gmail-label-ids"] = labelIds.join(",");
     if (rawMessage.threadId) {
       normalized.headers["x-archive-mail-gmail-thread-id"] = rawMessage.threadId;
     }
+    normalized.inboxCategory = classifyInboxCategory({
+      senderAddress: normalized.sender.address,
+      subject: normalized.subject,
+      bodyText: normalized.bodyText,
+      headers: normalized.headers
+    });
     const inserted = await this.imports.persistNormalizedMessage({
       archiveId: connection.archiveId,
       message: normalized,

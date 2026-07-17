@@ -102,7 +102,10 @@ const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   primary: 0,
   promotions: 0,
   social: 0,
-  updates: 0
+  updates: 0,
+  bills: 0,
+  medical: 0,
+  mail_tracking: 0
 };
 
 const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string }> = {

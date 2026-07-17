@@ -83,7 +83,15 @@ export interface LocalMessageState {
   updatedAt: string | null;
 }
 
-export const INBOX_CATEGORIES = ["primary", "promotions", "social", "updates"] as const;
+export const INBOX_CATEGORIES = [
+  "primary",
+  "promotions",
+  "social",
+  "updates",
+  "bills",
+  "medical",
+  "mail_tracking"
+] as const;
 export type InboxCategory = typeof INBOX_CATEGORIES[number];
 
 export interface InboxCategoryCounts {
@@ -91,6 +99,9 @@ export interface InboxCategoryCounts {
   promotions: number;
   social: number;
   updates: number;
+  bills: number;
+  medical: number;
+  mail_tracking: number;
 }
 
 export interface MessageSummary {

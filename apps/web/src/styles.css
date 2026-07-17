@@ -1137,9 +1137,11 @@ textarea:focus-visible {
 
 .inbox-category-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(108px, 1fr));
   flex: 0 0 auto;
   min-height: 58px;
+  overflow-x: auto;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
@@ -1153,7 +1155,7 @@ textarea:focus-visible {
   align-content: center;
   gap: 1px 5px;
   min-width: 0;
-  padding: 8px 18px 9px;
+  padding: 8px 12px 9px;
   border: 0;
   color: var(--muted);
   background: transparent;
@@ -1206,6 +1208,9 @@ textarea:focus-visible {
 .inbox-category-tab.promotions.active { color: #188038; }
 .inbox-category-tab.social.active { color: #9334e6; }
 .inbox-category-tab.updates.active { color: #b06000; }
+.inbox-category-tab.bills.active { color: #137333; }
+.inbox-category-tab.medical.active { color: #c5221f; }
+.inbox-category-tab.mail_tracking.active { color: #1967d2; }
 
 .message-list {
   flex: 1;

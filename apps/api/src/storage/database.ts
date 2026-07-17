@@ -1388,31 +1388,7 @@ export class EmailDatabase {
             CHECK(inbox_category IN ('primary', 'promotions', 'social', 'updates'));
         `);
       }
-      const categoryBatch = this.db.prepare(`
-        SELECT id, sender_address, subject, substr(body_text, 1, 2000) AS body_text, headers_json
-        FROM messages
-        WHERE id > ?
-        ORDER BY id
-        LIMIT 500
-      `);
-      const updateCategory = this.db.prepare("UPDATE messages SET inbox_category = ? WHERE id = ?");
-      const updateCategoryBatch = this.db.transaction((rows: Row[]) => {
-        for (const row of rows) {
-          updateCategory.run(classifyInboxCategory({
-            senderAddress: String(row.sender_address ?? ""),
-            subject: String(row.subject ?? ""),
-            bodyText: String(row.body_text ?? ""),
-            headers: parseJson<Record<string, string>>(row.headers_json, {})
-          }), String(row.id));
-        }
-      });
-      let lastMessageId = "";
-      while (true) {
-        const rows = categoryBatch.all(lastMessageId) as Row[];
-        if (rows.length === 0) break;
-        updateCategoryBatch(rows);
-        lastMessageId = String(rows.at(-1)?.id ?? lastMessageId);
-      }
+      this.reclassifyInboxCategories();
       this.db.pragma("user_version = 25");
     }
 
@@ -1435,6 +1411,105 @@ export class EmailDatabase {
         this.db.exec("ALTER TABLE gmail_connections ADD COLUMN can_modify_mailbox INTEGER NOT NULL DEFAULT 0;");
       }
       this.db.pragma("user_version = 27");
+    }
+
+    const expandedInboxCategoriesVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (expandedInboxCategoriesVersion < 28) {
+      this.db.pragma("foreign_keys = OFF");
+      try {
+        this.db.exec(`
+          BEGIN IMMEDIATE;
+
+          CREATE TABLE messages_v28 (
+            id TEXT PRIMARY KEY,
+            archive_id TEXT NOT NULL,
+            folder_id TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            internet_message_id TEXT,
+            conversation_key TEXT,
+            subject TEXT NOT NULL DEFAULT '',
+            sender_name TEXT,
+            sender_address TEXT NOT NULL DEFAULT '',
+            to_json TEXT NOT NULL DEFAULT '[]',
+            cc_json TEXT NOT NULL DEFAULT '[]',
+            bcc_json TEXT NOT NULL DEFAULT '[]',
+            recipients_text TEXT NOT NULL DEFAULT '',
+            sent_at TEXT,
+            received_at TEXT,
+            body_text TEXT NOT NULL DEFAULT '',
+            body_html TEXT,
+            headers_json TEXT NOT NULL DEFAULT '{}',
+            has_attachments INTEGER NOT NULL DEFAULT 0,
+            attachment_count INTEGER NOT NULL DEFAULT 0,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            inbox_category TEXT NOT NULL DEFAULT 'primary'
+              CHECK(inbox_category IN (
+                'primary', 'promotions', 'social', 'updates',
+                'bills', 'medical', 'mail_tracking'
+              )),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(archive_id) REFERENCES archives(id) ON DELETE CASCADE,
+            FOREIGN KEY(folder_id) REFERENCES folders(id) ON DELETE CASCADE,
+            UNIQUE(archive_id, source_key)
+          );
+
+          INSERT INTO messages_v28 (
+            id, archive_id, folder_id, source_key, internet_message_id, conversation_key,
+            subject, sender_name, sender_address, to_json, cc_json, bcc_json,
+            recipients_text, sent_at, received_at, body_text, body_html, headers_json,
+            has_attachments, attachment_count, size_bytes, inbox_category, created_at
+          )
+          SELECT
+            id, archive_id, folder_id, source_key, internet_message_id, conversation_key,
+            subject, sender_name, sender_address, to_json, cc_json, bcc_json,
+            recipients_text, sent_at, received_at, body_text, body_html, headers_json,
+            has_attachments, attachment_count, size_bytes, inbox_category, created_at
+          FROM messages;
+
+          DROP TABLE messages;
+          ALTER TABLE messages_v28 RENAME TO messages;
+          CREATE INDEX messages_folder_date_idx ON messages(folder_id, received_at DESC, sent_at DESC);
+          CREATE INDEX messages_archive_date_idx ON messages(archive_id, received_at DESC, sent_at DESC);
+          CREATE INDEX messages_sender_idx ON messages(sender_address);
+          CREATE INDEX messages_conversation_idx ON messages(archive_id, conversation_key);
+        `);
+        this.reclassifyInboxCategories();
+        this.db.pragma("user_version = 28");
+        this.db.exec("COMMIT");
+      } catch (error) {
+        if (this.db.inTransaction) this.db.exec("ROLLBACK");
+        throw error;
+      } finally {
+        this.db.pragma("foreign_keys = ON");
+      }
+    }
+  }
+
+  private reclassifyInboxCategories(): void {
+    const categoryBatch = this.db.prepare(`
+      SELECT id, sender_address, subject, substr(body_text, 1, 2000) AS body_text, headers_json
+      FROM messages
+      WHERE id > ?
+      ORDER BY id
+      LIMIT 500
+    `);
+    const updateCategory = this.db.prepare("UPDATE messages SET inbox_category = ? WHERE id = ?");
+    const updateCategoryBatch = this.db.transaction((rows: Row[]) => {
+      for (const row of rows) {
+        updateCategory.run(classifyInboxCategory({
+          senderAddress: String(row.sender_address ?? ""),
+          subject: String(row.subject ?? ""),
+          bodyText: String(row.body_text ?? ""),
+          headers: parseJson<Record<string, string>>(row.headers_json, {})
+        }), String(row.id));
+      }
+    });
+    let lastMessageId = "";
+    while (true) {
+      const rows = categoryBatch.all(lastMessageId) as Row[];
+      if (rows.length === 0) break;
+      updateCategoryBatch(rows);
+      lastMessageId = String(rows.at(-1)?.id ?? lastMessageId);
     }
   }
 
@@ -4677,7 +4752,15 @@ export class EmailDatabase {
       ${where}
       GROUP BY inbox_category
     `).all(...params) as Row[];
-    const counts: InboxCategoryCounts = { primary: 0, promotions: 0, social: 0, updates: 0 };
+    const counts: InboxCategoryCounts = {
+      primary: 0,
+      promotions: 0,
+      social: 0,
+      updates: 0,
+      bills: 0,
+      medical: 0,
+      mail_tracking: 0
+    };
     for (const row of rows) {
       const category = String(row.inbox_category) as InboxCategory;
       if (category in counts) counts[category] = Number(row.count);
@@ -4688,6 +4771,18 @@ export class EmailDatabase {
   updateMessageInboxCategoryBySourceKey(archiveId: string, sourceKey: string, category: InboxCategory): boolean {
     return this.db.prepare(`
       UPDATE messages SET inbox_category = ? WHERE archive_id = ? AND source_key = ?
+    `).run(category, archiveId, sourceKey).changes > 0;
+  }
+
+  updateMessageGmailInboxCategoryBySourceKey(
+    archiveId: string,
+    sourceKey: string,
+    category: InboxCategory
+  ): boolean {
+    return this.db.prepare(`
+      UPDATE messages SET inbox_category = ?
+      WHERE archive_id = ? AND source_key = ?
+        AND inbox_category IN ('primary', 'promotions', 'social', 'updates')
     `).run(category, archiveId, sourceKey).changes > 0;
   }
 

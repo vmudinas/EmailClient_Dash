@@ -8,10 +8,13 @@ import {
   CalendarClock,
   ChevronDown,
   CircleUserRound,
+  HeartPulse,
   Inbox,
   Info,
   LoaderCircle,
   Paperclip,
+  PackageSearch,
+  ReceiptText,
   Reply,
   SearchX,
   ShieldAlert,
@@ -69,7 +72,10 @@ const CATEGORY_TABS: Array<{
   { id: "primary", label: "Primary", icon: Inbox },
   { id: "promotions", label: "Promotions", icon: Tag },
   { id: "social", label: "Social", icon: CircleUserRound },
-  { id: "updates", label: "Updates", icon: Info }
+  { id: "updates", label: "Updates", icon: Info },
+  { id: "bills", label: "Bills", icon: ReceiptText },
+  { id: "medical", label: "Medical", icon: HeartPulse },
+  { id: "mail_tracking", label: "Mail/Tracking", icon: PackageSearch }
 ];
 
 export function MessageList({
