@@ -1286,6 +1286,8 @@ describe("EmailDatabase", () => {
     database.recordConversationReply(secondMessageId, "gmail-sent-id");
     expect(database.listEmailDrafts()).toEqual([]);
     expect(database.getDraftReplyBlocker(firstMessageId)).toMatchObject({ reason: "already_replied" });
+    expect(database.getMessage(firstMessageId)?.hasReply).toBe(true);
+    expect(database.getMessage(secondMessageId)?.hasReply).toBe(true);
     expect(database.getMessageReplyContext(secondMessageId)).toMatchObject({
       internetMessageId: "<conversation-second@example.test>",
       references: expect.arrayContaining([
@@ -1325,7 +1327,7 @@ describe("EmailDatabase", () => {
       sizeBytes: 25,
       attachments: []
     });
-    database.insertMessage({
+    const sentId = database.insertMessage({
       archiveId: archive.id,
       folderId: sent.id,
       sourceKey: "sent-conversation-reply",
@@ -1346,6 +1348,8 @@ describe("EmailDatabase", () => {
     database.completeArchive(archive.id, 0);
 
     expect(database.getDraftReplyBlocker(incomingId)).toMatchObject({ reason: "already_replied" });
+    expect(database.getMessage(incomingId)?.hasReply).toBe(true);
+    expect(database.getMessage(sentId)?.hasReply).toBe(false);
     database.close();
   });
 

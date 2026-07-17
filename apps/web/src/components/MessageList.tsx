@@ -12,6 +12,7 @@ import {
   Info,
   LoaderCircle,
   Paperclip,
+  Reply,
   SearchX,
   ShieldAlert,
   Star,
@@ -232,6 +233,9 @@ export function MessageList({
                 ) : message.hasAiAnalysis ? (
                   <span className="message-status-chip analyzed"><BrainCircuit size={11} />Analyzed</span>
                 ) : null}
+                {message.hasReply && (
+                  <span className="message-status-chip replied"><Reply size={11} />Replied</span>
+                )}
                 {hit?.matchedIn === "attachment" && (
                   <span className="attachment-hit">
                     <Paperclip size={12} />

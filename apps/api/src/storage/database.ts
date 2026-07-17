@@ -5968,6 +5968,7 @@ export class EmailDatabase {
       hasAiAnalysis: Boolean(row.has_ai_analysis),
       hasCalendarEvent: Boolean(row.has_calendar_event),
       hasPendingFollowUp: Boolean(row.has_pending_follow_up),
+      hasReply: Boolean(row.has_reply),
       state: this.mapState(row)
     };
   }
@@ -6102,6 +6103,21 @@ const MESSAGE_SUMMARY_COLUMNS = `
     SELECT 1 FROM message_follow_ups follow_up
     WHERE follow_up.conversation_key = m.conversation_key AND follow_up.status = 'pending'
   ) AS has_pending_follow_up,
+  (
+    lower(trim(f.name)) != 'sent'
+    AND (
+      EXISTS(
+        SELECT 1 FROM conversation_replies recorded_reply
+        WHERE recorded_reply.conversation_key = m.conversation_key
+      )
+      OR EXISTS(
+        SELECT 1 FROM messages sent_reply
+        JOIN folders sent_folder ON sent_folder.id = sent_reply.folder_id
+        WHERE sent_reply.conversation_key = m.conversation_key
+          AND lower(trim(sent_folder.name)) = 'sent'
+      )
+    )
+  ) AS has_reply,
   COALESCE(s.is_read, 0) AS is_read,
   COALESCE(s.is_starred, 0) AS is_starred,
   COALESCE(s.tags_json, '[]') AS tags_json,

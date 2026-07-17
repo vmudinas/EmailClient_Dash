@@ -1516,6 +1516,12 @@ textarea:focus-visible {
   background: #fff1df;
 }
 
+.message-status-chip.replied {
+  border-color: #9fbfd4;
+  color: #315f7b;
+  background: #eaf4fa;
+}
+
 .folder-chip,
 .attachment-hit,
 .attachment-count {

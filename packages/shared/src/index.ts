@@ -110,6 +110,7 @@ export interface MessageSummary {
   hasAiAnalysis?: boolean;
   hasCalendarEvent?: boolean;
   hasPendingFollowUp?: boolean;
+  hasReply?: boolean;
   state: LocalMessageState;
 }
 

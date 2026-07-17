@@ -74,7 +74,8 @@ describe("MessageList drag and drop", () => {
       ...readMessage,
       id: "message-analyzed",
       subject: "Analyzed message",
-      hasAiAnalysis: true
+      hasAiAnalysis: true,
+      hasReply: true
     };
     const calendarMessage: MessageSummary = {
       ...analyzedMessage,
@@ -108,6 +109,7 @@ describe("MessageList drag and drop", () => {
     expect(calendarRow?.classList.contains("calendar-linked")).toBe(true);
     expect(calendarRow?.classList.contains("analyzed")).toBe(false);
     expect(screen.getByText("Analyzed")).toBeTruthy();
+    expect(screen.getAllByText("Replied")).toHaveLength(2);
     expect(screen.getByText("Event")).toBeTruthy();
   });
 
