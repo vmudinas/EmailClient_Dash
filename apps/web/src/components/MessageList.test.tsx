@@ -23,7 +23,11 @@ const BULK_SELECTION_PROPS = {
   selectedIds: new Set<string>(),
   onToggleSelect: vi.fn(),
   onToggleSelectAll: vi.fn(),
+  onSelectFirst: vi.fn(),
+  onSelectLoaded: vi.fn(),
+  onSelectEntireView: vi.fn(),
   onClearSelection: vi.fn(),
+  selectionBusy: false,
   bulkBusy: false,
   onBulkDelete: vi.fn(),
   onBulkArchive: vi.fn(),
@@ -215,7 +219,9 @@ describe("MessageList bulk selection", () => {
       />
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select Drag this message" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Select Drag this message" });
+    expect(checkbox.closest("label")?.classList.contains("message-row-select-hit")).toBe(true);
+    fireEvent.click(checkbox);
     expect(onToggleSelect).toHaveBeenCalledWith(MESSAGE.id);
     expect(onSelect).not.toHaveBeenCalled();
   });
@@ -241,8 +247,52 @@ describe("MessageList bulk selection", () => {
       />
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select all shown messages" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Select all loaded messages" });
+    expect(checkbox.closest("label")?.classList.contains("message-select-hit")).toBe(true);
+    fireEvent.click(checkbox);
     expect(onToggleSelectAll).toHaveBeenCalledOnce();
+  });
+
+  it("offers first 20, first 50, loaded, and entire-view selection presets", () => {
+    const onSelectFirst = vi.fn();
+    const onSelectLoaded = vi.fn();
+    const onSelectEntireView = vi.fn();
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }, { message: OTHER_MESSAGE }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={true}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+        onSelectFirst={onSelectFirst}
+        onSelectLoaded={onSelectLoaded}
+        onSelectEntireView={onSelectEntireView}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select first 20/ }));
+    expect(onSelectFirst).toHaveBeenCalledWith(20);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select first 50/ }));
+    expect(onSelectFirst).toHaveBeenCalledWith(50);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select all loaded/ }));
+    expect(onSelectLoaded).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select entire view/ }));
+    expect(onSelectEntireView).toHaveBeenCalledOnce();
   });
 
   it("shows the bulk action toolbar with a selection count once messages are selected", () => {

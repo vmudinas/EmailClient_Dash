@@ -59,7 +59,11 @@ interface MessageListProps {
   selectedIds: Set<string>;
   onToggleSelect(messageId: string): void;
   onToggleSelectAll(): void;
+  onSelectFirst(count: number): void;
+  onSelectLoaded(): void;
+  onSelectEntireView(): void;
   onClearSelection(): void;
+  selectionBusy: boolean;
   bulkBusy: boolean;
   onBulkDelete(): void;
   onBulkArchive(): void;
@@ -101,7 +105,11 @@ export function MessageList({
   selectedIds,
   onToggleSelect,
   onToggleSelectAll,
+  onSelectFirst,
+  onSelectLoaded,
+  onSelectEntireView,
   onClearSelection,
+  selectionBusy,
   bulkBusy,
   onBulkDelete,
   onBulkArchive,
@@ -112,8 +120,29 @@ export function MessageList({
   onToggleRead
 }: MessageListProps) {
   const [draggingMessageId, setDraggingMessageId] = useState<string | null>(null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
   const selectedCount = selectedIds.size;
   const allVisibleSelected = items.length > 0 && items.every((item) => selectedIds.has(item.message.id));
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selectedCount > 0 && !allVisibleSelected;
+    }
+  }, [allVisibleSelected, selectedCount]);
+
+  const selectionMenu = (
+    <SelectionMenu
+      loadedCount={items.length}
+      hasMore={hasMore}
+      selectedCount={selectedCount}
+      busy={selectionBusy}
+      onSelectFirst={onSelectFirst}
+      onSelectLoaded={onSelectLoaded}
+      onSelectEntireView={onSelectEntireView}
+      onClearSelection={onClearSelection}
+    />
+  );
+
   return (
     <section className="message-list-pane" aria-label="Messages">
       <header className="pane-header message-list-header">
@@ -122,6 +151,7 @@ export function MessageList({
             <button className="icon-button" onClick={onClearSelection} title="Clear selection" aria-label="Clear selection" disabled={bulkBusy}>
               <X size={17} />
             </button>
+            {selectionMenu}
             <span>{selectedCount.toLocaleString()} selected</span>
             <div className="message-bulk-actions">
               <button className="icon-button" onClick={onBulkArchive} disabled={bulkBusy} title="Move to Archive" aria-label="Move selected to Archive">
@@ -141,14 +171,22 @@ export function MessageList({
               <ArrowLeft size={18} />
             </button>
             {!readOnly && items.length > 0 && (
-              <input
-                type="checkbox"
-                className="message-select-all"
-                checked={allVisibleSelected}
-                onChange={onToggleSelectAll}
-                title={allVisibleSelected ? "Deselect all" : "Select all shown"}
-                aria-label={allVisibleSelected ? "Deselect all shown messages" : "Select all shown messages"}
-              />
+              <div className="message-selection-controls">
+                <label
+                  className="message-select-hit"
+                  title={allVisibleSelected ? "Deselect all loaded messages" : "Select all loaded messages"}
+                >
+                  <input
+                    ref={selectAllRef}
+                    type="checkbox"
+                    className="message-select-all"
+                    checked={allVisibleSelected}
+                    onChange={onToggleSelectAll}
+                    aria-label={allVisibleSelected ? "Deselect all loaded messages" : "Select all loaded messages"}
+                  />
+                </label>
+                {selectionMenu}
+              </div>
             )}
             <div>
               <h2>{title}</h2>
@@ -233,6 +271,93 @@ export function MessageList({
         )}
       </div>
     </section>
+  );
+}
+
+function SelectionMenu({
+  loadedCount,
+  hasMore,
+  selectedCount,
+  busy,
+  onSelectFirst,
+  onSelectLoaded,
+  onSelectEntireView,
+  onClearSelection
+}: {
+  loadedCount: number;
+  hasMore: boolean;
+  selectedCount: number;
+  busy: boolean;
+  onSelectFirst(count: number): void;
+  onSelectLoaded(): void;
+  onSelectEntireView(): void;
+  onClearSelection(): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!anchorRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  const run = (action: () => void) => {
+    setOpen(false);
+    action();
+  };
+
+  return (
+    <div className="message-selection-anchor" ref={anchorRef}>
+      <button
+        className="message-selection-trigger"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        disabled={busy || loadedCount === 0}
+        aria-label="Choose messages to select"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Selection options"
+      >
+        {busy ? <LoaderCircle className="spin" size={16} /> : <ChevronDown size={17} />}
+      </button>
+      {open && (
+        <div className="message-selection-popover" role="menu" aria-label="Message selection options">
+          <button type="button" role="menuitem" onClick={() => run(() => onSelectFirst(20))}>
+            <strong>Select first 20</strong>
+            <small>{Math.min(20, loadedCount).toLocaleString()} available</small>
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(() => onSelectFirst(50))}>
+            <strong>Select first 50</strong>
+            <small>{Math.min(50, loadedCount).toLocaleString()} available</small>
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(onSelectLoaded)}>
+            <strong>Select all loaded</strong>
+            <small>{loadedCount.toLocaleString()} messages</small>
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(onSelectEntireView)}>
+            <strong>Select entire view</strong>
+            <small>{hasMore ? "Up to 500 matches" : `${loadedCount.toLocaleString()} messages`}</small>
+          </button>
+          {selectedCount > 0 && (
+            <button type="button" role="menuitem" className="clear" onClick={() => run(onClearSelection)}>
+              <strong>Clear selection</strong>
+              <small>{selectedCount.toLocaleString()} selected</small>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -375,14 +500,15 @@ function MessageRow({
         onDragEnd={onDragEnd}
       >
         {!readOnly && (
-          <input
-            type="checkbox"
-            className="message-row-checkbox"
-            checked={checked}
-            onClick={(event) => event.stopPropagation()}
-            onChange={() => onToggleSelect(message.id)}
-            aria-label={`Select ${message.subject || "message"}`}
-          />
+          <label className="message-row-select-hit" onClick={(event) => event.stopPropagation()}>
+            <input
+              type="checkbox"
+              className="message-row-checkbox"
+              checked={checked}
+              onChange={() => onToggleSelect(message.id)}
+              aria-label={`Select ${message.subject || "message"}`}
+            />
+          </label>
         )}
         <span className="avatar" aria-hidden="true">{initials(message.sender)}</span>
         <span className="message-row-content">

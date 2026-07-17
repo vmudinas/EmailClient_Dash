@@ -115,6 +115,8 @@ const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string
   spam: { verb: "mark as spam", noun: "Spam" }
 };
 
+const MAX_BULK_SELECTION = 500;
+
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [api, setApi] = useState<ApiClient | null>(null);
@@ -140,6 +142,7 @@ export function App() {
   const [inboxCategoryCounts, setInboxCategoryCounts] = useState<InboxCategoryCounts>(EMPTY_INBOX_CATEGORY_COUNTS);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
+  const [selectionBusy, setSelectionBusy] = useState(false);
   const [bulkActionBusy, setBulkActionBusy] = useState(false);
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -1289,6 +1292,70 @@ export function App() {
     });
   };
 
+  const selectFirstLoadedMessages = (count: number) => {
+    setBulkSelectedIds(new Set(items.slice(0, count).map((item) => item.message.id)));
+  };
+
+  const selectAllLoadedMessages = () => {
+    setBulkSelectedIds(new Set(items.map((item) => item.message.id)));
+  };
+
+  const selectEntireMessageView = async () => {
+    if (!api || !selectedArchiveId || readOnly) return;
+    if (!nextCursor) {
+      selectAllLoadedMessages();
+      showError(`Selected all ${items.length.toLocaleString()} messages in this view`);
+      return;
+    }
+
+    setSelectionBusy(true);
+    try {
+      const selected = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const limit = Math.min(100, MAX_BULK_SELECTION - selected.size);
+        if (searchTerm) {
+          const page = await api.search(searchTerm, {
+            archiveId: selectedArchiveId,
+            folderId: selectedFolderId ?? undefined,
+            starred: selectedSmartMailbox === "starred" ? true : undefined,
+            inboxCategory: showInboxCategories ? inboxCategory : undefined,
+            from: filters.from || undefined,
+            to: filters.to || undefined,
+            after: filters.after || undefined,
+            before: filters.before || undefined,
+            hasAttachment: filters.hasAttachment,
+            sort,
+            cursor,
+            limit
+          });
+          page.items.forEach((hit) => selected.add(hit.message.id));
+          cursor = page.nextCursor ?? undefined;
+        } else {
+          const page = await api.listMessages({
+            archiveId: selectedArchiveId,
+            folderId: selectedFolderId ?? undefined,
+            starred: selectedSmartMailbox === "starred" ? true : undefined,
+            inboxCategory: showInboxCategories ? inboxCategory : undefined,
+            cursor,
+            limit
+          });
+          page.items.forEach((entry) => selected.add(entry.id));
+          cursor = page.nextCursor ?? undefined;
+        }
+      } while (cursor && selected.size < MAX_BULK_SELECTION);
+
+      setBulkSelectedIds(selected);
+      showError(cursor
+        ? `Selected the first ${selected.size.toLocaleString()} messages. Bulk actions are limited to ${MAX_BULK_SELECTION.toLocaleString()} at a time.`
+        : `Selected all ${selected.size.toLocaleString()} messages in this view`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Messages could not be selected");
+    } finally {
+      setSelectionBusy(false);
+    }
+  };
+
   const clearBulkSelection = () => setBulkSelectedIds(new Set());
 
   const bulkMove = async (destination: BulkMoveDestination) => {
@@ -1721,7 +1788,11 @@ export function App() {
               selectedIds={bulkSelectedIds}
               onToggleSelect={toggleBulkSelect}
               onToggleSelectAll={toggleBulkSelectAll}
+              onSelectFirst={selectFirstLoadedMessages}
+              onSelectLoaded={selectAllLoadedMessages}
+              onSelectEntireView={() => void selectEntireMessageView()}
               onClearSelection={clearBulkSelection}
+              selectionBusy={selectionBusy}
               bulkBusy={bulkActionBusy}
               onBulkDelete={() => void bulkMove("trash")}
               onBulkArchive={() => void bulkMove("archived")}
