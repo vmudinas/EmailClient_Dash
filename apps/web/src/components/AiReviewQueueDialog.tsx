@@ -1,4 +1,4 @@
-import { BellRing, BrainCircuit, Check, CheckCheck, FileEdit, LoaderCircle, RefreshCw, Trash2, X } from "lucide-react";
+import { BellRing, BrainCircuit, CalendarPlus, Check, CheckCheck, FileEdit, ListTodo, LoaderCircle, RefreshCw, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import type { AiReviewAnalysisItem, AiReviewQueue, EmailDraft, MessageFollowUp, MessageSummary } from "@email-client/shared";
 import { displayAddress, formatDateTime } from "../lib/format.js";
@@ -8,12 +8,14 @@ interface AiReviewQueueDialogProps {
   queue: AiReviewQueue | null;
   loading: boolean;
   busyItemId: string | null;
+  planningAction: { messageId: string; action: "calendar_event" | "todo" } | null;
   readOnly: boolean;
   onClose(): void;
   onRefresh(): void;
   onOpenDraft(draft: EmailDraft): void;
   onDeleteDraft(draft: EmailDraft): void;
   onOpenMessage(message: Pick<MessageSummary, "id">): void;
+  onCreateAction(item: AiReviewAnalysisItem, action: "calendar_event" | "todo"): void;
   onMarkAnalysisReviewed(item: AiReviewAnalysisItem): void;
   onCompleteFollowUp(followUp: MessageFollowUp): void;
 }
@@ -23,12 +25,14 @@ export function AiReviewQueueDialog({
   queue,
   loading,
   busyItemId,
+  planningAction,
   readOnly,
   onClose,
   onRefresh,
   onOpenDraft,
   onDeleteDraft,
   onOpenMessage,
+  onCreateAction,
   onMarkAnalysisReviewed,
   onCompleteFollowUp
 }: AiReviewQueueDialogProps) {
@@ -74,9 +78,17 @@ export function AiReviewQueueDialog({
                             </div>
                           </button>
                           {!readOnly && (
-                            <button className="review-mark-button" disabled={busyItemId === item.message.id} onClick={() => onMarkAnalysisReviewed(item)} title="Mark reviewed" aria-label={`Mark ${item.message.subject} reviewed`}>
-                              {busyItemId === item.message.id ? <LoaderCircle className="spin" size={15} /> : <CheckCheck size={15} />}<span>Mark reviewed</span>
-                            </button>
+                            <div className="review-item-actions">
+                              <button className="review-quick-action event" disabled={busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onCreateAction(item, "calendar_event")} title="Create calendar event" aria-label={`Create event for ${item.message.subject}`}>
+                                {planningAction?.messageId === item.message.id && planningAction.action === "calendar_event" ? <LoaderCircle className="spin" size={15} /> : <CalendarPlus size={15} />}<span>Event</span>
+                              </button>
+                              <button className="review-quick-action todo" disabled={busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onCreateAction(item, "todo")} title="Create to-do" aria-label={`Create to-do for ${item.message.subject}`}>
+                                {planningAction?.messageId === item.message.id && planningAction.action === "todo" ? <LoaderCircle className="spin" size={15} /> : <ListTodo size={15} />}<span>To-do</span>
+                              </button>
+                              <button className="review-mark-button" disabled={busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onMarkAnalysisReviewed(item)} title="Mark reviewed" aria-label={`Mark ${item.message.subject} reviewed`}>
+                                {busyItemId === item.message.id ? <LoaderCircle className="spin" size={15} /> : <CheckCheck size={15} />}<span>Mark reviewed</span>
+                              </button>
+                            </div>
                           )}
                         </div>
                       ))}

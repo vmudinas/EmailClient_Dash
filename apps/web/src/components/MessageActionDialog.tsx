@@ -7,7 +7,7 @@ import type {
 } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 
-type ReviewAction = "calendar_event" | "todo";
+export type ReviewAction = "calendar_event" | "todo";
 
 interface CalendarDraft {
   title: string;
@@ -30,6 +30,7 @@ export function MessageActionDialog({
   messageId,
   suggestion,
   connections,
+  initialAction,
   onClose,
   onCreated,
   onError
@@ -38,8 +39,9 @@ export function MessageActionDialog({
   messageId: string;
   suggestion: MessageActionSuggestion;
   connections: GmailConnection[];
+  initialAction?: ReviewAction;
   onClose(): void;
-  onCreated(message: string, action: ReviewAction): void;
+  onCreated(message: string, action: ReviewAction): void | Promise<void>;
   onError(message: string): void;
 }) {
   const calendarConnections = useMemo(
@@ -48,11 +50,11 @@ export function MessageActionDialog({
   );
   const fallbackDate = suggestion.calendarEvent?.startDate ?? suggestion.todo?.date ?? todayIso();
   const [action, setAction] = useState<ReviewAction>(
-    suggestion.recommendedAction === "calendar_event"
+    initialAction ?? (suggestion.recommendedAction === "calendar_event"
       ? "calendar_event"
       : suggestion.recommendedAction === "todo"
         ? "todo"
-        : calendarConnections.length > 0 ? "calendar_event" : "todo"
+        : calendarConnections.length > 0 ? "calendar_event" : "todo")
   );
   const [connectionId, setConnectionId] = useState(calendarConnections[0]?.id ?? "");
   const [calendar, setCalendar] = useState<CalendarDraft>(() => ({
@@ -77,7 +79,7 @@ export function MessageActionDialog({
     try {
       if (action === "todo") {
         const created = await api.createTodo({ date: todo.date, text: todo.text.trim() });
-        onCreated(`To-do created for ${formatDate(created.date)}.`, "todo");
+        await onCreated(`To-do created for ${formatDate(created.date)}.`, "todo");
         return;
       }
       if (!connectionId) throw new Error("Choose a calendar-connected Gmail account");
@@ -97,7 +99,7 @@ export function MessageActionDialog({
         throw new Error("The event end must be after its start");
       }
       const created = await api.createCalendarEventFromMessage(messageId, connectionId, payload);
-      onCreated(`Calendar event "${created.title}" created.`, "calendar_event");
+      await onCreated(`Calendar event "${created.title}" created.`, "calendar_event");
     } catch (error) {
       onError(error instanceof Error ? error.message : "The suggested action could not be created");
     } finally {

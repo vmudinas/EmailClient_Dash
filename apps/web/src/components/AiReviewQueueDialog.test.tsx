@@ -40,6 +40,7 @@ describe("AiReviewQueueDialog", () => {
     };
     const onOpenDraft = vi.fn();
     const onDeleteDraft = vi.fn();
+    const onCreateAction = vi.fn();
     const onMarkAnalysisReviewed = vi.fn();
     const onCompleteFollowUp = vi.fn();
     const analysisItem = {
@@ -115,12 +116,14 @@ describe("AiReviewQueueDialog", () => {
         queue={{ drafts: [draft], analyses: [analysisItem, urgentAnalysisItem, newerHighAnalysisItem], followUps: [followUp], totalItems: 5 }}
         loading={false}
         busyItemId={null}
+        planningAction={null}
         readOnly={false}
         onClose={vi.fn()}
         onRefresh={vi.fn()}
         onOpenDraft={onOpenDraft}
         onDeleteDraft={onDeleteDraft}
         onOpenMessage={vi.fn()}
+        onCreateAction={onCreateAction}
         onMarkAnalysisReviewed={onMarkAnalysisReviewed}
         onCompleteFollowUp={onCompleteFollowUp}
       />
@@ -138,6 +141,10 @@ describe("AiReviewQueueDialog", () => {
     expect(onOpenDraft).toHaveBeenCalledWith(draft);
     fireEvent.click(screen.getByRole("button", { name: "Delete draft Re: Contract review" }));
     expect(onDeleteDraft).toHaveBeenCalledWith(draft);
+    fireEvent.click(screen.getByRole("button", { name: "Create event for Approve the launch plan" }));
+    expect(onCreateAction).toHaveBeenCalledWith(analysisItem, "calendar_event");
+    fireEvent.click(screen.getByRole("button", { name: "Create to-do for Approve the launch plan" }));
+    expect(onCreateAction).toHaveBeenCalledWith(analysisItem, "todo");
     fireEvent.click(screen.getByRole("button", { name: "Mark Approve the launch plan reviewed" }));
     expect(onMarkAnalysisReviewed).toHaveBeenCalledWith(analysisItem);
     fireEvent.click(screen.getByRole("button", { name: "Mark follow-up complete" }));

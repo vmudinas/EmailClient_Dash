@@ -40,6 +40,7 @@ import type {
   GmailSendRequest,
   ImportJob,
   LocalMessageStatePatch,
+  MessageActionSuggestion,
   MessageDetail,
   MessageSummary,
   RuntimeConfig,
@@ -74,6 +75,7 @@ import { GuideDialog } from "./components/GuideDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
+import { MessageActionDialog, type ReviewAction } from "./components/MessageActionDialog.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
 type MobileView = "folders" | "messages" | "reader";
@@ -148,6 +150,12 @@ export function App() {
   const [reviewQueue, setReviewQueue] = useState<AiReviewQueue | null>(null);
   const [reviewQueueLoading, setReviewQueueLoading] = useState(false);
   const [reviewActionBusyId, setReviewActionBusyId] = useState<string | null>(null);
+  const [reviewPlanningAction, setReviewPlanningAction] = useState<{ messageId: string; action: ReviewAction } | null>(null);
+  const [reviewActionDraft, setReviewActionDraft] = useState<{
+    item: AiReviewAnalysisItem;
+    suggestion: MessageActionSuggestion;
+    initialAction: ReviewAction;
+  } | null>(null);
   const [moveBusy, setMoveBusy] = useState(false);
   const [spamBusy, setSpamBusy] = useState(false);
   const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
@@ -898,6 +906,22 @@ export function App() {
     }
   };
 
+  const createReviewAnalysisAction = async (item: AiReviewAnalysisItem, action: ReviewAction) => {
+    if (!api || readOnly) return;
+    setReviewPlanningAction({ messageId: item.message.id, action });
+    try {
+      const suggestion = await api.suggestMessageAction(item.message.id, {
+        now: new Date().toISOString(),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+      });
+      setReviewActionDraft({ item, suggestion, initialAction: action });
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "AI could not prepare the action");
+    } finally {
+      setReviewPlanningAction(null);
+    }
+  };
+
   const editSavedDraft = (draft: EmailDraft) => {
     setDraftsOpen(false);
     openCompose(gmailConnections.find((connection) => connection.id === draft.connectionId) ?? null, {
@@ -1630,6 +1654,7 @@ export function App() {
         queue={reviewQueue}
         loading={reviewQueueLoading}
         busyItemId={reviewActionBusyId}
+        planningAction={reviewPlanningAction}
         readOnly={readOnly}
         onClose={() => setReviewQueueOpen(false)}
         onRefresh={() => void refreshReviewQueue()}
@@ -1642,9 +1667,41 @@ export function App() {
           setReviewQueueOpen(false);
           void openMessage(target);
         }}
+        onCreateAction={(item, action) => void createReviewAnalysisAction(item, action)}
         onMarkAnalysisReviewed={(item) => void markReviewAnalysisReviewed(item)}
         onCompleteFollowUp={(followUp) => void completeReviewFollowUp(followUp.id, followUp.messageId)}
       />
+      {api && reviewActionDraft && (
+        <MessageActionDialog
+          key={`${reviewActionDraft.item.message.id}:${reviewActionDraft.initialAction}`}
+          api={api}
+          messageId={reviewActionDraft.item.message.id}
+          suggestion={reviewActionDraft.suggestion}
+          connections={gmailConnections}
+          initialAction={reviewActionDraft.initialAction}
+          onClose={() => setReviewActionDraft(null)}
+          onCreated={async (notice, action) => {
+            const target = reviewActionDraft.item;
+            if (action === "calendar_event") {
+              updateMessageIndicators(target.message.id, { hasCalendarEvent: true });
+            }
+            setReviewActionBusyId(target.message.id);
+            let finalNotice = `${notice} The message was marked reviewed.`;
+            try {
+              await api.markMessageAnalysisReviewed(target.message.id);
+              await refreshReviewQueue();
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : "review status could not be updated";
+              finalNotice = `${notice} The action was created, but the message was not marked reviewed: ${reason}`;
+            } finally {
+              setReviewActionBusyId(null);
+              setReviewActionDraft(null);
+              showError(finalNotice);
+            }
+          }}
+          onError={showError}
+        />
+      )}
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
       {isAdmin && (
         <SettingsDialog

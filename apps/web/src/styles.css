@@ -5011,6 +5011,14 @@ textarea:focus-visible {
   border-left: 3px solid #5f9277;
 }
 
+.review-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.review-quick-action,
 .review-mark-button {
   display: inline-flex;
   min-height: 30px;
@@ -5028,11 +5036,38 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
+.review-quick-action {
+  padding: 0 8px;
+  border: 1px solid #d7ccdf;
+  border-radius: 5px;
+  color: #695276;
+  background: #f8f4fb;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.review-quick-action.event {
+  border-color: #e5c88f;
+  color: #76511a;
+  background: #fff9ed;
+}
+
+.review-quick-action:hover:not(:disabled) {
+  border-color: #a88fba;
+  background: #f1eaf6;
+}
+
+.review-quick-action.event:hover:not(:disabled) {
+  border-color: #c79b4d;
+  background: #fff3d8;
+}
+
 .review-mark-button:hover:not(:disabled) {
   border-color: #83ad95;
   background: #dcece3;
 }
 
+.review-quick-action:disabled,
 .review-mark-button:disabled {
   opacity: 0.55;
   cursor: default;
@@ -5446,11 +5481,13 @@ textarea:focus-visible {
     align-items: flex-start;
   }
 
+  .review-quick-action,
   .review-mark-button {
     width: 34px;
     padding: 0;
   }
 
+  .review-quick-action span,
   .review-mark-button span {
     display: none;
   }
