@@ -18,6 +18,16 @@ describe("StockTickerBar", () => {
       quotedAt: "2026-07-17T14:00:00.000Z",
       error: null
     }, {
+      symbol: "MSFT",
+      name: "Microsoft Corporation",
+      price: 507.4,
+      currency: "USD",
+      change: -2.6,
+      changePercent: -0.51,
+      marketState: "REGULAR",
+      quotedAt: "2026-07-17T14:00:00.000Z",
+      error: null
+    }, {
       symbol: "BAD",
       name: null,
       price: null,
@@ -34,6 +44,11 @@ describe("StockTickerBar", () => {
     expect(screen.getAllByText("AAPL")).toHaveLength(3);
     expect(screen.getAllByText("$189.25")).toHaveLength(3);
     expect(screen.getAllByText("+0.67%")).toHaveLength(3);
+    expect(screen.getAllByText("MSFT")).toHaveLength(3);
+    expect(screen.getAllByText("$507.40")).toHaveLength(3);
+    expect(screen.getAllByText("-0.51%")).toHaveLength(3);
+    expect(document.querySelectorAll(".stock-ticker-quote.up")).toHaveLength(3);
+    expect(document.querySelectorAll(".stock-ticker-quote.down")).toHaveLength(3);
     expect(screen.getAllByText("Unavailable")).toHaveLength(3);
     fireEvent.click(screen.getByRole("button", { name: "Refresh market prices" }));
     expect(onRefresh).toHaveBeenCalledOnce();

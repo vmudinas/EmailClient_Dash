@@ -105,7 +105,7 @@ textarea:focus-visible {
 .stock-ticker-track {
   display: flex;
   width: max-content;
-  animation: stock-ticker-scroll 36s linear infinite;
+  animation: stock-ticker-scroll 30s linear infinite;
   will-change: transform;
 }
 
@@ -145,10 +145,14 @@ textarea:focus-visible {
   font-weight: 750;
 }
 
+.stock-ticker-quote.up,
+.stock-ticker-quote.up strong,
 .stock-ticker-quote.up em {
   color: #67d391;
 }
 
+.stock-ticker-quote.down,
+.stock-ticker-quote.down strong,
 .stock-ticker-quote.down em {
   color: #ff8d84;
 }
