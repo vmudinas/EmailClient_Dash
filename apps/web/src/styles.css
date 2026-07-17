@@ -237,6 +237,9 @@ textarea:focus-visible {
 }
 
 .news-ticker-viewport {
+  display: flex;
+  align-items: center;
+  height: 100%;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -244,6 +247,8 @@ textarea:focus-visible {
 
 .news-ticker-track {
   display: flex;
+  align-items: center;
+  height: 100%;
   width: max-content;
   animation: news-ticker-scroll 60s linear infinite;
   will-change: transform;
@@ -259,12 +264,13 @@ textarea:focus-visible {
   align-items: center;
   flex: 0 0 auto;
   gap: 30px;
+  height: 100%;
   padding: 0 30px 0 0;
 }
 
 .news-ticker-headline {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   max-width: 460px;
   height: 29px;
@@ -294,7 +300,9 @@ textarea:focus-visible {
 }
 
 .news-ticker-empty {
-  display: block;
+  display: flex;
+  align-items: center;
+  height: 100%;
   padding: 0 14px;
   overflow: hidden;
   color: #a9b7c5;
