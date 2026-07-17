@@ -216,7 +216,7 @@ Each schedule can be edited, toggled on/off, triggered immediately with **Run no
 
 - **Thread-level AI:** Open a message to expand its conversation context. Analysis, AI actions, and reply drafts use that context and avoid generating another reply after the conversation has already been answered.
 - **Follow-up tracker:** Choose **Follow up** on a message, set a date/time and note, and review pending items in the AI Review Queue. A pending follow-up completes automatically when a sent reply is recorded for that conversation.
-- **AI Review Queue:** Use the brain button in the top toolbar to review generated drafts, messages needing a decision, and due or upcoming follow-ups in one place. The badge shows the current review count.
+- **AI Review Queue:** Use the brain button in the top toolbar to review generated drafts, messages needing a decision, and due or upcoming follow-ups in one place. Delete unwanted drafts directly from the queue, or mark an analysis reviewed to remove it until fresh analysis is generated. The badge shows the current review count.
 - **Smart mail rules:** Under **Admin settings > Smart rules**, describe a rule in natural language, review and edit the AI-generated conditions/actions, then activate it. Rules can move matching local Inbox mail to an existing folder, mark it read, or star it; they never send or delete email. You can optionally apply a reviewed rule to existing messages.
 - **Reply styles:** Under **Admin settings > Reply styles**, save reusable tone and writing instructions and select a default. Manual and scheduled AI drafts can pin a specific style, and the selected style is recorded with the draft for review.
 

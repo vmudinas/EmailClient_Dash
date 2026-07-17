@@ -127,6 +127,7 @@ describe("ComposeDialog", () => {
   it("opens an AI draft with its resume and saves edits without sending", () => {
     const onSave = vi.fn();
     const onSend = vi.fn();
+    const onDelete = vi.fn();
     render(
       <ComposeDialog
         open
@@ -147,6 +148,7 @@ describe("ComposeDialog", () => {
         onClose={vi.fn()}
         onOpenGmail={vi.fn()}
         onLoadSendAsAliases={vi.fn().mockResolvedValue([])}
+        onDelete={onDelete}
         onSave={onSave}
         onSend={onSend}
       />
@@ -165,5 +167,7 @@ describe("ComposeDialog", () => {
       sourceMessageId: "11111111-1111-4111-8111-111111111111"
     }));
     expect(onSend).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft" }));
+    expect(onDelete).toHaveBeenCalledOnce();
   });
 });

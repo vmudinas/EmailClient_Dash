@@ -71,7 +71,7 @@ export function DraftsDialog({
                       aria-label={`Send ${draft.subject || "draft"}`}
                     ><Send size={14} /><span>Send</span></button>
                     <button className="icon-button" disabled={busy} onClick={() => onEdit(draft)} title="Edit draft" aria-label={`Edit ${draft.subject || "draft"}`}><Pencil size={15} /></button>
-                    <button className="icon-button" disabled={busy} onClick={() => onDelete(draft)} title="Delete draft" aria-label={`Delete ${draft.subject || "draft"}`}><Trash2 size={15} /></button>
+                    <button className="draft-delete-button" disabled={busy} onClick={() => onDelete(draft)} title="Delete draft" aria-label={`Delete ${draft.subject || "draft"}`}><Trash2 size={14} /><span>Delete</span></button>
                   </div>
                 </li>
               ))}

@@ -644,6 +644,29 @@ describe("EmailDatabase", () => {
       actionRequired: true,
       priority: "high"
     });
+    expect(database.getAiReviewQueue().analyses.map((item) => item.message.id)).toEqual([messageId]);
+    expect(database.markMessageAnalysisReviewed(messageId)).toEqual({
+      messageId,
+      reviewedAt: expect.any(String)
+    });
+    expect(database.getAiReviewQueue().analyses).toEqual([]);
+    database.upsertMessageAnalysis({
+      messageId,
+      summary: "The updated contract analysis still needs review.",
+      categories: ["Legal", "Review"],
+      priority: "high",
+      actionRequired: true,
+      actionSummary: "Review the updated contract analysis",
+      spamProbability: 0.02,
+      phishingProbability: 0.01,
+      draftRecommended: false,
+      confidence: 0.93,
+      signals: ["Updated review request"],
+      model: "test-model",
+      promptVersion: "test-v2",
+      contentHash: "updated-content-hash"
+    });
+    expect(database.getAiReviewQueue().analyses.map((item) => item.message.id)).toEqual([messageId]);
     expect(database.consumeAiRequest(1, 10)).toBe(true);
     expect(database.consumeAiRequest(1, 10)).toBe(false);
     database.recordAiTokenUsage(120, 35);

@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import type {
   Archive as ArchiveModel,
+  AiReviewAnalysisItem,
   AiReviewQueue,
   AuthSessionInfo,
   DiagnosticsSnapshot,
@@ -146,7 +147,7 @@ export function App() {
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
   const [reviewQueue, setReviewQueue] = useState<AiReviewQueue | null>(null);
   const [reviewQueueLoading, setReviewQueueLoading] = useState(false);
-  const [reviewFollowUpBusyId, setReviewFollowUpBusyId] = useState<string | null>(null);
+  const [reviewActionBusyId, setReviewActionBusyId] = useState<string | null>(null);
   const [moveBusy, setMoveBusy] = useState(false);
   const [spamBusy, setSpamBusy] = useState(false);
   const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
@@ -858,7 +859,7 @@ export function App() {
 
   const completeReviewFollowUp = async (followUpId: string, messageId: string) => {
     if (!api || readOnly) return;
-    setReviewFollowUpBusyId(followUpId);
+    setReviewActionBusyId(followUpId);
     try {
       await api.updateFollowUp(followUpId, { status: "completed" });
       updateMessageIndicators(messageId, { hasPendingFollowUp: false });
@@ -866,7 +867,34 @@ export function App() {
     } catch (error) {
       showError(error instanceof Error ? error.message : "Follow-up could not be completed");
     } finally {
-      setReviewFollowUpBusyId(null);
+      setReviewActionBusyId(null);
+    }
+  };
+
+  const deleteReviewDraft = async (draft: EmailDraft) => {
+    if (!api || readOnly || !window.confirm(`Delete the draft "${draft.subject || "(No subject)"}"?`)) return;
+    setReviewActionBusyId(draft.id);
+    try {
+      await api.deleteDraft(draft.id);
+      setDrafts((current) => current.filter((entry) => entry.id !== draft.id));
+      await refreshReviewQueue();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Draft could not be deleted");
+    } finally {
+      setReviewActionBusyId(null);
+    }
+  };
+
+  const markReviewAnalysisReviewed = async (item: AiReviewAnalysisItem) => {
+    if (!api || readOnly) return;
+    setReviewActionBusyId(item.message.id);
+    try {
+      await api.markMessageAnalysisReviewed(item.message.id);
+      await refreshReviewQueue();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Message could not be marked reviewed");
+    } finally {
+      setReviewActionBusyId(null);
     }
   };
 
@@ -901,10 +929,28 @@ export function App() {
     try {
       await api.deleteDraft(draft.id);
       setDrafts((current) => current.filter((entry) => entry.id !== draft.id));
+      await refreshReviewQueue();
     } catch (error) {
       setDraftsError(error instanceof Error ? error.message : "Draft could not be deleted");
     } finally {
       setDraftsBusy(false);
+    }
+  };
+
+  const deleteOpenDraft = async () => {
+    if (!api || readOnly || !composeDraft?.id || !window.confirm(`Delete the draft "${composeDraft.subject || "(No subject)"}"?`)) return;
+    setComposeBusy(true);
+    setComposeError("");
+    try {
+      await api.deleteDraft(composeDraft.id);
+      setDrafts((current) => current.filter((entry) => entry.id !== composeDraft.id));
+      setComposeOpen(false);
+      setComposeDraft(null);
+      await refreshReviewQueue();
+    } catch (error) {
+      setComposeError(error instanceof Error ? error.message : "Draft could not be deleted");
+    } finally {
+      setComposeBusy(false);
     }
   };
 
@@ -919,6 +965,7 @@ export function App() {
     try {
       const result = await api.sendDraft(draft.id);
       setDrafts((current) => current.filter((entry) => entry.id !== draft.id));
+      await refreshReviewQueue();
       await refreshMailboxCounts();
       const connection = gmailConnections.find((entry) => entry.id === draft.connectionId);
       if (connection?.archiveId === selectedArchiveId) await loadMessages(false);
@@ -1540,6 +1587,7 @@ export function App() {
           openGmail();
         }}
         onLoadSendAsAliases={loadSendAsAliases}
+        onDelete={composeDraft?.id && !readOnly ? () => void deleteOpenDraft() : undefined}
         onSave={(connectionId, outgoing) => void saveComposeDraft(connectionId, outgoing)}
         onSend={(connectionId, outgoing) => void sendGmailMessage(connectionId, outgoing)}
       />
@@ -1559,7 +1607,7 @@ export function App() {
         open={reviewQueueOpen}
         queue={reviewQueue}
         loading={reviewQueueLoading}
-        busyFollowUpId={reviewFollowUpBusyId}
+        busyItemId={reviewActionBusyId}
         readOnly={readOnly}
         onClose={() => setReviewQueueOpen(false)}
         onRefresh={() => void refreshReviewQueue()}
@@ -1567,10 +1615,12 @@ export function App() {
           setReviewQueueOpen(false);
           openGeneratedDraft(draft);
         }}
+        onDeleteDraft={(draft) => void deleteReviewDraft(draft)}
         onOpenMessage={(target) => {
           setReviewQueueOpen(false);
           void openMessage(target);
         }}
+        onMarkAnalysisReviewed={(item) => void markReviewAnalysisReviewed(item)}
         onCompleteFollowUp={(followUp) => void completeReviewFollowUp(followUp.id, followUp.messageId)}
       />
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />

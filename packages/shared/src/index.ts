@@ -468,6 +468,11 @@ export interface AiReviewAnalysisItem {
   analysis: MessageAnalysis;
 }
 
+export interface AiAnalysisReview {
+  messageId: string;
+  reviewedAt: string;
+}
+
 export interface AiReviewQueue {
   drafts: EmailDraft[];
   analyses: AiReviewAnalysisItem[];

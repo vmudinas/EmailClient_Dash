@@ -1243,6 +1243,32 @@ textarea:focus-visible {
   cursor: not-allowed;
 }
 
+.draft-delete-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #d5a19d;
+  border-radius: 5px;
+  color: var(--red);
+  background: var(--red-soft);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.draft-delete-button:hover:not(:disabled) {
+  border-color: #c9857e;
+  background: #fbe2df;
+}
+
+.draft-delete-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .toolbar-spacer {
   flex: 1;
 }
@@ -2674,6 +2700,10 @@ textarea:focus-visible {
 
 .compose-attachment small {
   color: var(--muted);
+}
+
+.compose-delete-button {
+  margin-right: auto;
 }
 
 .drafts-dialog {
@@ -4727,6 +4757,26 @@ textarea:focus-visible {
 button.review-queue-item,
 .review-item-main {
   cursor: pointer;
+}
+
+.review-item-main > .ai-priority {
+  min-width: auto;
+  flex: 0 0 auto;
+  flex-direction: row;
+  gap: 0;
+}
+
+.review-item-main > svg {
+  flex: 0 0 auto;
+  color: var(--green-dark);
+}
+
+.review-item-delete {
+  color: var(--red);
+}
+
+.review-item-reviewed {
+  color: var(--green-dark);
 }
 
 .review-queue-item:last-child {

@@ -39,24 +39,68 @@ describe("AiReviewQueueDialog", () => {
       updatedAt: "2026-07-16T13:00:00.000Z"
     };
     const onOpenDraft = vi.fn();
+    const onDeleteDraft = vi.fn();
+    const onMarkAnalysisReviewed = vi.fn();
     const onCompleteFollowUp = vi.fn();
+    const analysisItem = {
+      message: {
+        id: "message-2",
+        archiveId: "archive-1",
+        folderId: "folder-1",
+        folderPath: "Inbox",
+        subject: "Approve the launch plan",
+        sender: { name: "Manager", address: "manager@example.test" },
+        recipients: [{ name: "Owner", address: "owner@example.test" }],
+        sentAt: "2026-07-16T12:00:00.000Z",
+        receivedAt: "2026-07-16T12:00:00.000Z",
+        preview: "Please approve the launch plan.",
+        hasAttachments: false,
+        attachmentCount: 0,
+        state: { isRead: true, isStarred: false, tags: [], note: "", updatedAt: null }
+      },
+      analysis: {
+        id: "analysis-1",
+        messageId: "message-2",
+        summary: "Approval requested.",
+        categories: ["Work"],
+        priority: "high" as const,
+        actionRequired: true,
+        actionSummary: "Approve or request changes",
+        spamProbability: 0,
+        phishingProbability: 0,
+        draftRecommended: false,
+        confidence: 0.95,
+        signals: ["Direct approval request"],
+        model: "test-model",
+        promptVersion: "test-v1",
+        contentHash: "content-hash",
+        createdAt: "2026-07-16T12:01:00.000Z",
+        updatedAt: "2026-07-16T12:01:00.000Z"
+      }
+    };
     render(
       <AiReviewQueueDialog
         open
-        queue={{ drafts: [draft], analyses: [], followUps: [followUp], totalItems: 2 }}
+        queue={{ drafts: [draft], analyses: [analysisItem], followUps: [followUp], totalItems: 3 }}
         loading={false}
-        busyFollowUpId={null}
+        busyItemId={null}
         readOnly={false}
         onClose={vi.fn()}
         onRefresh={vi.fn()}
         onOpenDraft={onOpenDraft}
+        onDeleteDraft={onDeleteDraft}
         onOpenMessage={vi.fn()}
+        onMarkAnalysisReviewed={onMarkAnalysisReviewed}
         onCompleteFollowUp={onCompleteFollowUp}
       />
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Re: Contract review/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Re: Contract review/i }));
     expect(onOpenDraft).toHaveBeenCalledWith(draft);
+    fireEvent.click(screen.getByRole("button", { name: "Delete draft Re: Contract review" }));
+    expect(onDeleteDraft).toHaveBeenCalledWith(draft);
+    fireEvent.click(screen.getByRole("button", { name: "Mark Approve the launch plan reviewed" }));
+    expect(onMarkAnalysisReviewed).toHaveBeenCalledWith(analysisItem);
     fireEvent.click(screen.getByRole("button", { name: "Mark follow-up complete" }));
     expect(onCompleteFollowUp).toHaveBeenCalledWith(followUp);
   });

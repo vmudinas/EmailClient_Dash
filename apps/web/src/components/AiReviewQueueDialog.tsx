@@ -1,18 +1,20 @@
-import { BellRing, BrainCircuit, Check, FileEdit, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { BellRing, BrainCircuit, Check, CheckCheck, FileEdit, LoaderCircle, RefreshCw, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import type { AiReviewQueue, EmailDraft, MessageFollowUp, MessageSummary } from "@email-client/shared";
+import type { AiReviewAnalysisItem, AiReviewQueue, EmailDraft, MessageFollowUp, MessageSummary } from "@email-client/shared";
 import { displayAddress, formatDateTime } from "../lib/format.js";
 
 interface AiReviewQueueDialogProps {
   open: boolean;
   queue: AiReviewQueue | null;
   loading: boolean;
-  busyFollowUpId: string | null;
+  busyItemId: string | null;
   readOnly: boolean;
   onClose(): void;
   onRefresh(): void;
   onOpenDraft(draft: EmailDraft): void;
+  onDeleteDraft(draft: EmailDraft): void;
   onOpenMessage(message: Pick<MessageSummary, "id">): void;
+  onMarkAnalysisReviewed(item: AiReviewAnalysisItem): void;
   onCompleteFollowUp(followUp: MessageFollowUp): void;
 }
 
@@ -20,12 +22,14 @@ export function AiReviewQueueDialog({
   open,
   queue,
   loading,
-  busyFollowUpId,
+  busyItemId,
   readOnly,
   onClose,
   onRefresh,
   onOpenDraft,
+  onDeleteDraft,
   onOpenMessage,
+  onMarkAnalysisReviewed,
   onCompleteFollowUp
 }: AiReviewQueueDialogProps) {
   if (!open) return null;
@@ -44,18 +48,32 @@ export function AiReviewQueueDialog({
             <>
               <ReviewSection icon={<FileEdit size={17} />} title="Drafts to review" count={queue.drafts.length}>
                 {queue.drafts.map((draft) => (
-                  <button key={draft.id} className="review-queue-item" onClick={() => onOpenDraft(draft)}>
-                    <span><strong>{draft.subject || "(No subject)"}</strong><small>To {draft.to.join(", ") || "No recipient"}{draft.replyStyleName ? ` · ${draft.replyStyleName}` : ""}</small></span>
-                    <FileEdit size={16} />
-                  </button>
+                  <div key={draft.id} className="review-queue-item">
+                    <button className="review-item-main" disabled={busyItemId === draft.id} onClick={() => onOpenDraft(draft)}>
+                      <span><strong>{draft.subject || "(No subject)"}</strong><small>To {draft.to.join(", ") || "No recipient"}{draft.replyStyleName ? ` · ${draft.replyStyleName}` : ""}</small></span>
+                      <FileEdit size={16} />
+                    </button>
+                    {!readOnly && (
+                      <button className="icon-button review-item-delete" disabled={busyItemId === draft.id} onClick={() => onDeleteDraft(draft)} title="Delete draft" aria-label={`Delete draft ${draft.subject || "(No subject)"}`}>
+                        {busyItemId === draft.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+                      </button>
+                    )}
+                  </div>
                 ))}
               </ReviewSection>
               <ReviewSection icon={<BrainCircuit size={17} />} title="Messages needing decisions" count={queue.analyses.length}>
-                {queue.analyses.map(({ message, analysis }) => (
-                  <button key={message.id} className="review-queue-item" onClick={() => onOpenMessage(message)}>
-                    <span><strong>{message.subject}</strong><small>{displayAddress(message.sender)} · {analysis.actionSummary || `${analysis.priority} priority`}</small></span>
-                    <span className={`ai-priority priority-${analysis.priority}`}>{analysis.priority}</span>
-                  </button>
+                {queue.analyses.map((item) => (
+                  <div key={item.message.id} className="review-queue-item">
+                    <button className="review-item-main" disabled={busyItemId === item.message.id} onClick={() => onOpenMessage(item.message)}>
+                      <span><strong>{item.message.subject}</strong><small>{displayAddress(item.message.sender)} · {item.analysis.actionSummary || `${item.analysis.priority} priority`}</small></span>
+                      <span className={`ai-priority priority-${item.analysis.priority}`}>{item.analysis.priority}</span>
+                    </button>
+                    {!readOnly && (
+                      <button className="icon-button review-item-reviewed" disabled={busyItemId === item.message.id} onClick={() => onMarkAnalysisReviewed(item)} title="Mark reviewed" aria-label={`Mark ${item.message.subject} reviewed`}>
+                        {busyItemId === item.message.id ? <LoaderCircle className="spin" size={16} /> : <CheckCheck size={16} />}
+                      </button>
+                    )}
+                  </div>
                 ))}
               </ReviewSection>
               <ReviewSection icon={<BellRing size={17} />} title="Follow-ups" count={queue.followUps.length}>
@@ -65,8 +83,8 @@ export function AiReviewQueueDialog({
                       <span><strong>{followUp.subject}</strong><small>{formatDateTime(followUp.dueAt)} · {followUp.note || displayAddress(followUp.sender)}</small></span>
                     </button>
                     {!readOnly && (
-                      <button className="icon-button" disabled={busyFollowUpId === followUp.id} onClick={() => onCompleteFollowUp(followUp)} title="Mark complete" aria-label="Mark follow-up complete">
-                        {busyFollowUpId === followUp.id ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+                      <button className="icon-button" disabled={busyItemId === followUp.id} onClick={() => onCompleteFollowUp(followUp)} title="Mark complete" aria-label="Mark follow-up complete">
+                        {busyItemId === followUp.id ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
                       </button>
                     )}
                   </div>

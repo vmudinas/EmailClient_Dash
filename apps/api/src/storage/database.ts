@@ -12,6 +12,7 @@ import type {
   AiPriority,
   AiProviderId,
   AiReviewQueue,
+  AiAnalysisReview,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleMode,
@@ -1302,6 +1303,18 @@ export class EmailDatabase {
       }
       this.db.pragma("user_version = 21");
     }
+
+    const aiReviewDismissalsVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (aiReviewDismissalsVersion < 22) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ai_analysis_reviews (
+          message_id TEXT PRIMARY KEY,
+          reviewed_at TEXT NOT NULL,
+          FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+      `);
+      this.db.pragma("user_version = 22");
+    }
   }
 
   private backfillConversationKeys(): void {
@@ -2339,50 +2352,65 @@ export class EmailDatabase {
   upsertMessageAnalysis(input: MessageAnalysisUpsertInput): MessageAnalysis {
     const id = randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO ai_message_analysis (
-        id, message_id, summary, categories_json, priority, action_required,
-        action_summary, spam_probability, phishing_probability, draft_recommended,
-        confidence, signals_json, thread_message_count, model, prompt_version, content_hash,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(message_id) DO UPDATE SET
-        summary = excluded.summary,
-        categories_json = excluded.categories_json,
-        priority = excluded.priority,
-        action_required = excluded.action_required,
-        action_summary = excluded.action_summary,
-        spam_probability = excluded.spam_probability,
-        phishing_probability = excluded.phishing_probability,
-        draft_recommended = excluded.draft_recommended,
-        confidence = excluded.confidence,
-        signals_json = excluded.signals_json,
-        thread_message_count = excluded.thread_message_count,
-        model = excluded.model,
-        prompt_version = excluded.prompt_version,
-        content_hash = excluded.content_hash,
-        updated_at = excluded.updated_at
-    `).run(
-      id,
-      input.messageId,
-      input.summary,
-      JSON.stringify(input.categories),
-      input.priority,
-      input.actionRequired ? 1 : 0,
-      input.actionSummary,
-      input.spamProbability,
-      input.phishingProbability,
-      input.draftRecommended ? 1 : 0,
-      input.confidence,
-      JSON.stringify(input.signals),
-      input.threadMessageCount ?? 1,
-      input.model,
-      input.promptVersion,
-      input.contentHash,
-      now,
-      now
-    );
+    const save = this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO ai_message_analysis (
+          id, message_id, summary, categories_json, priority, action_required,
+          action_summary, spam_probability, phishing_probability, draft_recommended,
+          confidence, signals_json, thread_message_count, model, prompt_version, content_hash,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+          summary = excluded.summary,
+          categories_json = excluded.categories_json,
+          priority = excluded.priority,
+          action_required = excluded.action_required,
+          action_summary = excluded.action_summary,
+          spam_probability = excluded.spam_probability,
+          phishing_probability = excluded.phishing_probability,
+          draft_recommended = excluded.draft_recommended,
+          confidence = excluded.confidence,
+          signals_json = excluded.signals_json,
+          thread_message_count = excluded.thread_message_count,
+          model = excluded.model,
+          prompt_version = excluded.prompt_version,
+          content_hash = excluded.content_hash,
+          updated_at = excluded.updated_at
+      `).run(
+        id,
+        input.messageId,
+        input.summary,
+        JSON.stringify(input.categories),
+        input.priority,
+        input.actionRequired ? 1 : 0,
+        input.actionSummary,
+        input.spamProbability,
+        input.phishingProbability,
+        input.draftRecommended ? 1 : 0,
+        input.confidence,
+        JSON.stringify(input.signals),
+        input.threadMessageCount ?? 1,
+        input.model,
+        input.promptVersion,
+        input.contentHash,
+        now,
+        now
+      );
+      this.db.prepare("DELETE FROM ai_analysis_reviews WHERE message_id = ?").run(input.messageId);
+    });
+    save();
     return this.getMessageAnalysis(input.messageId)!;
+  }
+
+  markMessageAnalysisReviewed(messageId: string): AiAnalysisReview {
+    if (!this.getMessageAnalysis(messageId)) throw new Error("Message analysis not found");
+    const reviewedAt = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO ai_analysis_reviews (message_id, reviewed_at)
+      VALUES (?, ?)
+      ON CONFLICT(message_id) DO UPDATE SET reviewed_at = excluded.reviewed_at
+    `).run(messageId, reviewedAt);
+    return { messageId, reviewedAt };
   }
 
   getAiUsageSummary(at = new Date()): AiUsageSummary {
@@ -4439,6 +4467,9 @@ export class EmailDatabase {
       JOIN folders f ON f.id = m.folder_id
       WHERE (a.action_required = 1 OR a.draft_recommended = 1 OR a.priority IN ('high', 'urgent'))
         AND lower(trim(f.name)) != 'spam'
+        AND NOT EXISTS (
+          SELECT 1 FROM ai_analysis_reviews ar WHERE ar.message_id = a.message_id
+        )
         AND NOT EXISTS (
           SELECT 1 FROM conversation_replies cr WHERE cr.conversation_key = m.conversation_key
         )

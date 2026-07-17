@@ -33,6 +33,7 @@ describe("DraftsDialog", () => {
   it("shows AI and resume context and opens the selected draft for review", () => {
     const onEdit = vi.fn();
     const onSend = vi.fn();
+    const onDelete = vi.fn();
     render(
       <DraftsDialog
         open
@@ -44,7 +45,7 @@ describe("DraftsDialog", () => {
         onRefresh={vi.fn()}
         onEdit={onEdit}
         onSend={onSend}
-        onDelete={vi.fn()}
+        onDelete={onDelete}
       />
     );
 
@@ -56,5 +57,7 @@ describe("DraftsDialog", () => {
     expect(onSend).toHaveBeenCalledWith(DRAFT);
     fireEvent.click(screen.getByRole("button", { name: "Edit Re: Engineering opportunity" }));
     expect(onEdit).toHaveBeenCalledWith(DRAFT);
+    fireEvent.click(screen.getByRole("button", { name: "Delete Re: Engineering opportunity" }));
+    expect(onDelete).toHaveBeenCalledWith(DRAFT);
   });
 });

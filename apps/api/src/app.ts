@@ -903,6 +903,18 @@ export class EmailApiRuntime {
       return this.database.getAiReviewQueue();
     });
 
+    this.app.post<{ Params: { messageId: string } }>(
+      "/api/messages/:messageId/ai/review",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          return this.database.markMessageAnalysisReviewed(request.params.messageId);
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "Message analysis not found" });
+        }
+      }
+    );
+
     this.app.get("/api/reply-styles", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
       return this.database.listReplyStyles();

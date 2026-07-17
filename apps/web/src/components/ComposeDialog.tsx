@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CircleAlert, FileEdit, LoaderCircle, MailPlus, Paperclip, Save, Send, ShieldCheck, Sparkles, X } from "lucide-react";
+import { CircleAlert, FileEdit, LoaderCircle, MailPlus, Paperclip, Save, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import type { GmailConnection, GmailSendAsAlias, GmailSendRequest } from "@email-client/shared";
 
 export interface ComposeDraft {
@@ -26,6 +26,7 @@ interface ComposeDialogProps {
   onClose(): void;
   onOpenGmail(): void;
   onLoadSendAsAliases(connectionId: string): Promise<GmailSendAsAlias[]>;
+  onDelete?(): void;
   onSave(connectionId: string, message: GmailSendRequest): void;
   onSend(connectionId: string, message: GmailSendRequest): void;
 }
@@ -40,6 +41,7 @@ export function ComposeDialog({
   onClose,
   onOpenGmail,
   onLoadSendAsAliases,
+  onDelete,
   onSave,
   onSend
 }: ComposeDialogProps) {
@@ -152,6 +154,7 @@ export function ComposeDialog({
           {error && <div className="import-error" role="alert"><CircleAlert size={18} /><div><strong>Draft action failed</strong><span>{error}</span></div></div>}
         </div>
         <footer className="dialog-footer">
+          {editing && onDelete && <button className="danger-button compose-delete-button" disabled={busy} onClick={onDelete}><Trash2 size={17} /> Delete draft</button>}
           <button className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>
           <button className="secondary-button" disabled={busy || !saveReady} onClick={() => onSave(connectionId, message)}>
             {busy ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />} Save draft

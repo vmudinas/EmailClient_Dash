@@ -72,6 +72,81 @@ describe("Email API AI provider routes", () => {
   });
 });
 
+describe("Email API review queue routes", () => {
+  it("persists a reviewed analysis and removes it from the queue", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const archive = runtime.database.createArchive({
+      name: "Review queue",
+      sourceType: "mbox",
+      fingerprint: "review-queue-route",
+      sizeBytes: 0
+    });
+    const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "review-queue-message",
+      internetMessageId: "<review-queue@example.test>",
+      subject: "Approve the release",
+      sender: { name: "Manager", address: "manager@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-16T12:00:00.000Z",
+      receivedAt: "2026-07-16T12:00:00.000Z",
+      bodyText: "Please approve the release.",
+      bodyHtml: null,
+      headers: { "message-id": "<review-queue@example.test>" },
+      sizeBytes: 27,
+      attachments: []
+    });
+    runtime.database.completeArchive(archive.id, 0);
+    runtime.database.upsertMessageAnalysis({
+      messageId,
+      summary: "Release approval requested.",
+      categories: ["Work"],
+      priority: "high",
+      actionRequired: true,
+      actionSummary: "Approve or request changes",
+      spamProbability: 0,
+      phishingProbability: 0,
+      draftRecommended: false,
+      confidence: 0.95,
+      signals: ["Direct approval request"],
+      model: "test-model",
+      promptVersion: "test-v1",
+      contentHash: "review-route-hash"
+    });
+
+    const before = await runtime.app.inject({ method: "GET", url: "/api/ai/review-queue", headers, remoteAddress: "127.0.0.1" });
+    expect(before.json()).toMatchObject({ totalItems: 1, analyses: [{ message: { id: messageId } }] });
+    const unauthorized = await runtime.app.inject({ method: "POST", url: `/api/messages/${messageId}/ai/review`, remoteAddress: "127.0.0.1" });
+    expect(unauthorized.statusCode).toBe(401);
+    const reviewed = await runtime.app.inject({ method: "POST", url: `/api/messages/${messageId}/ai/review`, headers, remoteAddress: "127.0.0.1" });
+    expect(reviewed.statusCode).toBe(200);
+    expect(reviewed.json()).toMatchObject({ messageId, reviewedAt: expect.any(String) });
+    const after = await runtime.app.inject({ method: "GET", url: "/api/ai/review-queue", headers, remoteAddress: "127.0.0.1" });
+    expect(after.json()).toMatchObject({ totalItems: 0, analyses: [] });
+  });
+});
+
 describe("Email API draft identity settings", () => {
   it("returns defaults and saves an Admin-configured sender identity", async () => {
     const dataDir = await temporaryDirectory();
