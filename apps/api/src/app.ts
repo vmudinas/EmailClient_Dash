@@ -47,6 +47,7 @@ import {
   smartMailRuleCreateSchema,
   smartMailRulePatchSchema,
   smartMailRuleSuggestionRequestSchema,
+  stockSettingsPatchSchema,
   todoCreateSchema,
   todoPatchSchema,
   uploadSessionCreateSchema,
@@ -121,6 +122,7 @@ import {
   UploadService,
   UploadValidationError
 } from "./services/upload-service.js";
+import { StockService } from "./services/stock-service.js";
 
 type Role = "viewer" | "local" | "admin";
 
@@ -157,6 +159,7 @@ export class EmailApiRuntime {
   readonly ai: AiService;
   readonly aiSettings: AiSettingsManager;
   readonly aiSchedules: AiScheduleService;
+  readonly stocks: StockService;
   readonly uploads: UploadService;
   readonly adminToken = randomToken();
   readonly localToken = randomToken();
@@ -201,6 +204,7 @@ export class EmailApiRuntime {
     });
     this.ai = new AiService(this.database, this.aiSettings, undefined, undefined, this.draftSettings);
     this.aiSchedules = new AiScheduleService(this.database, this.ai);
+    this.stocks = new StockService(config.dataDir);
     this.uploads = new UploadService(config.dataDir, this.database, this.imports);
   }
 
@@ -1647,6 +1651,35 @@ export class EmailApiRuntime {
       return this.getAdminSettings();
     });
 
+    this.app.get("/api/stocks/quotes", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      return this.stocks.quotes();
+    });
+
+    this.app.patch<{ Body: unknown }>("/api/admin/settings/stocks", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = stockSettingsPatchSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: parsed.error.issues[0]?.message ?? "Enter valid ticker symbols"
+        });
+      }
+      try {
+        const updated = this.stocks.update(parsed.data);
+        this.database.recordDiagnostic({
+          level: "info",
+          category: "system",
+          message: "Stock ticker configuration saved",
+          context: { operation: "stock_ticker_update", symbols: updated.symbols }
+        });
+        return this.getAdminSettings();
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Stock ticker settings could not be saved"
+        });
+      }
+    });
+
     this.app.patch<{ Body: unknown }>("/api/admin/settings/database", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
       const parsed = databaseSettingsPatchSchema.safeParse(request.body);
@@ -2369,6 +2402,7 @@ export class EmailApiRuntime {
       },
       gmail: this.gmailSettings.view(),
       drafts: this.draftSettings.view(),
+      stocks: this.stocks.view(),
       ai: this.aiSettings.view(this.database.getAiUsageSummary())
     };
   }

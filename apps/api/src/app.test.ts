@@ -221,6 +221,76 @@ describe("Email API draft identity settings", () => {
   });
 });
 
+describe("Email API stock ticker routes", () => {
+  it("protects quotes and persists an Admin-managed ticker list", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const unauthorized = await runtime.app.inject({
+      method: "GET",
+      url: "/api/stocks/quotes",
+      remoteAddress: "127.0.0.1"
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const quote = {
+      symbol: "MSFT",
+      name: "Microsoft Corporation",
+      price: 510,
+      currency: "USD",
+      change: 10,
+      changePercent: 2,
+      marketState: "REGULAR",
+      quotedAt: "2026-07-17T14:00:00.000Z",
+      error: null
+    };
+    vi.spyOn(runtime.stocks, "quotes").mockResolvedValue([quote]);
+
+    const updated = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/stocks",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { symbols: ["msft", "MSFT", "brk-b"] }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ stocks: { symbols: ["MSFT", "BRK-B"] } });
+
+    const quotes = await runtime.app.inject({
+      method: "GET",
+      url: "/api/stocks/quotes",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(quotes.statusCode).toBe(200);
+    expect(quotes.json()).toEqual([quote]);
+
+    const invalid = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/stocks",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { symbols: ["AAPL!"] }
+    });
+    expect(invalid.statusCode).toBe(400);
+  });
+});
+
 describe("Email API message action suggestion route", () => {
   it("requires authentication, validates time context, and returns the AI suggestion", async () => {
     const dataDir = await temporaryDirectory();

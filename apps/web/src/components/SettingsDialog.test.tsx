@@ -50,6 +50,41 @@ describe("SettingsDialog", () => {
     expect(await screen.findByText("Draft identity saved.")).toBeTruthy();
   });
 
+  it("adds and removes symbols from the footer stock ticker", async () => {
+    const updatedSettings: AdminSettings = {
+      ...SETTINGS,
+      stocks: { ...SETTINGS.stocks, symbols: ["SPY", "AAPL", "MSFT"] }
+    };
+    const onStockSettingsChanged = vi.fn();
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      updateStockSettings: vi.fn().mockResolvedValue(updatedSettings)
+    } as unknown as ApiClient;
+
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={SESSION}
+        onClose={vi.fn()}
+        onSignedOut={vi.fn()}
+        onStockSettingsChanged={onStockSettingsChanged}
+      />
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stocks" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Stocks" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove QQQ" }));
+    fireEvent.change(screen.getByRole("textbox", { name: /Add ticker symbol/ }), { target: { value: "msft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save ticker list" }));
+
+    await waitFor(() => expect(api.updateStockSettings).toHaveBeenCalledWith({ symbols: ["SPY", "AAPL", "MSFT"] }));
+    expect(onStockSettingsChanged).toHaveBeenCalledOnce();
+    expect(await screen.findByText("Stock ticker list saved.")).toBeTruthy();
+  });
+
   it("shows database, Gmail, AI, users, security, and IP audit settings", async () => {
     const api = {
       adminSettings: vi.fn().mockResolvedValue(SETTINGS),
@@ -859,6 +894,11 @@ const SETTINGS: AdminSettings = {
     defaultFromAddress: "ai@vitas.work",
     senderName: "Vitas",
     settingsPath: "/tmp/draft-settings.json",
+    configurationError: null
+  },
+  stocks: {
+    symbols: ["SPY", "QQQ", "AAPL"],
+    settingsPath: "/tmp/stock-settings.json",
     configurationError: null
   },
   ai: {

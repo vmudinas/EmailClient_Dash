@@ -69,6 +69,8 @@ import type {
   SmartMailRulePatch,
   SmartMailRuleSuggestion,
   SmartMailRuleSuggestionRequest,
+  StockQuote,
+  StockSettingsPatch,
   TodoCreate,
   TodoItem,
   TodoPatch,
@@ -779,6 +781,10 @@ export class ApiClient {
     return this.request("/api/admin/settings");
   }
 
+  stockQuotes(): Promise<StockQuote[]> {
+    return this.request("/api/stocks/quotes");
+  }
+
   updateDatabaseSettings(input: DatabaseSettingsPatch): Promise<AdminSettings> {
     return this.request("/api/admin/settings/database", {
       method: "PATCH",
@@ -814,6 +820,13 @@ export class ApiClient {
 
   updateDraftSettings(input: DraftSettingsPatch): Promise<AdminSettings> {
     return this.request("/api/admin/settings/drafts", {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  updateStockSettings(input: StockSettingsPatch): Promise<AdminSettings> {
+    return this.request("/api/admin/settings/stocks", {
       method: "PATCH",
       body: JSON.stringify(input)
     });

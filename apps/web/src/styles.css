@@ -61,10 +61,147 @@ textarea:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-rows: 58px minmax(0, 1fr) 30px;
   width: 100%;
   height: 100%;
   background: #f4f5f2;
+}
+
+.stock-ticker-bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 30px;
+  align-items: center;
+  min-width: 0;
+  height: 30px;
+  overflow: hidden;
+  border-top: 1px solid #29352f;
+  color: #edf4ef;
+  background: #17231d;
+  font-variant-numeric: tabular-nums;
+  z-index: 24;
+}
+
+.stock-ticker-label {
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 5px;
+  padding: 0 12px;
+  border-right: 1px solid #34443b;
+  color: #d7e7dc;
+  background: #1d2c24;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stock-ticker-viewport {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.stock-ticker-track {
+  display: flex;
+  width: max-content;
+  animation: stock-ticker-scroll 36s linear infinite;
+  will-change: transform;
+}
+
+.stock-ticker-bar:hover .stock-ticker-track,
+.stock-ticker-bar:focus-within .stock-ticker-track {
+  animation-play-state: paused;
+}
+
+.stock-ticker-group {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 30px;
+  padding: 0 30px 0 0;
+}
+
+.stock-ticker-quote {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 29px;
+  color: #e9eeeb;
+  font-size: 10px;
+}
+
+.stock-ticker-quote strong {
+  color: #ffffff;
+  font-size: 10px;
+  letter-spacing: 0.025em;
+}
+
+.stock-ticker-quote em {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.stock-ticker-quote.up em {
+  color: #67d391;
+}
+
+.stock-ticker-quote.down em {
+  color: #ff8d84;
+}
+
+.stock-ticker-quote.flat em,
+.stock-ticker-quote.unavailable span {
+  color: #aab5ae;
+}
+
+.stock-ticker-empty {
+  display: block;
+  padding: 0 14px;
+  overflow: hidden;
+  color: #aebbb3;
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.stock-ticker-empty.error {
+  color: #ffaaa3;
+}
+
+.stock-ticker-refresh {
+  display: inline-grid;
+  place-items: center;
+  align-self: stretch;
+  width: 30px;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid #34443b;
+  color: #b9c8bf;
+  background: #1d2c24;
+  cursor: pointer;
+}
+
+.stock-ticker-refresh:hover:not(:disabled) {
+  color: #ffffff;
+  background: #26382e;
+}
+
+.stock-ticker-refresh:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+@keyframes stock-ticker-scroll {
+  to { transform: translateX(-33.333333%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stock-ticker-track {
+    animation: none;
+  }
 }
 
 .topbar {
@@ -4232,6 +4369,57 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.stock-symbol-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.stock-symbol-entry .secondary-button {
+  height: 37px;
+}
+
+.stock-symbol-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stock-symbol-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  height: 39px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.stock-symbol-list li > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--green-dark);
+  font-size: 12px;
+}
+
+.stock-symbol-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  font-size: 11px;
+}
+
 .settings-form .primary-button,
 .settings-create-user .primary-button,
 .settings-inline-form .primary-button {
@@ -5844,8 +6032,21 @@ textarea:focus-visible {
   }
 
   .app-shell {
-    grid-template-rows: 56px minmax(0, 1fr) 58px;
+    grid-template-rows: 56px minmax(0, 1fr) 30px 58px;
     height: 100dvh;
+  }
+
+  .stock-ticker-label {
+    width: 29px;
+    padding: 0 8px;
+  }
+
+  .stock-ticker-label svg {
+    flex: 0 0 auto;
+  }
+
+  .stock-ticker-label {
+    font-size: 0;
   }
 
   .topbar {

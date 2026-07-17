@@ -48,7 +48,8 @@ import type {
   RuntimeConfig,
   SearchFilters,
   SearchHit,
-  SharingState
+  SharingState,
+  StockQuote
 } from "@email-client/shared";
 import { Sidebar } from "./components/Sidebar.js";
 import {
@@ -78,6 +79,7 @@ import { LoginScreen } from "./components/LoginScreen.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
 import { MessageActionDialog, type ReviewAction } from "./components/MessageActionDialog.js";
+import { StockTickerBar } from "./components/StockTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
 type MobileView = "folders" | "messages" | "reader";
@@ -104,6 +106,9 @@ export function App() {
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [api, setApi] = useState<ApiClient | null>(null);
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
+  const [stockQuotes, setStockQuotes] = useState<StockQuote[]>([]);
+  const [stockQuotesLoading, setStockQuotesLoading] = useState(false);
+  const [stockQuotesError, setStockQuotesError] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [archives, setArchives] = useState<ArchiveModel[]>([]);
@@ -210,8 +215,21 @@ export function App() {
     setMessage((current) => current?.id === messageId ? { ...current, ...patch } : current);
   }, []);
 
+  const refreshStockQuotes = useCallback(async (client: ApiClient) => {
+    setStockQuotesLoading(true);
+    setStockQuotesError("");
+    try {
+      setStockQuotes(await client.stockQuotes());
+    } catch (error) {
+      setStockQuotesError(error instanceof Error ? error.message : "Market prices are unavailable");
+    } finally {
+      setStockQuotesLoading(false);
+    }
+  }, []);
+
   const loadAuthenticatedData = useCallback(async (client: ApiClient) => {
     const loadedArchives = await client.listArchives();
+    void refreshStockQuotes(client);
     void client.flushClientDiagnostics().then(() => {
       setPendingDiagnosticCount(client.pendingDiagnosticCount());
     });
@@ -221,7 +239,13 @@ export function App() {
         ? current
         : loadedArchives[0]?.id ?? null
     ));
-  }, []);
+  }, [refreshStockQuotes]);
+
+  useEffect(() => {
+    if (!api || !session) return;
+    const timer = window.setInterval(() => void refreshStockQuotes(api), 60_000);
+    return () => window.clearInterval(timer);
+  }, [api, session, refreshStockQuotes]);
 
   const connect = useCallback(async () => {
     setInitializing(true);
@@ -1607,6 +1631,13 @@ export function App() {
         )}
       </main>
 
+      <StockTickerBar
+        quotes={stockQuotes}
+        loading={stockQuotesLoading}
+        error={stockQuotesError}
+        onRefresh={() => { if (api) void refreshStockQuotes(api); }}
+      />
+
       <nav className="mobile-nav" aria-label="Mobile navigation">
         <button className={mobileView === "folders" ? "selected" : ""} onClick={() => setMobileView("folders")}>
           <FolderOpen size={19} /><span>Folders</span>
@@ -1781,6 +1812,7 @@ export function App() {
           onSignedOut={signOutLocally}
           onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
           onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
+          onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
         />
       )}
       <DiagnosticsDialog

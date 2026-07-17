@@ -33,6 +33,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  TrendingUp,
   Trash2,
   UserPlus,
   Users,
@@ -67,7 +68,7 @@ import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS } from "@email-cli
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "stocks" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -80,6 +81,7 @@ interface SettingsDialogProps {
   onSignedOut(): void;
   onAddGoogleCalendar?(): void;
   onReauthorizeGoogleCalendar?(connection: GmailConnection): void;
+  onStockSettingsChanged?(): void;
 }
 
 const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
@@ -87,6 +89,7 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "gmail", label: "Gmail", icon: MailCheck },
   { id: "calendars", label: "Calendars", icon: CalendarDays },
   { id: "drafts", label: "Drafts", icon: FileEdit },
+  { id: "stocks", label: "Stocks", icon: TrendingUp },
   { id: "reply-styles", label: "Reply styles", icon: Sparkles },
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
   { id: "smart-rules", label: "Smart rules", icon: MailCheck },
@@ -105,7 +108,8 @@ export function SettingsDialog({
   onClose,
   onSignedOut,
   onAddGoogleCalendar,
-  onReauthorizeGoogleCalendar
+  onReauthorizeGoogleCalendar,
+  onStockSettingsChanged
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
@@ -207,6 +211,18 @@ export function SettingsDialog({
                     onSettings={setSettings}
                     onError={setError}
                     onNotice={showNotice}
+                  />
+                )}
+                {section === "stocks" && settings && (
+                  <StockSettingsPanel
+                    api={api!}
+                    settings={settings}
+                    busy={busy}
+                    onBusy={setBusy}
+                    onSettings={setSettings}
+                    onError={setError}
+                    onNotice={showNotice}
+                    onChanged={onStockSettingsChanged}
                   />
                 )}
                 {section === "sender-filing" && (
@@ -1393,6 +1409,133 @@ function DraftSettingsPanel({
       </form>
       <dl className="settings-definitions">
         <div><dt>Settings file</dt><dd><code>{settings.drafts.settingsPath}</code></dd></div>
+      </dl>
+    </>
+  );
+}
+
+function StockSettingsPanel({
+  api,
+  settings,
+  busy,
+  onBusy,
+  onSettings,
+  onError,
+  onNotice,
+  onChanged
+}: {
+  api: ApiClient;
+  settings: AdminSettings;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onSettings(value: AdminSettings): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+  onChanged?(): void;
+}) {
+  const [symbols, setSymbols] = useState(settings.stocks.symbols);
+  const [newSymbol, setNewSymbol] = useState("");
+
+  useEffect(() => {
+    setSymbols(settings.stocks.symbols);
+  }, [settings.stocks.symbols]);
+
+  const addSymbol = () => {
+    const symbol = newSymbol.trim().toUpperCase();
+    if (!symbol) return;
+    if (!/^[A-Z0-9.^=_-]{1,20}$/.test(symbol)) {
+      onError("Use a valid ticker such as AAPL, BRK-B, BTC-USD, or ^GSPC.");
+      return;
+    }
+    if (symbols.includes(symbol)) {
+      onError(`${symbol} is already in the ticker.`);
+      return;
+    }
+    if (symbols.length >= 20) {
+      onError("You can track up to 20 ticker symbols.");
+      return;
+    }
+    setSymbols((current) => [...current, symbol]);
+    setNewSymbol("");
+    onError("");
+  };
+
+  const save = async () => {
+    onBusy(true);
+    onError("");
+    try {
+      const updated = await api.updateStockSettings({ symbols });
+      onSettings(updated);
+      onNotice("Stock ticker list saved.");
+      onChanged?.();
+    } catch (saveError) {
+      onError(errorText(saveError));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3>Stock ticker</h3>
+      <p>Choose up to 20 market symbols for the live scrolling price row at the bottom of Archive Mail.</p>
+      {settings.stocks.configurationError && (
+        <div className="settings-warning"><AlertTriangle size={17} /><span>{settings.stocks.configurationError}</span></div>
+      )}
+      <div className="settings-warning neutral">
+        <TrendingUp size={17} />
+        <span>Prices are fetched server-side from Yahoo Finance and may be delayed. They are informational only, not trading data.</span>
+      </div>
+      <div className="settings-form stock-settings-form">
+        <label>
+          Add ticker symbol
+          <div className="stock-symbol-entry">
+            <input
+              value={newSymbol}
+              onChange={(event) => setNewSymbol(event.target.value.toUpperCase())}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                addSymbol();
+              }}
+              placeholder="AAPL"
+              maxLength={20}
+              disabled={busy}
+            />
+            <button type="button" className="secondary-button" onClick={addSymbol} disabled={busy || !newSymbol.trim()}>
+              <Plus size={15} /> Add
+            </button>
+          </div>
+          <small>Examples: SPY, QQQ, BRK-B, BTC-USD, ^GSPC.</small>
+        </label>
+        {symbols.length > 0 ? (
+          <ul className="stock-symbol-list" aria-label="Tracked stock symbols">
+            {symbols.map((symbol) => (
+              <li key={symbol}>
+                <span><TrendingUp size={14} /><strong>{symbol}</strong></span>
+                <button
+                  type="button"
+                  className="icon-button subtle"
+                  onClick={() => setSymbols((current) => current.filter((item) => item !== symbol))}
+                  disabled={busy}
+                  title={`Remove ${symbol}`}
+                  aria-label={`Remove ${symbol}`}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="stock-symbol-empty">No symbols selected. The footer will show a setup message.</p>}
+        <div className="settings-button-row">
+          <button type="button" className="primary-button compact" onClick={() => void save()} disabled={busy}>
+            {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save ticker list
+          </button>
+        </div>
+      </div>
+      <dl className="settings-definitions">
+        <div><dt>Refresh interval</dt><dd>60 seconds</dd></div>
+        <div><dt>Settings file</dt><dd><code>{settings.stocks.settingsPath}</code></dd></div>
       </dl>
     </>
   );

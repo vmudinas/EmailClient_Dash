@@ -996,6 +996,11 @@ export interface AdminSettings {
     settingsPath: string;
     configurationError: string | null;
   };
+  stocks: {
+    symbols: string[];
+    settingsPath: string;
+    configurationError: string | null;
+  };
   ai: {
     activeProvider: AiProviderId;
     enabled: boolean;
@@ -1006,6 +1011,18 @@ export interface AdminSettings {
     usage: AiUsageSummary;
     providers: Record<AiProviderId, AiProviderSettings>;
   };
+}
+
+export interface StockQuote {
+  symbol: string;
+  name: string | null;
+  price: number | null;
+  currency: string | null;
+  change: number | null;
+  changePercent: number | null;
+  marketState: string | null;
+  quotedAt: string;
+  error: string | null;
 }
 
 export interface AiProviderSettings {
@@ -1153,6 +1170,19 @@ export const draftSettingsPatchSchema = z.object({
 }).strict();
 
 export type DraftSettingsPatch = z.infer<typeof draftSettingsPatchSchema>;
+
+const stockSymbolSchema = z.string()
+  .trim()
+  .toUpperCase()
+  .min(1)
+  .max(20)
+  .regex(/^[A-Z0-9.^=_-]+$/, "Use a valid ticker symbol");
+
+export const stockSettingsPatchSchema = z.object({
+  symbols: z.array(stockSymbolSchema).max(20).transform((symbols) => [...new Set(symbols)])
+}).strict();
+
+export type StockSettingsPatch = z.infer<typeof stockSettingsPatchSchema>;
 
 export const uploadSessionCreateSchema = z.object({
   filename: z.string().trim().min(1).max(240),
