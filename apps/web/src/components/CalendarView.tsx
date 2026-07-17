@@ -10,6 +10,8 @@ import {
   ExternalLink,
   HelpCircle,
   KeyRound,
+  ListFilter,
+  ListTodo,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -28,6 +30,7 @@ import type {
   TodoItem
 } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
+import { useMediaQuery } from "../lib/use-media-query.js";
 
 const HOUR_HEIGHT = 64;
 const CALENDAR_SELECTION_KEY = "archive-mail.calendar.sources.v1";
@@ -68,6 +71,7 @@ interface DaySummary {
 }
 
 export function CalendarView({ api, connections, onReauthorize, onError }: CalendarViewProps) {
+  const mobile = useMediaQuery("(max-width: 800px)");
   const [date, setDate] = useState(todayIso());
   const [month, setMonth] = useState(todayIso().slice(0, 7));
   const [sources, setSources] = useState<CalendarSource[]>([]);
@@ -82,6 +86,7 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
   const [draft, setDraft] = useState<EventDraft | null>(null);
   const [eventBusy, setEventBusy] = useState(false);
   const [monthSummary, setMonthSummary] = useState<Map<string, DaySummary>>(new Map());
+  const [mobilePanel, setMobilePanel] = useState<"calendars" | "todos" | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
 
   const selectedSources = useMemo(
@@ -275,6 +280,10 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
   };
 
   const allDayEvents = events.filter((event) => event.allDay);
+  const agendaEvents = [...events].sort((left, right) => {
+    if (left.allDay !== right.allDay) return left.allDay ? -1 : 1;
+    return left.startAt.localeCompare(right.startAt);
+  });
   const positionedEvents = positionTimedEvents(events.filter((event) => !event.allDay), date);
   const currentMinute = date === todayIso() ? minutesIntoDay(new Date()) : null;
   const missingCalendarConnections = connections.filter((connection) => !connection.canManageCalendar);
@@ -282,13 +291,16 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
   const needsAuthorization = !hasAuthorizedGoogleCalendar && missingCalendarConnections.length > 0;
 
   return (
-    <div className="calendar-workspace">
+    <div className={`calendar-workspace mobile-calendar-panel-${mobilePanel ?? "none"}`}>
       <aside className="calendar-sidebar">
         <div className="calendar-sidebar-heading">
           <div><CalendarDays size={17} /><strong>Calendars</strong></div>
-          <button className="icon-button" onClick={() => void loadSources()} disabled={sourcesLoading} title="Refresh calendars" aria-label="Refresh calendars">
-            <RefreshCw className={sourcesLoading ? "spin" : ""} size={15} />
-          </button>
+          <div className="calendar-sidebar-actions">
+            <button className="icon-button" onClick={() => void loadSources()} disabled={sourcesLoading} title="Refresh calendars" aria-label="Refresh calendars">
+              <RefreshCw className={sourcesLoading ? "spin" : ""} size={15} />
+            </button>
+            <button className="icon-button mobile-only" onClick={() => setMobilePanel(null)} aria-label="Close calendar filters"><X size={17} /></button>
+          </div>
         </div>
         <div className="calendar-selection-actions">
           <button className="text-button" onClick={() => setSelectedSourceIds(new Set(sources.map((source) => source.id)))}>Select all</button>
@@ -317,7 +329,7 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
             </section>
           ))}
         </div>
-        <MiniMonth month={month} selectedDate={date} monthSummary={monthSummary} onMonthChange={setMonth} onSelectDate={setDate} />
+        <MiniMonth month={month} selectedDate={date} monthSummary={monthSummary} onMonthChange={setMonth} onSelectDate={(value) => { setDate(value); setMobilePanel(null); }} />
       </aside>
 
       <section className="calendar-day-panel">
@@ -331,6 +343,12 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
           <button className="primary-button compact" onClick={() => openNewEvent()} disabled={!writableSource} title={writableSource ? "Create event" : "Select a writable calendar"}>
             <Plus size={16} /> New event
           </button>
+          <div className="mobile-calendar-tools mobile-only">
+            <button className="icon-button" onClick={() => setMobilePanel("calendars")} aria-label="Choose calendars and date"><ListFilter size={18} /></button>
+            <button className="icon-button" onClick={() => setMobilePanel("todos")} aria-label="Open to-do list">
+              <ListTodo size={18} />{todos.filter((todo) => !todo.completed).length > 0 && <span>{todos.filter((todo) => !todo.completed).length}</span>}
+            </button>
+          </div>
         </header>
 
         {sources.length === 0 && !sourcesLoading && (
@@ -356,7 +374,7 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
             )}
           </div>
         )}
-        <div className="calendar-all-day">
+        {!mobile && <><div className="calendar-all-day">
           <span>all-day</span>
           <div className="calendar-all-day-events">
             {allDayEvents.map((event) => (
@@ -409,11 +427,38 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
               {!loadingEvents && selectedSources.length > 0 && events.length === 0 && <div className="calendar-timeline-message">No events on this day.</div>}
             </div>
           </div>
-        </div>
+        </div></>}
+        {mobile && <section className="calendar-mobile-agenda" aria-label={`Agenda for ${formatDayHeading(date)}`}>
+          {loadingEvents ? (
+            <div className="calendar-loading"><LoaderCircle className="spin" size={20} /> Loading events</div>
+          ) : selectedSources.length === 0 ? (
+            <div className="calendar-empty">Choose one or more calendars.</div>
+          ) : agendaEvents.length === 0 ? (
+            <div className="calendar-empty">No events on this day.</div>
+          ) : agendaEvents.map((event) => (
+            <button
+              className="calendar-agenda-card"
+              key={`${event.sourceId}:${event.id}`}
+              onClick={() => setDraft(draftFromEvent(event, sourceById.get(event.sourceId ?? "")))}
+              aria-label={`View details for ${event.title}`}
+            >
+              <span className="calendar-agenda-color" style={{ backgroundColor: event.calendarColor || "#176747" }} />
+              <span className="calendar-agenda-time">{event.allDay ? "All day" : formatEventTime(event)}</span>
+              <span className="calendar-agenda-copy">
+                <strong>{event.title}</strong>
+                <small>{[event.calendarName, event.location].filter(Boolean).join(" · ")}</small>
+              </span>
+              <ChevronRight size={17} />
+            </button>
+          ))}
+        </section>}
       </section>
 
       <aside className="todo-panel">
-        <h3>To-do <span className="gmail-count">{todos.filter((todo) => !todo.completed).length}</span></h3>
+        <div className="todo-panel-heading">
+          <h3>To-do <span className="gmail-count">{todos.filter((todo) => !todo.completed).length}</span></h3>
+          <button className="icon-button mobile-only" onClick={() => setMobilePanel(null)} aria-label="Close to-do list"><X size={17} /></button>
+        </div>
         <p className="todo-hint">Local only — not synced to Gmail or Calendar.</p>
         <form className="todo-add" onSubmit={(event) => { event.preventDefault(); void addTodo(); }}>
           <input value={newTodoText} onChange={(event) => setNewTodoText(event.target.value)} placeholder="Add a to-do for this day" disabled={todoBusy} />

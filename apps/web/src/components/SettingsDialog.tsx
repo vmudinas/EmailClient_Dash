@@ -14,6 +14,7 @@ import {
   CalendarDays,
   CalendarClock,
   CheckCircle2,
+  ChevronRight,
   CloudDownload,
   Database,
   Download,
@@ -123,6 +124,7 @@ export function SettingsDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(true);
 
   const loadAdminData = useCallback(async () => {
     if (!api) return;
@@ -143,7 +145,10 @@ export function SettingsDialog({
   }, [api]);
 
   useEffect(() => {
-    if (open) void loadAdminData();
+    if (open) {
+      setMobileMenuOpen(true);
+      void loadAdminData();
+    }
   }, [open, loadAdminData]);
 
   if (!open) return null;
@@ -155,7 +160,7 @@ export function SettingsDialog({
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`dialog settings-dialog ${mobileMenuOpen ? "mobile-settings-menu-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
           <div><Settings size={20} /><h2 id="settings-title">Admin settings</h2></div>
           <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
@@ -165,13 +170,20 @@ export function SettingsDialog({
             {MENU.map((item) => {
               const Icon = item.icon;
               return (
-                <button key={item.id} className={section === item.id ? "selected" : ""} onClick={() => { setSection(item.id); setError(""); setNotice(""); }}>
-                  <Icon size={17} /><span>{item.label}</span>
+                <button key={item.id} className={section === item.id ? "selected" : ""} onClick={() => { setSection(item.id); setMobileMenuOpen(false); setError(""); setNotice(""); }}>
+                  <Icon size={17} /><span>{item.label}</span><ChevronRight className="settings-menu-chevron" size={16} />
                 </button>
               );
             })}
           </nav>
           <article className="settings-content">
+            <button className="settings-mobile-section-trigger mobile-only" onClick={() => setMobileMenuOpen(true)}>
+              {(() => {
+                const selectedItem = MENU.find((item) => item.id === section) ?? MENU[0]!;
+                const Icon = selectedItem.icon;
+                return <><Icon size={18} /><span>{selectedItem.label}</span><ChevronRight size={17} /></>;
+              })()}
+            </button>
             {loading && !settings ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
               <>
                 {section === "database" && settings && (

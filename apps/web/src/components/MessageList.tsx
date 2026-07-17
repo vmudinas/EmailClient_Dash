@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { useState } from "react";
+import { useEffect, useRef, useState, type TouchEvent } from "react";
 import {
   Archive,
   ArrowLeft,
@@ -12,6 +12,8 @@ import {
   Inbox,
   Info,
   LoaderCircle,
+  Mail,
+  MailOpen,
   Paperclip,
   PackageSearch,
   ReceiptText,
@@ -62,6 +64,10 @@ interface MessageListProps {
   onBulkDelete(): void;
   onBulkArchive(): void;
   onBulkSpam(): void;
+  actionBusy: boolean;
+  onArchive(message: MessageSummary): void;
+  onSpam(message: MessageSummary): void;
+  onToggleRead(message: MessageSummary): void;
 }
 
 const CATEGORY_TABS: Array<{
@@ -99,7 +105,11 @@ export function MessageList({
   bulkBusy,
   onBulkDelete,
   onBulkArchive,
-  onBulkSpam
+  onBulkSpam,
+  actionBusy,
+  onArchive,
+  onSpam,
+  onToggleRead
 }: MessageListProps) {
   const [draggingMessageId, setDraggingMessageId] = useState<string | null>(null);
   const selectedCount = selectedIds.size;
@@ -171,89 +181,29 @@ export function MessageList({
 
       <div className="message-list" role="listbox" aria-label={title}>
         {items.map(({ message, hit }) => (
-          <div
-            className={`message-row ${readOnly ? "" : "selectable"} ${selectedMessageId === message.id ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${message.hasCalendarEvent ? "calendar-linked" : message.hasPendingFollowUp ? "follow-up-linked" : message.hasAiAnalysis ? "analyzed" : ""} ${draggingMessageId === message.id ? "dragging" : ""} ${selectedIds.has(message.id) ? "checked" : ""}`}
+          <MessageRow
             key={message.id}
-            role="option"
-            tabIndex={0}
-            aria-selected={selectedMessageId === message.id}
-            draggable={!readOnly}
-            onClick={() => onSelect(message)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onSelect(message);
-              }
-            }}
-            onDragStart={(event) => {
-              if (readOnly) return;
-              event.dataTransfer.effectAllowed = "move";
-              event.dataTransfer.setData("text/plain", message.id);
-              setDraggingMessageId(message.id);
-              onDragStart(message);
+            message={message}
+            hit={hit}
+            readOnly={readOnly}
+            selected={selectedMessageId === message.id}
+            checked={selectedIds.has(message.id)}
+            dragging={draggingMessageId === message.id}
+            actionBusy={actionBusy}
+            onSelect={onSelect}
+            onToggleSelect={onToggleSelect}
+            onArchive={onArchive}
+            onSpam={onSpam}
+            onToggleRead={onToggleRead}
+            onDragStart={(target) => {
+              setDraggingMessageId(target.id);
+              onDragStart(target);
             }}
             onDragEnd={() => {
               setDraggingMessageId(null);
               onDragEnd();
             }}
-          >
-            {!readOnly && (
-              <input
-                type="checkbox"
-                className="message-row-checkbox"
-                checked={selectedIds.has(message.id)}
-                onClick={(event) => event.stopPropagation()}
-                onChange={() => onToggleSelect(message.id)}
-                aria-label={`Select ${message.subject || "message"}`}
-              />
-            )}
-            <span className="avatar" aria-hidden="true">{initials(message.sender)}</span>
-            <span className="message-row-content">
-              <span className="message-row-top">
-                <strong>{displayAddress(message.sender)}</strong>
-                <span className="message-row-time">
-                  <time>{formatDate(message.receivedAt ?? message.sentAt)}</time>
-                  <time className="message-row-clock">{formatTimeOfDay(message.receivedAt ?? message.sentAt)}</time>
-                </span>
-              </span>
-              <span className="message-subject-line">
-                <span>{message.subject}</span>
-                {message.state.isStarred && <Star className="starred" size={14} fill="currentColor" />}
-              </span>
-              {hit ? (
-                <span
-                  className="message-preview search-snippet"
-                  dangerouslySetInnerHTML={{
-                    __html: DOMPurify.sanitize(hit.snippet, { ALLOWED_TAGS: ["mark"] })
-                  }}
-                />
-              ) : (
-                <span className="message-preview">{message.preview}</span>
-              )}
-              <span className="message-row-footer">
-                <span className="folder-chip">{message.folderPath.split("/").at(-1)}</span>
-                {message.hasCalendarEvent ? (
-                  <span className="message-status-chip calendar"><CalendarClock size={11} />Event</span>
-                ) : message.hasPendingFollowUp ? (
-                  <span className="message-status-chip follow-up"><BellRing size={11} />Follow up</span>
-                ) : message.hasAiAnalysis ? (
-                  <span className="message-status-chip analyzed"><BrainCircuit size={11} />Analyzed</span>
-                ) : null}
-                {message.hasReply && (
-                  <span className="message-status-chip replied"><Reply size={11} />Replied</span>
-                )}
-                {hit?.matchedIn === "attachment" && (
-                  <span className="attachment-hit">
-                    <Paperclip size={12} />
-                    {hit.matchedAttachmentName}
-                  </span>
-                )}
-                {message.attachmentCount > 0 && !hit && (
-                  <span className="attachment-count"><Paperclip size={12} />{message.attachmentCount}</span>
-                )}
-              </span>
-            </span>
-          </div>
+          />
         ))}
 
         {!loading && items.length === 0 && (
@@ -283,5 +233,195 @@ export function MessageList({
         )}
       </div>
     </section>
+  );
+}
+
+function MessageRow({
+  message,
+  hit,
+  readOnly,
+  selected,
+  checked,
+  dragging,
+  actionBusy,
+  onSelect,
+  onToggleSelect,
+  onArchive,
+  onSpam,
+  onToggleRead,
+  onDragStart,
+  onDragEnd
+}: {
+  message: MessageSummary;
+  hit?: SearchHit;
+  readOnly: boolean;
+  selected: boolean;
+  checked: boolean;
+  dragging: boolean;
+  actionBusy: boolean;
+  onSelect(message: MessageSummary): void;
+  onToggleSelect(messageId: string): void;
+  onArchive(message: MessageSummary): void;
+  onSpam(message: MessageSummary): void;
+  onToggleRead(message: MessageSummary): void;
+  onDragStart(message: MessageSummary): void;
+  onDragEnd(): void;
+}) {
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const [swiping, setSwiping] = useState(false);
+  const touchStartRef = useRef<{ x: number; y: number; offset: number } | null>(null);
+  const longPressRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
+
+  const clearLongPress = () => {
+    if (longPressRef.current !== null) window.clearTimeout(longPressRef.current);
+    longPressRef.current = null;
+  };
+
+  useEffect(() => () => clearLongPress(), []);
+
+  const handleTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    if (readOnly || event.touches.length !== 1) return;
+    const touch = event.touches[0]!;
+    touchStartRef.current = { x: touch.clientX, y: touch.clientY, offset: swipeOffset };
+    setSwiping(true);
+    longPressRef.current = window.setTimeout(() => {
+      suppressClickRef.current = true;
+      setSwipeOffset(0);
+      onToggleSelect(message.id);
+    }, 550);
+  };
+
+  const handleTouchMove = (event: TouchEvent<HTMLDivElement>) => {
+    const start = touchStartRef.current;
+    if (!start || event.touches.length !== 1) return;
+    const touch = event.touches[0]!;
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    if (Math.abs(deltaX) > 8 || Math.abs(deltaY) > 8) clearLongPress();
+    if (Math.abs(deltaY) > Math.abs(deltaX)) return;
+    setSwipeOffset(Math.max(-76, Math.min(120, start.offset + deltaX)));
+  };
+
+  const handleTouchEnd = () => {
+    clearLongPress();
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
+    setSwiping(false);
+    if (!start) return;
+    const moved = Math.abs(swipeOffset - start.offset);
+    if (moved > 10) suppressClickRef.current = true;
+    setSwipeOffset(swipeOffset > 48 ? 120 : swipeOffset < -42 ? -76 : 0);
+  };
+
+  const runSwipeAction = (action: (target: MessageSummary) => void) => {
+    setSwipeOffset(0);
+    action(message);
+  };
+
+  return (
+    <div className={`message-swipe-shell ${swipeOffset === 0 ? "" : "revealed"}`}>
+      {!readOnly && (
+        <>
+          <div className="message-swipe-actions start" aria-hidden={swipeOffset <= 0}>
+            <button tabIndex={swipeOffset > 0 ? 0 : -1} disabled={actionBusy} onClick={() => runSwipeAction(onArchive)} aria-label={`Archive ${message.subject}`}>
+              <Archive size={19} /><span>Archive</span>
+            </button>
+            <button tabIndex={swipeOffset > 0 ? 0 : -1} disabled={actionBusy} onClick={() => runSwipeAction(onToggleRead)} aria-label={`${message.state.isRead ? "Mark unread" : "Mark read"}: ${message.subject}`}>
+              {message.state.isRead ? <Mail size={19} /> : <MailOpen size={19} />}<span>{message.state.isRead ? "Unread" : "Read"}</span>
+            </button>
+          </div>
+          <div className="message-swipe-actions end" aria-hidden={swipeOffset >= 0}>
+            <button tabIndex={swipeOffset < 0 ? 0 : -1} disabled={actionBusy} onClick={() => runSwipeAction(onSpam)} aria-label={`Mark sender as spam: ${message.subject}`}>
+              <ShieldAlert size={19} /><span>Spam</span>
+            </button>
+          </div>
+        </>
+      )}
+      <div
+        className={`message-row ${readOnly ? "" : "selectable"} ${selected ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${message.hasCalendarEvent ? "calendar-linked" : message.hasPendingFollowUp ? "follow-up-linked" : message.hasAiAnalysis ? "analyzed" : ""} ${dragging ? "dragging" : ""} ${checked ? "checked" : ""} ${swiping ? "swiping" : ""}`}
+        role="option"
+        tabIndex={0}
+        aria-selected={selected}
+        draggable={!readOnly}
+        style={{ transform: `translateX(${swipeOffset}px)` }}
+        onClick={() => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
+          if (swipeOffset !== 0) {
+            setSwipeOffset(0);
+            return;
+          }
+          onSelect(message);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(message);
+          }
+        }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={handleTouchEnd}
+        onDragStart={(event) => {
+          if (readOnly) return;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", message.id);
+          onDragStart(message);
+        }}
+        onDragEnd={onDragEnd}
+      >
+        {!readOnly && (
+          <input
+            type="checkbox"
+            className="message-row-checkbox"
+            checked={checked}
+            onClick={(event) => event.stopPropagation()}
+            onChange={() => onToggleSelect(message.id)}
+            aria-label={`Select ${message.subject || "message"}`}
+          />
+        )}
+        <span className="avatar" aria-hidden="true">{initials(message.sender)}</span>
+        <span className="message-row-content">
+          <span className="message-row-top">
+            <strong>{displayAddress(message.sender)}</strong>
+            <span className="message-row-time">
+              <time>{formatDate(message.receivedAt ?? message.sentAt)}</time>
+              <time className="message-row-clock">{formatTimeOfDay(message.receivedAt ?? message.sentAt)}</time>
+            </span>
+          </span>
+          <span className="message-subject-line">
+            <span>{message.subject}</span>
+            {message.state.isStarred && <Star className="starred" size={14} fill="currentColor" />}
+          </span>
+          {hit ? (
+            <span
+              className="message-preview search-snippet"
+              dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(hit.snippet, { ALLOWED_TAGS: ["mark"] }) }}
+            />
+          ) : <span className="message-preview">{message.preview}</span>}
+          <span className="message-row-footer">
+            <span className="folder-chip">{message.folderPath.split("/").at(-1)}</span>
+            {message.hasCalendarEvent ? (
+              <span className="message-status-chip calendar"><CalendarClock size={11} />Event</span>
+            ) : message.hasPendingFollowUp ? (
+              <span className="message-status-chip follow-up"><BellRing size={11} />Follow up</span>
+            ) : message.hasAiAnalysis ? (
+              <span className="message-status-chip analyzed"><BrainCircuit size={11} />Analyzed</span>
+            ) : null}
+            {message.hasReply && <span className="message-status-chip replied"><Reply size={11} />Replied</span>}
+            {hit?.matchedIn === "attachment" && (
+              <span className="attachment-hit"><Paperclip size={12} />{hit.matchedAttachmentName}</span>
+            )}
+            {message.attachmentCount > 0 && !hit && (
+              <span className="attachment-count"><Paperclip size={12} />{message.attachmentCount}</span>
+            )}
+          </span>
+        </span>
+      </div>
+    </div>
   );
 }

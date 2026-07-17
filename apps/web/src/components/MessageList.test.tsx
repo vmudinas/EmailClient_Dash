@@ -27,7 +27,11 @@ const BULK_SELECTION_PROPS = {
   bulkBusy: false,
   onBulkDelete: vi.fn(),
   onBulkArchive: vi.fn(),
-  onBulkSpam: vi.fn()
+  onBulkSpam: vi.fn(),
+  actionBusy: false,
+  onArchive: vi.fn(),
+  onSpam: vi.fn(),
+  onToggleRead: vi.fn()
 };
 
 afterEach(cleanup);
@@ -152,6 +156,37 @@ describe("MessageList drag and drop", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 5 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("mail_tracking");
     expect(screen.getByText("No primary messages")).toBeTruthy();
+  });
+
+  it("reveals touch actions and archives from the message row", () => {
+    const onArchive = vi.fn();
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+        onArchive={onArchive}
+      />
+    );
+
+    const row = screen.getByRole("option");
+    fireEvent.touchStart(row, { touches: [{ clientX: 12, clientY: 20 }] });
+    fireEvent.touchMove(row, { touches: [{ clientX: 100, clientY: 22 }] });
+    fireEvent.touchEnd(row);
+    expect(row.getAttribute("style")).toContain("translateX(120px)");
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive Drag this message" }));
+    expect(onArchive).toHaveBeenCalledWith(MESSAGE);
   });
 });
 

@@ -51,6 +51,7 @@ import type {
   MessageThread
 } from "@email-client/shared";
 import { displayAddress, formatBytes, formatDate, formatTimeOfDay, initials } from "../lib/format.js";
+import { useMediaQuery } from "../lib/use-media-query.js";
 import type { ApiClient } from "../lib/api.js";
 import { MessageActionDialog } from "./MessageActionDialog.js";
 import { AiDraftReplyDialog } from "./AiDraftReplyDialog.js";
@@ -1027,7 +1028,7 @@ function EmailFrame({
   const [mobileHtml, setMobileHtml] = useState("");
   const [showRemoteImages, setShowRemoteImages] = useState(false);
   const [hasBlockedImages, setHasBlockedImages] = useState(false);
-  const mobile = window.matchMedia("(max-width: 800px)").matches;
+  const mobile = useMediaQuery("(max-width: 800px)");
 
   useEffect(() => {
     let active = true;

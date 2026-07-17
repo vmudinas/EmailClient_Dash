@@ -954,6 +954,25 @@ describe("SettingsDialog", () => {
     expect(screen.getByText(/urgent: 1/)).toBeTruthy();
     expect(screen.getByText("Finance")).toBeTruthy();
   });
+
+  it("uses screen-level section navigation for mobile settings", async () => {
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS)
+    } as unknown as ApiClient;
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
+
+    const dialog = screen.getByRole("dialog", { name: "Admin settings" });
+    expect(dialog.className).toContain("mobile-settings-menu-open");
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    expect(dialog.className).not.toContain("mobile-settings-menu-open");
+    expect(screen.getByRole("heading", { name: "Drafts" })).toBeTruthy();
+
+    fireEvent.click(dialog.querySelector(".settings-mobile-section-trigger")!);
+    expect(dialog.className).toContain("mobile-settings-menu-open");
+  });
 });
 
 const USERS: UserSummary[] = [{

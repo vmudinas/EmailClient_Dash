@@ -4,7 +4,12 @@ import type { CalendarEvent, CalendarSource, GmailConnection, TodoItem } from "@
 import type { ApiClient } from "../lib/api.js";
 import { CalendarView } from "./CalendarView.js";
 
-afterEach(cleanup);
+const desktopMatchMedia = window.matchMedia;
+
+afterEach(() => {
+  cleanup();
+  window.matchMedia = desktopMatchMedia;
+});
 beforeEach(() => window.localStorage.clear());
 
 const CONNECTION: GmailConnection = {
@@ -214,7 +219,42 @@ describe("CalendarView", () => {
       expect.any(String)
     ));
   });
+
+  it("uses an agenda and sheet controls on mobile screens", async () => {
+    window.matchMedia = mobileMatchMedia;
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([EVENT]),
+      listTodos: vi.fn().mockResolvedValue([TODO])
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    const agenda = await waitFor(() => screen.getByLabelText(/Agenda for/));
+    expect(screen.queryByText("9 AM")).toBeNull();
+    expect(await screen.findByRole("button", { name: "View details for Standup" })).toBeTruthy();
+    const workspace = agenda.closest(".calendar-workspace")!;
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose calendars and date" }));
+    expect(workspace.className).toContain("mobile-calendar-panel-calendars");
+    fireEvent.click(screen.getByRole("button", { name: "Close calendar filters" }));
+    expect(workspace.className).toContain("mobile-calendar-panel-none");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open to-do list" }));
+    expect(workspace.className).toContain("mobile-calendar-panel-todos");
+  });
 });
+
+const mobileMatchMedia = ((query: string): MediaQueryList => ({
+  matches: query.includes("max-width: 800px"),
+  media: query,
+  onchange: null,
+  addListener: () => {},
+  removeListener: () => {},
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  dispatchEvent: () => false
+})) as typeof window.matchMedia;
 
 function todayIso(): string {
   const now = new Date();

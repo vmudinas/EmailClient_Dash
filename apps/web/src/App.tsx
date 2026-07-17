@@ -21,6 +21,7 @@ import {
   Mail,
   MailPlus,
   MonitorSmartphone,
+  MoreHorizontal,
   RefreshCw,
   Search,
   Settings as SettingsIcon,
@@ -152,6 +153,7 @@ export function App() {
   const [startupError, setStartupError] = useState("");
   const [notice, setNotice] = useState("");
   const [mobileView, setMobileView] = useState<MobileView>("folders");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"mail" | "calendar">("mail");
   const [importOpen, setImportOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -1192,7 +1194,7 @@ export function App() {
     }
   };
 
-  const archiveMessage = async (target: MessageDetail) => {
+  const archiveMessage = async (target: MessageSummary) => {
     if (!api || readOnly) return;
     setMoveBusy(true);
     try {
@@ -1226,7 +1228,7 @@ export function App() {
     }
   };
 
-  const spamSender = async (target: MessageDetail) => {
+  const spamSender = async (target: MessageSummary) => {
     if (!api || readOnly) return;
     const senderAddress = target.sender.address.trim();
     if (!senderAddress) {
@@ -1255,6 +1257,20 @@ export function App() {
       showError(error instanceof Error ? error.message : "Sender could not be marked as spam");
     } finally {
       setSpamBusy(false);
+    }
+  };
+
+  const toggleListMessageRead = async (target: MessageSummary) => {
+    if (!api || readOnly) return;
+    try {
+      const state = await api.updateMessageState(target.id, { isRead: !target.state.isRead });
+      setItems((current) => current.map((entry) => entry.message.id === target.id
+        ? { ...entry, message: { ...entry.message, state } }
+        : entry));
+      setMessage((current) => current?.id === target.id ? { ...current, state } : current);
+      await refreshMailboxCounts();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Message state could not be updated");
     }
   };
 
@@ -1710,6 +1726,10 @@ export function App() {
               onBulkDelete={() => void bulkMove("trash")}
               onBulkArchive={() => void bulkMove("archived")}
               onBulkSpam={() => void bulkMove("spam")}
+              actionBusy={moveBusy || spamBusy}
+              onArchive={(target) => void archiveMessage(target)}
+              onSpam={(target) => void spamSender(target)}
+              onToggleRead={(target) => void toggleListMessageRead(target)}
             />
             <MessageReader
               key={message?.id ?? "empty-reader"}
@@ -1752,16 +1772,59 @@ export function App() {
       />
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
-        <button className={mobileView === "folders" ? "selected" : ""} onClick={() => setMobileView("folders")}>
+        <button className={viewMode === "mail" && mobileView === "folders" ? "selected" : ""} onClick={() => {
+          setMobileMenuOpen(false);
+          setViewMode("mail");
+          setMobileView("folders");
+        }}>
           <FolderOpen size={19} /><span>Folders</span>
         </button>
-        <button className={mobileView === "messages" ? "selected" : ""} onClick={closeMessage}>
-          <List size={19} /><span>Messages</span>
+        <button className={viewMode === "mail" && mobileView !== "folders" ? "selected" : ""} onClick={() => {
+          setMobileMenuOpen(false);
+          setViewMode("mail");
+          if (selectedMessageId) closeMessage(); else setMobileView("messages");
+        }}>
+          <List size={19} /><span>Mail</span>
         </button>
-        <button className={mobileView === "reader" ? "selected" : ""} onClick={() => setMobileView("reader")} disabled={!message}>
-          <Mail size={19} /><span>Reader</span>
+        <button className="mobile-compose-nav" onClick={() => openCompose()} disabled={readOnly}>
+          <span className="mobile-compose-icon"><MailPlus size={21} /></span><span>Compose</span>
+        </button>
+        <button className={viewMode === "calendar" ? "selected" : ""} onClick={() => {
+          setMobileMenuOpen(false);
+          setViewMode("calendar");
+        }}>
+          <CalendarDays size={19} /><span>Calendar</span>
+        </button>
+        <button className={mobileMenuOpen ? "selected" : ""} onClick={() => setMobileMenuOpen((open) => !open)} aria-expanded={mobileMenuOpen}>
+          <MoreHorizontal size={20} /><span>More</span>
+          {(reviewQueue?.totalItems ?? 0) > 0 && <span className="mobile-nav-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
         </button>
       </nav>
+
+      {mobileMenuOpen && (
+        <div className="mobile-action-backdrop" role="presentation" onMouseDown={() => setMobileMenuOpen(false)}>
+          <section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="More actions" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <strong>{session.user.displayName}</strong>
+                <span>{session.user.username} · {session.role}</span>
+              </div>
+              <button className="icon-button" onClick={() => setMobileMenuOpen(false)} aria-label="Close more actions"><X size={19} /></button>
+            </header>
+            <div className="mobile-action-grid">
+              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openDrafts(); }}><FileEdit size={20} /><span>Drafts</span></button>}
+              <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>
+              <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>
+              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
+              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>Admin</span></button>}
+              <button onClick={() => { setMobileMenuOpen(false); setGuideOpen(true); }}><BookOpen size={20} /><span>Guide</span></button>
+              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openDiagnostics(); }}><Activity size={20} /><span>Activity</span>{pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
+              {electron && isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
+            </div>
+            <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>
+          </section>
+        </div>
+      )}
 
       <ImportDialog
         open={importOpen}

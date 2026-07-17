@@ -83,6 +83,14 @@ Electron passes the selected local path directly to the import service, so it do
 
 Archive and folder moves reorganize the local Archive Mail copy only by default. Admins can opt in to **Mirror mailbox actions to Gmail** so archive, move, Spam, Trash, read/unread, and star actions run in Gmail first and update the local copy only after Gmail succeeds.
 
+## Mobile layout
+
+At widths up to 800px, Archive Mail uses separate folder, message, and reader screens with a five-item bottom navigation for folders, mail, compose, calendar, and additional actions. Swipe a writable message right to reveal Archive and Read/Unread, swipe left to reveal the sender-level Spam action, or press and hold a row to enter bulk selection. Inbox category tabs scroll horizontally.
+
+Compose, review, import, and admin dialogs use the full viewport on phones. Calendar switches to an agenda view; calendar selection, the highlighted monthly date picker, and the local to-do list open as touch-friendly sheets. Admin settings use section-level navigation instead of the desktop side menu. On narrow phones the news ticker is hidden so the message area retains usable height; the stock ticker remains visible.
+
+The desktop QR/LAN sharing flow is still intentionally read-only. Making archive, compose, calendar, or admin mutations from a separate phone requires a future authenticated HTTPS deployment rather than weakening the paired viewer role.
+
 ## Login, users, and audit
 
 Archive Mail requires a named user and PIN on every service/application launch. PINs are stored with a random salt and scrypt hash. Session tokens are stored only as SHA-256 hashes, bound to the login IP address, and revoked when the service starts, a PIN changes, or an administrator changes that user.
