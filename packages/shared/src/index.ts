@@ -250,8 +250,32 @@ export interface MessageAnalysis {
   model: string;
   promptVersion: string;
   contentHash: string;
+  contextHash?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AiRelatedAnalysis {
+  messageId: string;
+  subject: string;
+  sender: EmailAddress;
+  sentAt: string | null;
+  receivedAt: string | null;
+  summary: string;
+  categories: string[];
+  priority: AiPriority;
+  actionRequired: boolean;
+  actionSummary: string | null;
+  spamProbability: number;
+  phishingProbability: number;
+  draftRecommended: boolean;
+  confidence: number;
+  analyzedAt: string;
+}
+
+export interface AiRelatedAnalysisContext {
+  sameThread: AiRelatedAnalysis[];
+  sameSender: AiRelatedAnalysis[];
 }
 
 export interface AiAnalysisStart {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EmailDatabase } from "../storage/database.js";
-import { AiProviderError, type AiProvider } from "./ai-provider.js";
+import { AiProviderError, type AiConversationContext, type AiProvider } from "./ai-provider.js";
 import { AiConfigurationError, AiService } from "./ai-service.js";
 import { AiSettingsManager } from "./ai-settings.js";
 
@@ -71,6 +71,114 @@ describe("AiService", () => {
     expect(cached.job.id).toBe(started.job.id);
     expect(cached.analysis?.summary).toContain("contract review");
     expect(analyze).toHaveBeenCalledTimes(2);
+    await service.close();
+    database.close();
+  });
+
+  it("groups prior thread and sender analyses and refreshes when that context changes", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Related analysis context",
+      sourceType: "mbox",
+      fingerprint: "related-analysis-context",
+      sizeBytes: 100
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const insertContextMessage = (
+      sourceKey: string,
+      subject: string,
+      receivedAt: string,
+      headers: Record<string, string> = {}
+    ) => database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey,
+      internetMessageId: `<${sourceKey}@example.test>`,
+      subject,
+      sender: { name: "Customer", address: "customer@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: receivedAt,
+      receivedAt,
+      bodyText: `${subject} body`,
+      bodyHtml: null,
+      headers: { "message-id": `<${sourceKey}@example.test>`, ...headers },
+      sizeBytes: 40,
+      attachments: []
+    });
+    const senderHistoryId = insertContextMessage(
+      "sender-history",
+      "Earlier contract request",
+      "2026-07-10T12:00:00.000Z"
+    );
+    const threadRootId = insertContextMessage(
+      "thread-root",
+      "Project status",
+      "2026-07-11T12:00:00.000Z"
+    );
+    const selectedMessageId = insertContextMessage(
+      "thread-reply",
+      "Re: Project status",
+      "2026-07-12T12:00:00.000Z",
+      { "in-reply-to": "<thread-root@example.test>" }
+    );
+    database.completeArchive(archive.id, 0);
+    saveAnalysis(database, senderHistoryId, "The customer previously requested a contract review.");
+    saveAnalysis(database, threadRootId, "The customer opened the project status conversation.");
+
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "context-analysis-model",
+      dailyRequestLimit: 10,
+      monthlyRequestLimit: 100
+    });
+    const analyze = vi.fn().mockResolvedValue({
+      analysis: {
+        summary: "The customer is following up on project status.",
+        categories: ["Customer", "Project"],
+        priority: "normal",
+        actionRequired: true,
+        actionSummary: "Reply with the current project status",
+        spamProbability: 0.01,
+        phishingProbability: 0.01,
+        draftRecommended: true,
+        confidence: 0.95,
+        signals: ["Continuation of an existing customer conversation"]
+      },
+      usage: { inputTokens: 180, outputTokens: 60 }
+    });
+    const provider: AiProvider = { analyze, testConnection: vi.fn().mockResolvedValue(undefined) };
+    const service = new AiService(database, settings, () => provider);
+
+    const started = service.startAnalysis(selectedMessageId);
+    await waitForJob(database, started.job.id, "completed");
+    const firstContext = analyze.mock.calls[0]?.[3] as AiConversationContext;
+    expect(firstContext.messages.map((message) => message.id)).toEqual([threadRootId, selectedMessageId]);
+    expect(firstContext.relatedAnalyses?.sameThread).toEqual([
+      expect.objectContaining({ messageId: threadRootId, summary: expect.stringContaining("opened") })
+    ]);
+    expect(firstContext.relatedAnalyses?.sameSender).toEqual([
+      expect.objectContaining({ messageId: senderHistoryId, summary: expect.stringContaining("contract review") })
+    ]);
+    const firstAnalysis = database.getMessageAnalysis(selectedMessageId)!;
+    expect(firstAnalysis.contextHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const cached = service.startAnalysis(selectedMessageId);
+    expect(cached.job.id).toBe(started.job.id);
+    expect(analyze).toHaveBeenCalledOnce();
+
+    saveAnalysis(database, senderHistoryId, "The customer's earlier contract review is now urgent.");
+    const refreshed = service.startAnalysis(selectedMessageId);
+    expect(refreshed.job.id).not.toBe(started.job.id);
+    await waitForJob(database, refreshed.job.id, "completed");
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(database.getMessageAnalysis(selectedMessageId)?.contextHash).not.toBe(firstAnalysis.contextHash);
+
     await service.close();
     database.close();
   });
@@ -389,6 +497,25 @@ function insertMessage(database: EmailDatabase): string {
   });
   database.completeArchive(archive.id, 0);
   return messageId;
+}
+
+function saveAnalysis(database: EmailDatabase, messageId: string, summary: string): void {
+  database.upsertMessageAnalysis({
+    messageId,
+    summary,
+    categories: ["Customer"],
+    priority: "normal",
+    actionRequired: true,
+    actionSummary: "Review and respond",
+    spamProbability: 0.01,
+    phishingProbability: 0.01,
+    draftRecommended: true,
+    confidence: 0.9,
+    signals: ["Previously analyzed customer email"],
+    model: "history-model",
+    promptVersion: "history-v1",
+    contentHash: `history-${messageId}`
+  });
 }
 
 async function temporaryDirectory(): Promise<string> {

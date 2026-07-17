@@ -7,6 +7,7 @@ import type {
   AiMessageState,
   AiModelOption,
   AiProviderId,
+  AiRelatedAnalysisContext,
   MessageDraftReplyStart,
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
@@ -77,6 +78,8 @@ export class AiService {
     if (!message) throw new AiMessageNotFoundError("Message not found");
     const conversation = this.database.listConversationMessages(messageId);
     const contentHash = conversationContentHash(conversation);
+    const relatedAnalyses = this.database.listRelatedMessageAnalyses(messageId);
+    const contextHash = relatedAnalysisContextHash(relatedAnalyses);
     const analysis = this.database.getMessageAnalysis(messageId);
     const latest = this.database.getLatestAiJob(messageId);
 
@@ -84,6 +87,7 @@ export class AiService {
     if (analysis
       && latest?.status === "completed"
       && analysis.contentHash === contentHash
+      && analysis.contextHash === contextHash
       && analysis.model === agent.model
       && analysis.promptVersion === promptVersion) {
       return { job: latest, analysis };
@@ -312,11 +316,12 @@ export class AiService {
     const timeout = setTimeout(() => controller.abort(), 45_000);
     try {
       const conversation = this.database.listConversationMessages(messageId);
+      const relatedAnalyses = this.database.listRelatedMessageAnalyses(messageId);
       const result = await provider.suggestAction(
         message,
         context,
         controller.signal,
-        { messages: conversation }
+        { messages: conversation, relatedAnalyses }
       );
       this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
       this.database.recordDiagnostic({
@@ -464,6 +469,9 @@ export class AiService {
       if (conversationContentHash(conversation) !== job.contentHash) {
         throw new AiConfigurationError("Email conversation changed; start a new analysis");
       }
+      const relatedAnalyses = this.database.listRelatedMessageAnalyses(job.messageId);
+      const contextHash = relatedAnalysisContextHash(relatedAnalyses);
+      const conversationContext = { messages: conversation, relatedAnalyses };
       const allowed = this.database.consumeAiRequest(
         current.dailyRequestLimit,
         current.monthlyRequestLimit
@@ -490,7 +498,7 @@ export class AiService {
           message,
           controller.signal,
           { skills: job.skills, prompt: stylePrompt },
-          { messages: conversation }
+          conversationContext
         );
         if (this.database.getAiJob(job.id)?.status === "cancelled") return;
         this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
@@ -562,7 +570,7 @@ export class AiService {
         message,
         controller.signal,
         { skills: job.skills, prompt: job.prompt },
-        { messages: conversation }
+        conversationContext
       );
       if (this.database.getAiJob(job.id)?.status === "cancelled") return;
       this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
@@ -571,6 +579,7 @@ export class AiService {
         model: job.model,
         promptVersion: job.promptVersion,
         contentHash: job.contentHash,
+        contextHash,
         threadMessageCount: conversation.length,
         ...result.analysis
       });
@@ -585,6 +594,9 @@ export class AiService {
           messageId: job.messageId,
           provider: job.provider,
           model: job.model,
+          threadMessages: conversation.length,
+          priorThreadAnalyses: relatedAnalyses.sameThread.length,
+          priorSenderAnalyses: relatedAnalyses.sameSender.length,
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens
         }
@@ -648,6 +660,14 @@ function conversationContentHash(messages: MessageDetail[]): string {
     bodyText: message.bodyText,
     attachmentNames: message.attachments.map((attachment) => attachment.filename)
   })))).digest("hex");
+}
+
+function relatedAnalysisContextHash(context: AiRelatedAnalysisContext): string {
+  const semanticContext = {
+    sameThread: context.sameThread.map(({ analyzedAt: _analyzedAt, ...analysis }) => analysis),
+    sameSender: context.sameSender.map(({ analyzedAt: _analyzedAt, ...analysis }) => analysis)
+  };
+  return createHash("sha256").update(JSON.stringify(semanticContext)).digest("hex");
 }
 
 function configuredPromptVersion(agent: AiAgentConfig, base = AI_PROMPT_VERSION): string {

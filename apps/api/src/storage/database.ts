@@ -12,6 +12,8 @@ import type {
   AiJobStatus,
   AiPriority,
   AiProviderId,
+  AiRelatedAnalysis,
+  AiRelatedAnalysisContext,
   AiReviewQueue,
   AiAnalysisReview,
   AiAnalysisReviewAllResult,
@@ -357,6 +359,7 @@ export interface MessageAnalysisUpsertInput extends MessageAnalysisOutput {
   model: string;
   promptVersion: string;
   contentHash: string;
+  contextHash?: string;
 }
 
 interface SearchQuery extends SearchFilters {
@@ -848,6 +851,7 @@ export class EmailDatabase {
           model TEXT NOT NULL,
           prompt_version TEXT NOT NULL,
           content_hash TEXT NOT NULL,
+          context_hash TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
@@ -1400,6 +1404,17 @@ export class EmailDatabase {
         lastMessageId = String(rows.at(-1)?.id ?? lastMessageId);
       }
       this.db.pragma("user_version = 25");
+    }
+
+    const aiRelatedContextVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (aiRelatedContextVersion < 26) {
+      const analysisColumns = new Set(
+        (this.db.pragma("table_info(ai_message_analysis)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!analysisColumns.has("context_hash")) {
+        this.db.exec("ALTER TABLE ai_message_analysis ADD COLUMN context_hash TEXT NOT NULL DEFAULT '';");
+      }
+      this.db.pragma("user_version = 26");
     }
   }
 
@@ -2444,8 +2459,8 @@ export class EmailDatabase {
           id, message_id, summary, categories_json, priority, action_required,
           action_summary, spam_probability, phishing_probability, draft_recommended,
           confidence, signals_json, thread_message_count, model, prompt_version, content_hash,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          context_hash, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(message_id) DO UPDATE SET
           summary = excluded.summary,
           categories_json = excluded.categories_json,
@@ -2461,6 +2476,7 @@ export class EmailDatabase {
           model = excluded.model,
           prompt_version = excluded.prompt_version,
           content_hash = excluded.content_hash,
+          context_hash = excluded.context_hash,
           updated_at = excluded.updated_at
       `).run(
         id,
@@ -2479,6 +2495,7 @@ export class EmailDatabase {
         input.model,
         input.promptVersion,
         input.contentHash,
+        input.contextHash ?? "",
         now,
         now
       );
@@ -2486,6 +2503,63 @@ export class EmailDatabase {
     });
     save();
     return this.getMessageAnalysis(input.messageId)!;
+  }
+
+  listRelatedMessageAnalyses(
+    messageId: string,
+    threadLimit = 12,
+    senderLimit = 6
+  ): AiRelatedAnalysisContext {
+    const source = this.db.prepare(`
+      SELECT archive_id, conversation_key, lower(trim(sender_address)) AS sender_address
+      FROM messages
+      WHERE id = ?
+    `).get(messageId) as Row | undefined;
+    if (!source) throw new Error("Message not found");
+    const conversationKey = source.conversation_key ? String(source.conversation_key) : null;
+    const senderAddress = String(source.sender_address ?? "");
+    const safeThreadLimit = Math.min(20, Math.max(0, Math.trunc(threadLimit)));
+    const safeSenderLimit = Math.min(10, Math.max(0, Math.trunc(senderLimit)));
+    const columns = `
+      m.id AS message_id, m.subject, m.sender_name, m.sender_address, m.sent_at, m.received_at,
+      analysis.summary, analysis.categories_json, analysis.priority, analysis.action_required,
+      analysis.action_summary, analysis.spam_probability, analysis.phishing_probability,
+      analysis.draft_recommended, analysis.confidence, analysis.updated_at AS analyzed_at
+    `;
+    const sameThreadRows = conversationKey && safeThreadLimit > 0
+      ? this.db.prepare(`
+          SELECT ${columns}
+          FROM messages m
+          JOIN ai_message_analysis analysis ON analysis.message_id = m.id
+          WHERE m.conversation_key = ? AND m.id != ?
+          ORDER BY COALESCE(m.received_at, m.sent_at, m.created_at) DESC, m.id DESC
+          LIMIT ?
+        `).all(conversationKey, messageId, safeThreadLimit) as Row[]
+      : [];
+    const sameSenderRows = senderAddress && safeSenderLimit > 0
+      ? this.db.prepare(`
+          SELECT ${columns}
+          FROM messages m
+          JOIN ai_message_analysis analysis ON analysis.message_id = m.id
+          WHERE m.archive_id = ?
+            AND lower(trim(m.sender_address)) = ?
+            AND m.id != ?
+            AND (? IS NULL OR m.conversation_key IS NULL OR m.conversation_key != ?)
+          ORDER BY COALESCE(m.received_at, m.sent_at, m.created_at) DESC, m.id DESC
+          LIMIT ?
+        `).all(
+          String(source.archive_id),
+          senderAddress,
+          messageId,
+          conversationKey,
+          conversationKey,
+          safeSenderLimit
+        ) as Row[]
+      : [];
+    return {
+      sameThread: sameThreadRows.reverse().map((row) => this.mapRelatedAnalysis(row)),
+      sameSender: sameSenderRows.map((row) => this.mapRelatedAnalysis(row))
+    };
   }
 
   markMessageAnalysisReviewed(messageId: string): AiAnalysisReview {
@@ -5546,8 +5620,32 @@ export class EmailDatabase {
       model: String(row.model),
       promptVersion: String(row.prompt_version),
       contentHash: String(row.content_hash),
+      contextHash: String(row.context_hash ?? ""),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
+    };
+  }
+
+  private mapRelatedAnalysis(row: Row): AiRelatedAnalysis {
+    return {
+      messageId: String(row.message_id),
+      subject: String(row.subject ?? ""),
+      sender: {
+        name: row.sender_name ? String(row.sender_name) : null,
+        address: String(row.sender_address ?? "")
+      },
+      sentAt: row.sent_at ? String(row.sent_at) : null,
+      receivedAt: row.received_at ? String(row.received_at) : null,
+      summary: String(row.summary),
+      categories: parseJson<string[]>(row.categories_json, []),
+      priority: row.priority as AiRelatedAnalysis["priority"],
+      actionRequired: Boolean(row.action_required),
+      actionSummary: row.action_summary ? String(row.action_summary) : null,
+      spamProbability: Number(row.spam_probability),
+      phishingProbability: Number(row.phishing_probability),
+      draftRecommended: Boolean(row.draft_recommended),
+      confidence: Number(row.confidence),
+      analyzedAt: String(row.analyzed_at)
     };
   }
 

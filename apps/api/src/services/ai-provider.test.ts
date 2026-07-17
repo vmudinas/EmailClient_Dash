@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MessageDetail } from "@email-client/shared";
+import type { AiRelatedAnalysis, MessageDetail } from "@email-client/shared";
 import { createAiProvider, DeepSeekProvider, OpenAiProvider } from "./ai-provider.js";
 
 describe("createAiProvider", () => {
@@ -50,9 +50,16 @@ describe("DeepSeekProvider", () => {
     };
     const provider = new DeepSeekProvider("sk-deepseek-test", "deepseek-chat", fetcher);
 
-    const result = await provider.analyze(messageFixture(), undefined, {
+    const message = messageFixture();
+    const result = await provider.analyze(message, undefined, {
       skills: ["summarize", "extract-actions"],
       prompt: "Focus on invoices that need approval before Friday."
+    }, {
+      messages: [message],
+      relatedAnalyses: {
+        sameThread: [relatedAnalysisFixture("thread-message", "Earlier thread summary")],
+        sameSender: [relatedAnalysisFixture("sender-message", "Earlier sender summary")]
+      }
     });
 
     expect(result.analysis).toMatchObject({
@@ -70,6 +77,17 @@ describe("DeepSeekProvider", () => {
     expect(messages[0]?.content).toContain("Summarize");
     expect(messages[0]?.content).toContain("Extract actions");
     expect(messages[0]?.content).toContain("Focus on invoices that need approval before Friday.");
+    expect(messages[0]?.content).toContain("same-thread history");
+    const analysisPayload = JSON.parse(messages[1]!.content) as {
+      relatedAnalysisContext: {
+        sameThread: Array<{ messageId: string; summary: string }>;
+        sameSender: Array<{ messageId: string; summary: string }>;
+      };
+    };
+    expect(analysisPayload.relatedAnalysisContext).toMatchObject({
+      sameThread: [{ messageId: "thread-message", summary: "Earlier thread summary" }],
+      sameSender: [{ messageId: "sender-message", summary: "Earlier sender summary" }]
+    });
   });
 
   it("surfaces an invalid API key as a non-retryable, provider-labeled error", async () => {
@@ -177,6 +195,26 @@ function jsonResponse(value: unknown): Response {
     status: 200,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+function relatedAnalysisFixture(messageId: string, summary: string): AiRelatedAnalysis {
+  return {
+    messageId,
+    subject: "Earlier analyzed email",
+    sender: { name: "Vendor", address: "billing@vendor.example" },
+    sentAt: "2026-06-30T12:00:00.000Z",
+    receivedAt: "2026-06-30T12:00:05.000Z",
+    summary,
+    categories: ["Finance"],
+    priority: "normal",
+    actionRequired: true,
+    actionSummary: "Review the earlier invoice",
+    spamProbability: 0.02,
+    phishingProbability: 0.01,
+    draftRecommended: false,
+    confidence: 0.9,
+    analyzedAt: "2026-07-01T13:00:00.000Z"
+  };
 }
 
 function messageFixture(): MessageDetail {
