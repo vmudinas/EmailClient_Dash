@@ -1,0 +1,28 @@
+{
+  "name": "local-email-archive-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @email-client/shared && npm run build -w @email-client/api && npm run build -w @email-client/web && npm run build -w @email-client/desktop",
+    "dev": "concurrently -k -n api,web -c green,cyan \"npm run dev -w @email-client/api\" \"npm run dev -w @email-client/web\"",
+    "dev:desktop": "npm run build -w @email-client/shared && concurrently -k -n api,web,desktop -c green,cyan,yellow \"npm run dev -w @email-client/api\" \"npm run dev -w @email-client/web\" \"npm run dev -w @email-client/desktop\"",
+    "start": "npm run start:built",
+    "start:fresh": "npm run build && npm run start:built",
+    "start:built": "node start.mjs",
+    "test": "npm run test -w @email-client/api && npm run test -w @email-client/web",
+    "test:run": "npm run test:run -w @email-client/api && npm run test:run -w @email-client/web",
+    "typecheck": "npm run build -w @email-client/shared && npm run typecheck -w @email-client/api && npm run build -w @email-client/api && npm run typecheck -w @email-client/web && npm run typecheck -w @email-client/desktop"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.js.map
+vite.config.d.ts
+
+# Local app data (SQLite archives, blobs, uploads) — never commit real mail data
+data/
+
+# Downloaded OCR language model
+eng.traineddata
+
+# Local planning docs, not for public repo
+docs/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
