@@ -32,6 +32,7 @@ import {
   gmailSendRequestSchema,
   gmailSyncRequestSchema,
   importOptionsSchema,
+  inboxTabSettingsUpdateSchema,
   localMessageStatePatchSchema,
   mailboxCreateSchema,
   mailboxMergeSchema,
@@ -683,6 +684,68 @@ export class EmailApiRuntime {
         folderId: request.query.folderId
       });
     });
+
+    this.app.get<{ Querystring: { archiveId?: string } }>("/api/inbox-tabs", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      const archiveId = request.query.archiveId?.trim();
+      if (!archiveId) return reply.code(400).send({ error: "archiveId is required" });
+      try {
+        return this.database.getInboxTabSettings(archiveId);
+      } catch (error) {
+        return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+      }
+    });
+
+    this.app.patch<{ Params: { archiveId: string }; Body: unknown }>(
+      "/api/admin/inbox-tabs/:archiveId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = inboxTabSettingsUpdateSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid Inbox tab settings" });
+        }
+        try {
+          const settings = this.database.updateInboxTabSettings(request.params.archiveId, parsed.data);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: "Inbox tab configuration saved",
+            archiveId: request.params.archiveId,
+            context: {
+              enabledTabs: settings.tabs.filter((tab) => tab.enabled).map((tab) => tab.id),
+              aiEnabled: settings.aiEnabled,
+              aiConfidenceThreshold: settings.aiConfidenceThreshold
+            }
+          });
+          return settings;
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+        }
+      }
+    );
+
+    this.app.post<{ Params: { archiveId: string } }>(
+      "/api/admin/inbox-tabs/:archiveId/reclassify",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        try {
+          const result = this.database.reclassifyInboxMessages(request.params.archiveId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: "Inbox messages reclassified",
+            archiveId: request.params.archiveId,
+            context: {
+              scannedMessages: result.scannedMessages,
+              changedMessages: result.changedMessages
+            }
+          });
+          return result;
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+        }
+      }
+    );
 
     this.app.get<{
       Querystring: {

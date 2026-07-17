@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { EmailDatabase } from "../storage/database.js";
 import { AiProviderError, type AiConversationContext, type AiProvider } from "./ai-provider.js";
 import { AiConfigurationError, AiService } from "./ai-service.js";
@@ -179,6 +180,61 @@ describe("AiService", () => {
     expect(analyze).toHaveBeenCalledTimes(2);
     expect(database.getMessageAnalysis(selectedMessageId)?.contextHash).not.toBe(firstAnalysis.contextHash);
 
+    await service.close();
+    database.close();
+  });
+
+  it("adds configured Inbox tabs to categorization prompts and applies confident assignments", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const messageId = insertMessage(database);
+    const message = database.getMessage(messageId)!;
+    database.updateInboxTabSettings(message.archiveId, {
+      tabs: DEFAULT_INBOX_TABS.map((tab) => ({ ...tab, keywords: [], senderDomains: [] })),
+      aiEnabled: true,
+      aiConfidenceThreshold: 0.9
+    });
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "tab-analysis-model",
+      dailyRequestLimit: 10,
+      monthlyRequestLimit: 100
+    });
+    const analyze = vi.fn().mockResolvedValue({
+      analysis: {
+        summary: "A billing notice needs attention.",
+        categories: ["bills"],
+        priority: "normal",
+        actionRequired: false,
+        actionSummary: null,
+        spamProbability: 0.01,
+        phishingProbability: 0.01,
+        draftRecommended: false,
+        confidence: 0.95,
+        signals: ["Billing language"]
+      },
+      usage: { inputTokens: 100, outputTokens: 30 }
+    });
+    const service = new AiService(database, settings, () => ({ analyze, testConnection: vi.fn() }));
+
+    const started = service.startAnalysis(messageId);
+    await waitForJob(database, started.job.id, "completed");
+    expect((analyze.mock.calls[0]?.[2] as { prompt: string }).prompt).toContain("Inbox tab assignment is enabled");
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("bills");
+
+    const currentTabs = database.getInboxTabSettings(message.archiveId);
+    database.updateInboxTabSettings(message.archiveId, {
+      tabs: currentTabs.tabs,
+      aiEnabled: true,
+      aiConfidenceThreshold: 0.96
+    });
+    const refreshed = service.startAnalysis(messageId);
+    expect(refreshed.job.id).not.toBe(started.job.id);
+    await waitForJob(database, refreshed.job.id, "completed");
+    expect(analyze).toHaveBeenCalledTimes(2);
     await service.close();
     database.close();
   });

@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { EmailApiRuntime } from "./app.js";
 import { loadConfig } from "./config.js";
 
@@ -981,6 +982,7 @@ describe("Email API bulk message actions", () => {
       payload: { messageIds: [], destination: "trash" }
     });
     expect(invalid.statusCode).toBe(400);
+
   });
 });
 
@@ -2099,6 +2101,52 @@ describe("Email API Inbox category routes", () => {
       mail_tracking: 0
     });
     expect(invalid.statusCode).toBe(400);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const adminHeaders = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const updatedTabs = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/inbox-tabs/${archive.id}`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        tabs: DEFAULT_INBOX_TABS.map((tab) => ({
+          ...tab,
+          label: tab.id === "social" ? "Community" : tab.label,
+          enabled: tab.id === "social" ? false : tab.enabled,
+          keywords: [],
+          senderDomains: []
+        })),
+        aiEnabled: true,
+        aiConfidenceThreshold: 0.9
+      }
+    });
+    expect(updatedTabs.statusCode).toBe(200);
+    expect(updatedTabs.json()).toMatchObject({ aiEnabled: true, aiConfidenceThreshold: 0.9 });
+
+    const loadedTabs = await runtime.app.inject({
+      method: "GET",
+      url: `/api/inbox-tabs?archiveId=${archive.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(loadedTabs.json()).toMatchObject({
+      archiveId: archive.id,
+      tabs: expect.arrayContaining([expect.objectContaining({ id: "social", label: "Community", enabled: false })])
+    });
+
+    const reclassified = await runtime.app.inject({
+      method: "POST",
+      url: `/api/admin/inbox-tabs/${archive.id}/reclassify`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(reclassified.json()).toMatchObject({ scannedMessages: 2, changedMessages: 1 });
   });
 });
 

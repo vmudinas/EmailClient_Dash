@@ -43,6 +43,7 @@ import type {
   ImportJob,
   InboxCategory,
   InboxCategoryCounts,
+  InboxTabSettings,
   LocalMessageStatePatch,
   MessageActionSuggestion,
   MessageDetail,
@@ -54,6 +55,7 @@ import type {
   SharingState,
   StockQuote
 } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { Sidebar } from "./components/Sidebar.js";
 import {
   MessageList,
@@ -109,6 +111,16 @@ const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   mail_tracking: 0
 };
 
+function defaultInboxTabSettings(archiveId = ""): InboxTabSettings {
+  return {
+    archiveId,
+    tabs: DEFAULT_INBOX_TABS.map((tab) => ({ ...tab, keywords: [], senderDomains: [] })),
+    aiEnabled: false,
+    aiConfidenceThreshold: 0.8,
+    updatedAt: null
+  };
+}
+
 const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string }> = {
   trash: { verb: "delete", noun: "Trash" },
   archived: { verb: "archive", noun: "Archive" },
@@ -140,6 +152,7 @@ export function App() {
   const [selectedSmartMailbox, setSelectedSmartMailbox] = useState<SmartMailbox | null>(null);
   const [inboxCategory, setInboxCategory] = useState<InboxCategory>("primary");
   const [inboxCategoryCounts, setInboxCategoryCounts] = useState<InboxCategoryCounts>(EMPTY_INBOX_CATEGORY_COUNTS);
+  const [inboxTabSettings, setInboxTabSettings] = useState<InboxTabSettings>(() => defaultInboxTabSettings());
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
   const [selectionBusy, setSelectionBusy] = useState(false);
@@ -475,6 +488,25 @@ export function App() {
     return () => { active = false; };
   }, [api, selectedArchiveId, showError]);
 
+  useEffect(() => {
+    if (!api || !selectedArchiveId) {
+      setInboxTabSettings(defaultInboxTabSettings());
+      return;
+    }
+    let active = true;
+    setInboxTabSettings(defaultInboxTabSettings(selectedArchiveId));
+    void api.inboxTabSettings(selectedArchiveId)
+      .then((settings) => {
+        if (!active) return;
+        setInboxTabSettings(settings);
+        setInboxCategory((current) => settings.tabs.some((tab) => tab.id === current && tab.enabled)
+          ? current
+          : "primary");
+      })
+      .catch((error) => showError(error instanceof Error ? error.message : "Inbox tabs could not be loaded"));
+    return () => { active = false; };
+  }, [api, selectedArchiveId, showError]);
+
   const loadMessages = useCallback(async (append = false) => {
     const requestId = ++messageListRequestRef.current;
     if (!api || !selectedArchiveId) {
@@ -687,6 +719,7 @@ export function App() {
     setSelectedArchiveId(id);
     setSelectedFolderId(null);
     setSelectedSmartMailbox(null);
+    setInboxCategory("primary");
     closeMessage();
   };
 
@@ -1788,6 +1821,7 @@ export function App() {
               inboxCategories={showInboxCategories ? {
                 active: inboxCategory,
                 counts: inboxCategoryCounts,
+                tabs: inboxTabSettings.tabs,
                 onSelect: selectInboxCategory
               } : null}
               selectedIds={bulkSelectedIds}
@@ -2066,6 +2100,15 @@ export function App() {
           onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
           onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
           onNewsSettingsChanged={() => { if (api) void refreshNewsHeadlines(api); }}
+          onInboxTabSettingsChanged={(settings) => {
+            if (settings.archiveId !== selectedArchiveId) return;
+            setInboxTabSettings(settings);
+            const nextCategory = settings.tabs.some((tab) => tab.id === inboxCategory && tab.enabled)
+              ? inboxCategory
+              : "primary";
+            setInboxCategory(nextCategory);
+            if (nextCategory === inboxCategory) void loadMessages(false);
+          }}
         />
       )}
       <DiagnosticsDialog

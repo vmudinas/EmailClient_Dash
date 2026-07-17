@@ -1246,7 +1246,7 @@ textarea:focus-visible {
 
 .inbox-category-tabs {
   display: grid;
-  grid-template-columns: repeat(7, minmax(108px, 1fr));
+  grid-template-columns: repeat(var(--inbox-tab-count, 7), minmax(108px, 1fr));
   flex: 0 0 auto;
   min-height: 58px;
   overflow-x: auto;
@@ -1306,20 +1306,13 @@ textarea:focus-visible {
 }
 
 .inbox-category-tab.active {
+  color: var(--inbox-tab-color);
   background: color-mix(in srgb, currentColor 7%, var(--surface));
 }
 
 .inbox-category-tab.active::after {
   opacity: 1;
 }
-
-.inbox-category-tab.primary.active { color: #1a73e8; }
-.inbox-category-tab.promotions.active { color: #188038; }
-.inbox-category-tab.social.active { color: #9334e6; }
-.inbox-category-tab.updates.active { color: #b06000; }
-.inbox-category-tab.bills.active { color: #137333; }
-.inbox-category-tab.medical.active { color: #c5221f; }
-.inbox-category-tab.mail_tracking.active { color: #1967d2; }
 
 .message-list {
   flex: 1;
@@ -4685,6 +4678,7 @@ textarea:focus-visible {
   flex-direction: column;
   gap: 3px;
   padding: 14px 10px;
+  overflow-y: auto;
   border-right: 1px solid var(--line);
   background: var(--surface-soft);
 }
@@ -4814,6 +4808,95 @@ textarea:focus-visible {
 .settings-form > small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.settings-standalone-field {
+  display: flex;
+  max-width: 420px;
+  flex-direction: column;
+  gap: 6px;
+  color: #515b54;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.settings-standalone-field select {
+  width: 100%;
+  height: 37px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  color: var(--ink);
+  background: #ffffff;
+}
+
+.inbox-tab-settings {
+  padding-top: 14px;
+}
+
+.inbox-tab-editor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inbox-tab-editor {
+  display: grid;
+  gap: 11px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid;
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.inbox-tab-editor-heading {
+  display: grid;
+  grid-template-columns: 42px minmax(180px, 1fr) auto auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.settings-form .inbox-tab-color {
+  width: 42px;
+  padding: 3px;
+  cursor: pointer;
+}
+
+.inbox-tab-editor .settings-form-grid {
+  margin-bottom: 0;
+}
+
+.inbox-tab-order-actions,
+.inbox-tab-ai-settings {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.inbox-tab-ai-settings {
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  padding-top: 5px;
+}
+
+.inbox-tab-ai-settings > label:last-child {
+  width: 190px;
+  flex: 0 0 auto;
+}
+
+.inbox-tab-ai-settings .settings-toggle-row {
+  width: auto;
+  flex: 1 1 auto;
+}
+
+.inbox-tab-ai-settings small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-weight: 500;
+  line-height: 1.4;
 }
 
 .stock-symbol-entry {
@@ -7361,6 +7444,28 @@ textarea:focus-visible {
   .settings-content {
     height: 100%;
     padding: 22px 15px 34px;
+  }
+
+  .inbox-tab-editor-heading {
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+  }
+
+  .inbox-tab-editor-heading > .settings-checkbox {
+    grid-column: 2;
+  }
+
+  .inbox-tab-order-actions {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+
+  .inbox-tab-ai-settings {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .inbox-tab-ai-settings > label:last-child {
+    width: 100%;
   }
 
   .settings-mobile-section-trigger {

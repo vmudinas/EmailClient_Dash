@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { useEffect, useRef, useState, type TouchEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type TouchEvent } from "react";
 import {
   Archive,
   ArrowLeft,
@@ -28,6 +28,7 @@ import {
 import type {
   InboxCategory,
   InboxCategoryCounts,
+  InboxTabDefinition,
   MessageSummary,
   SearchHit
 } from "@email-client/shared";
@@ -54,6 +55,7 @@ interface MessageListProps {
   inboxCategories?: {
     active: InboxCategory;
     counts: InboxCategoryCounts;
+    tabs: InboxTabDefinition[];
     onSelect(category: InboxCategory): void;
   } | null;
   selectedIds: Set<string>;
@@ -74,19 +76,15 @@ interface MessageListProps {
   onToggleRead(message: MessageSummary): void;
 }
 
-const CATEGORY_TABS: Array<{
-  id: InboxCategory;
-  label: string;
-  icon: typeof Inbox;
-}> = [
-  { id: "primary", label: "Primary", icon: Inbox },
-  { id: "promotions", label: "Promotions", icon: Tag },
-  { id: "social", label: "Social", icon: CircleUserRound },
-  { id: "updates", label: "Updates", icon: Info },
-  { id: "bills", label: "Bills", icon: ReceiptText },
-  { id: "medical", label: "Medical", icon: HeartPulse },
-  { id: "mail_tracking", label: "Mail/Tracking", icon: PackageSearch }
-];
+const CATEGORY_ICONS: Record<InboxCategory, typeof Inbox> = {
+  primary: Inbox,
+  promotions: Tag,
+  social: CircleUserRound,
+  updates: Info,
+  bills: ReceiptText,
+  medical: HeartPulse,
+  mail_tracking: PackageSearch
+};
 
 export function MessageList({
   items,
@@ -197,9 +195,13 @@ export function MessageList({
       </header>
 
       {inboxCategories && (
-        <nav className="inbox-category-tabs" aria-label="Inbox categories">
-          {CATEGORY_TABS.map((category) => {
-            const Icon = category.icon;
+        <nav
+          className="inbox-category-tabs"
+          aria-label="Inbox categories"
+          style={{ "--inbox-tab-count": inboxCategories.tabs.filter((tab) => tab.enabled).length } as CSSProperties}
+        >
+          {inboxCategories.tabs.filter((category) => category.enabled).sort((left, right) => left.position - right.position).map((category) => {
+            const Icon = CATEGORY_ICONS[category.id];
             return (
               <button
                 className={`inbox-category-tab ${category.id} ${inboxCategories.active === category.id ? "active" : ""}`}
@@ -207,6 +209,8 @@ export function MessageList({
                 onClick={() => inboxCategories.onSelect(category.id)}
                 aria-pressed={inboxCategories.active === category.id}
                 aria-label={`${category.label}, ${inboxCategories.counts[category.id].toLocaleString()} messages`}
+                title={category.description}
+                style={{ "--inbox-tab-color": category.color } as CSSProperties}
               >
                 <Icon size={15} />
                 <span>{category.label}</span>

@@ -1,4 +1,4 @@
-import type { InboxCategory } from "@email-client/shared";
+import type { InboxCategory, InboxTabDefinition } from "@email-client/shared";
 
 interface MessageCategoryInput {
   senderAddress: string;
@@ -76,4 +76,29 @@ export function classifyInboxCategory(input: MessageCategoryInput): InboxCategor
     return "updates";
   }
   return "primary";
+}
+
+export function classifyInboxCategoryWithTabs(
+  input: MessageCategoryInput,
+  tabs: readonly InboxTabDefinition[],
+  preferredCategory?: InboxCategory
+): InboxCategory {
+  const enabledTabs = tabs.filter((tab) => tab.enabled).sort((left, right) => left.position - right.position);
+  const sender = input.senderAddress.trim().toLowerCase();
+  const senderDomain = sender.split("@").at(-1) ?? "";
+  const searchableText = `${sender} ${input.subject} ${input.bodyText.slice(0, 2_000)}`.toLowerCase();
+
+  for (const tab of enabledTabs) {
+    if (tab.id === "primary") continue;
+    const domainMatch = tab.senderDomains.some((domain) => (
+      senderDomain === domain || senderDomain.endsWith(`.${domain}`)
+    ));
+    const keywordMatch = tab.keywords.some((keyword) => searchableText.includes(keyword.toLowerCase()));
+    if (domainMatch || keywordMatch) return tab.id;
+  }
+
+  const classified = preferredCategory ?? classifyInboxCategory(input);
+  return enabledTabs.some((tab) => tab.id === classified)
+    ? classified
+    : enabledTabs.find((tab) => tab.id === "primary")?.id ?? enabledTabs[0]?.id ?? "primary";
 }

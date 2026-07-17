@@ -42,6 +42,9 @@ import type {
   ImportJob,
   InboxCategory,
   InboxCategoryCounts,
+  InboxTabReclassifyResult,
+  InboxTabSettings,
+  InboxTabSettingsUpdate,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
@@ -381,6 +384,23 @@ export class ApiClient {
 
   inboxCategoryCounts(options: { archiveId?: string; folderId?: string }): Promise<InboxCategoryCounts> {
     return this.request(`/api/messages/category-counts?${queryString(options)}`);
+  }
+
+  inboxTabSettings(archiveId: string): Promise<InboxTabSettings> {
+    return this.request(`/api/inbox-tabs?${queryString({ archiveId })}`);
+  }
+
+  updateInboxTabSettings(archiveId: string, input: InboxTabSettingsUpdate): Promise<InboxTabSettings> {
+    return this.request(`/api/admin/inbox-tabs/${encodeURIComponent(archiveId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  reclassifyInboxTabs(archiveId: string): Promise<InboxTabReclassifyResult> {
+    return this.request(`/api/admin/inbox-tabs/${encodeURIComponent(archiveId)}/reclassify`, {
+      method: "POST"
+    });
   }
 
   search(

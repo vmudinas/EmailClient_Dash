@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import BetterSqlite3 from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { EmailDatabase, toFtsQuery } from "./database.js";
 
 const directories: string[] = [];
@@ -192,7 +193,7 @@ describe("EmailDatabase", () => {
     expect(archivePlan.some((row) => row.detail.includes("messages_archive_sort_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("messages_conversation_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("SCAN sent_reply"))).toBe(false);
-    expect(sqlite.pragma("user_version", { simple: true })).toBe(29);
+    expect(sqlite.pragma("user_version", { simple: true })).toBe(30);
 
     sqlite.close();
     database.close();
@@ -208,7 +209,7 @@ describe("EmailDatabase", () => {
       sizeBytes: 0
     });
     database.completeArchive(archive.id, 0);
-    const inbox = database.createFolder(archive.id, "Inbox");
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
     insertDatedMessage(database, archive.id, inbox.id, "primary", "2026-07-04T12:00:00.000Z", undefined, "primary");
     insertDatedMessage(database, archive.id, inbox.id, "promotion", "2026-07-03T12:00:00.000Z", undefined, "promotions");
     insertDatedMessage(database, archive.id, inbox.id, "social", "2026-07-02T12:00:00.000Z", undefined, "social");
@@ -2010,6 +2011,61 @@ describe("EmailDatabase", () => {
     expect(database.getCalendarAccount(account.id)).toMatchObject({ status: "error", lastError: "Authorization expired" });
     expect(database.deleteCalendarAccount(account.id)).toMatchObject({ id: account.id, secret: "abcd-efgh-ijkl-mnop" });
     expect(database.getCalendarAccount(account.id)).toBeNull();
+    database.close();
+  });
+
+  it("stores configurable Inbox tabs, reclassifies rules, and applies confident AI assignments", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Configurable Inbox",
+      sourceType: "mbox",
+      fingerprint: "configurable-inbox-tabs",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "payroll-summary",
+      internetMessageId: null,
+      subject: "Your payroll summary is ready",
+      sender: { name: "Payroll", address: "notices@company.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: null,
+      receivedAt: null,
+      bodyText: "Open the employee portal for details.",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 1,
+      attachments: []
+    });
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("primary");
+
+    const settings = database.updateInboxTabSettings(archive.id, {
+      tabs: DEFAULT_INBOX_TABS.map((tab) => ({
+        ...tab,
+        label: tab.id === "bills" ? "Money" : tab.label,
+        keywords: tab.id === "bills" ? ["payroll"] : [],
+        senderDomains: [],
+        color: tab.color
+      })),
+      aiEnabled: true,
+      aiConfidenceThreshold: 0.85
+    });
+    expect(settings.tabs.find((tab) => tab.id === "bills")).toMatchObject({ label: "Money", keywords: ["payroll"] });
+    expect(database.getInboxTabSettings(archive.id)).toEqual(settings);
+
+    const reclassified = database.reclassifyInboxMessages(archive.id);
+    expect(reclassified).toMatchObject({ scannedMessages: 1, changedMessages: 1 });
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("bills");
+    expect(database.inboxTabAiPrompt(archive.id)).toContain("bills (Money)");
+
+    expect(database.applyAiInboxCategory(messageId, ["Medical"], 0.8)).toBeNull();
+    expect(database.applyAiInboxCategory(messageId, ["Medical"], 0.9)).toBe("medical");
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("medical");
     database.close();
   });
 });

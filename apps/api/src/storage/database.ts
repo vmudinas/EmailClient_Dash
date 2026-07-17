@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import BetterSqlite3, { type Database as SqliteDatabase } from "better-sqlite3";
-import { classifyInboxCategory } from "../lib/message-category.js";
+import { classifyInboxCategory, classifyInboxCategoryWithTabs } from "../lib/message-category.js";
 import type {
   AccountRole,
   AdminInsights,
@@ -51,6 +51,10 @@ import type {
   ImportSourceType,
   InboxCategory,
   InboxCategoryCounts,
+  InboxTabDefinition,
+  InboxTabReclassifyResult,
+  InboxTabSettings,
+  InboxTabSettingsUpdate,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
@@ -84,6 +88,7 @@ import type {
   UploadStatus,
   UserSummary
 } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import type { StoredBlob } from "./blob-store.js";
 
 const EMPTY_STATE: LocalMessageState = {
@@ -381,6 +386,7 @@ type Row = Record<string, unknown>;
 export class EmailDatabase {
   readonly path: string;
   private readonly db: SqliteDatabase;
+  private readonly inboxTabSettingsCache = new Map<string, InboxTabSettings>();
 
   constructor(dataDir: string, filename = "archive-mail.sqlite") {
     this.path = resolve(dataDir, filename);
@@ -1513,6 +1519,22 @@ export class EmailDatabase {
             id DESC
           );
         PRAGMA user_version = 29;
+      `);
+    }
+
+    const configurableInboxTabsVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (configurableInboxTabsVersion < 30) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS inbox_tab_settings (
+          archive_id TEXT PRIMARY KEY,
+          tabs_json TEXT NOT NULL,
+          ai_enabled INTEGER NOT NULL DEFAULT 0,
+          ai_confidence_threshold REAL NOT NULL DEFAULT 0.8
+            CHECK(ai_confidence_threshold >= 0 AND ai_confidence_threshold <= 1),
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(archive_id) REFERENCES archives(id) ON DELETE CASCADE
+        );
+        PRAGMA user_version = 30;
       `);
     }
   }
@@ -4665,12 +4687,17 @@ export class EmailDatabase {
       headers: input.headers,
       referencedKey
     });
-    const inboxCategory = input.inboxCategory ?? classifyInboxCategory({
+    const categoryInput = {
       senderAddress: input.sender.address,
       subject: input.subject,
       bodyText: input.bodyText,
       headers: input.headers
-    });
+    };
+    const inboxCategory = classifyInboxCategoryWithTabs(
+      categoryInput,
+      this.getInboxTabSettings(input.archiveId).tabs,
+      input.inboxCategory ?? classifyInboxCategory(categoryInput)
+    );
 
     const insert = this.db.transaction(() => {
       const result = this.db.prepare(`
@@ -4873,10 +4900,116 @@ export class EmailDatabase {
     return counts;
   }
 
+  getInboxTabSettings(archiveId: string): InboxTabSettings {
+    const cached = this.inboxTabSettingsCache.get(archiveId);
+    if (cached) return cloneInboxTabSettings(cached);
+    const archiveExists = this.db.prepare("SELECT 1 FROM archives WHERE id = ?").get(archiveId);
+    if (!archiveExists) throw new Error("Archive not found");
+    const row = this.db.prepare("SELECT * FROM inbox_tab_settings WHERE archive_id = ?").get(archiveId) as Row | undefined;
+    const settings: InboxTabSettings = {
+      archiveId,
+      tabs: normalizeInboxTabs(row ? parseJson<InboxTabDefinition[]>(row.tabs_json, []) : []),
+      aiEnabled: Boolean(row?.ai_enabled),
+      aiConfidenceThreshold: row ? Number(row.ai_confidence_threshold) : 0.8,
+      updatedAt: row ? String(row.updated_at) : null
+    };
+    this.inboxTabSettingsCache.set(archiveId, settings);
+    return cloneInboxTabSettings(settings);
+  }
+
+  updateInboxTabSettings(archiveId: string, input: InboxTabSettingsUpdate): InboxTabSettings {
+    if (!this.getArchive(archiveId)) throw new Error("Archive not found");
+    const now = new Date().toISOString();
+    const tabs = [...input.tabs].sort((left, right) => left.position - right.position);
+    this.db.prepare(`
+      INSERT INTO inbox_tab_settings (
+        archive_id, tabs_json, ai_enabled, ai_confidence_threshold, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(archive_id) DO UPDATE SET
+        tabs_json = excluded.tabs_json,
+        ai_enabled = excluded.ai_enabled,
+        ai_confidence_threshold = excluded.ai_confidence_threshold,
+        updated_at = excluded.updated_at
+    `).run(archiveId, JSON.stringify(tabs), input.aiEnabled ? 1 : 0, input.aiConfidenceThreshold, now);
+    this.inboxTabSettingsCache.delete(archiveId);
+    return this.getInboxTabSettings(archiveId);
+  }
+
+  reclassifyInboxMessages(archiveId: string): InboxTabReclassifyResult {
+    const settings = this.getInboxTabSettings(archiveId);
+    const categoryBatch = this.db.prepare(`
+      SELECT m.id, m.inbox_category, m.sender_address, m.subject,
+        substr(m.body_text, 1, 2000) AS body_text, m.headers_json
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.archive_id = ? AND lower(trim(f.name)) = 'inbox' AND m.id > ?
+      ORDER BY m.id
+      LIMIT 500
+    `);
+    const update = this.db.prepare("UPDATE messages SET inbox_category = ? WHERE id = ?");
+    let scannedMessages = 0;
+    let changedMessages = 0;
+    const reclassifyBatch = this.db.transaction((rows: Row[]) => {
+      for (const row of rows) {
+        const category = classifyInboxCategoryWithTabs({
+          senderAddress: String(row.sender_address ?? ""),
+          subject: String(row.subject ?? ""),
+          bodyText: String(row.body_text ?? ""),
+          headers: parseJson<Record<string, string>>(row.headers_json, {})
+        }, settings.tabs);
+        if (category !== String(row.inbox_category)) {
+          update.run(category, String(row.id));
+          changedMessages += 1;
+        }
+      }
+    });
+    let lastMessageId = "";
+    while (true) {
+      const rows = categoryBatch.all(archiveId, lastMessageId) as Row[];
+      if (rows.length === 0) break;
+      reclassifyBatch(rows);
+      scannedMessages += rows.length;
+      lastMessageId = String(rows.at(-1)?.id ?? lastMessageId);
+    }
+    return { settings, scannedMessages, changedMessages };
+  }
+
+  inboxTabAiPrompt(archiveId: string): string | null {
+    const settings = this.getInboxTabSettings(archiveId);
+    if (!settings.aiEnabled) return null;
+    const choices = settings.tabs
+      .filter((tab) => tab.enabled)
+      .sort((left, right) => left.position - right.position)
+      .map((tab) => `${tab.id} (${tab.label}): ${tab.description}`)
+      .join("; ");
+    return [
+      "Inbox tab assignment is enabled for this mailbox.",
+      `Classify the email into exactly one enabled Inbox tab: ${choices}.`,
+      "Return that tab's exact ID as the only value in categories.",
+      `Only a confidence of ${settings.aiConfidenceThreshold} or higher will change the saved Inbox tab.`
+    ].join(" ");
+  }
+
+  applyAiInboxCategory(messageId: string, categories: readonly string[], confidence: number): InboxCategory | null {
+    const row = this.db.prepare(`
+      SELECT m.archive_id, m.inbox_category, f.name AS folder_name
+      FROM messages m JOIN folders f ON f.id = m.folder_id
+      WHERE m.id = ?
+    `).get(messageId) as Row | undefined;
+    if (!row || String(row.folder_name).trim().toLowerCase() !== "inbox") return null;
+    const settings = this.getInboxTabSettings(String(row.archive_id));
+    if (!settings.aiEnabled || confidence < settings.aiConfidenceThreshold) return null;
+    const normalizedCategories = categories.map(normalizeInboxTabName);
+    const tab = settings.tabs.find((candidate) => candidate.enabled && normalizedCategories.some((category) => (
+      category === normalizeInboxTabName(candidate.id) || category === normalizeInboxTabName(candidate.label)
+    )));
+    if (!tab) return null;
+    this.db.prepare("UPDATE messages SET inbox_category = ? WHERE id = ?").run(tab.id, messageId);
+    return tab.id;
+  }
+
   updateMessageInboxCategoryBySourceKey(archiveId: string, sourceKey: string, category: InboxCategory): boolean {
-    return this.db.prepare(`
-      UPDATE messages SET inbox_category = ? WHERE archive_id = ? AND source_key = ?
-    `).run(category, archiveId, sourceKey).changes > 0;
+    return this.updateConfiguredInboxCategoryBySourceKey(archiveId, sourceKey, category, false);
   }
 
   updateMessageGmailInboxCategoryBySourceKey(
@@ -4884,10 +5017,31 @@ export class EmailDatabase {
     sourceKey: string,
     category: InboxCategory
   ): boolean {
+    return this.updateConfiguredInboxCategoryBySourceKey(archiveId, sourceKey, category, true);
+  }
+
+  private updateConfiguredInboxCategoryBySourceKey(
+    archiveId: string,
+    sourceKey: string,
+    preferredCategory: InboxCategory,
+    gmailBaseCategoriesOnly: boolean
+  ): boolean {
+    const row = this.db.prepare(`
+      SELECT inbox_category, sender_address, subject, substr(body_text, 1, 2000) AS body_text, headers_json
+      FROM messages WHERE archive_id = ? AND source_key = ?
+    `).get(archiveId, sourceKey) as Row | undefined;
+    if (!row) return false;
+    if (gmailBaseCategoriesOnly && !["primary", "promotions", "social", "updates"].includes(String(row.inbox_category))) {
+      return false;
+    }
+    const category = classifyInboxCategoryWithTabs({
+      senderAddress: String(row.sender_address ?? ""),
+      subject: String(row.subject ?? ""),
+      bodyText: String(row.body_text ?? ""),
+      headers: parseJson<Record<string, string>>(row.headers_json, {})
+    }, this.getInboxTabSettings(archiveId).tabs, preferredCategory);
     return this.db.prepare(`
-      UPDATE messages SET inbox_category = ?
-      WHERE archive_id = ? AND source_key = ?
-        AND inbox_category IN ('primary', 'promotions', 'social', 'updates')
+      UPDATE messages SET inbox_category = ? WHERE archive_id = ? AND source_key = ?
     `).run(category, archiveId, sourceKey).changes > 0;
   }
 
@@ -5461,6 +5615,8 @@ export class EmailDatabase {
     });
 
     const result = merge();
+    this.inboxTabSettingsCache.delete(sourceArchiveId);
+    this.inboxTabSettingsCache.delete(targetArchiveId);
     return {
       archive: this.getArchive(targetArchiveId)!,
       ...result
@@ -5716,6 +5872,7 @@ export class EmailDatabase {
       }
     });
     remove();
+    this.inboxTabSettingsCache.delete(id);
     return orphanedPaths;
   }
 
@@ -6281,6 +6438,36 @@ export class EmailDatabase {
 
 // Adapter contract: private SQLite implementation details are intentionally excluded.
 export type EmailStore = Pick<EmailDatabase, keyof EmailDatabase>;
+
+function normalizeInboxTabs(storedTabs: readonly InboxTabDefinition[]): InboxTabDefinition[] {
+  const storedById = new Map(storedTabs.map((tab) => [tab.id, tab]));
+  return DEFAULT_INBOX_TABS.map((defaultTab) => {
+    const stored = storedById.get(defaultTab.id);
+    return {
+      ...defaultTab,
+      ...stored,
+      id: defaultTab.id,
+      enabled: defaultTab.id === "primary" ? true : stored?.enabled ?? defaultTab.enabled,
+      keywords: [...(stored?.keywords ?? defaultTab.keywords)],
+      senderDomains: [...(stored?.senderDomains ?? defaultTab.senderDomains)]
+    };
+  }).sort((left, right) => left.position - right.position);
+}
+
+function cloneInboxTabSettings(settings: InboxTabSettings): InboxTabSettings {
+  return {
+    ...settings,
+    tabs: settings.tabs.map((tab) => ({
+      ...tab,
+      keywords: [...tab.keywords],
+      senderDomains: [...tab.senderDomains]
+    }))
+  };
+}
+
+function normalizeInboxTabName(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
 
 const MESSAGE_SUMMARY_COLUMNS = `
   m.id,

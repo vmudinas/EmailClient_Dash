@@ -14,7 +14,9 @@ import {
   CalendarDays,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   CloudDownload,
   Database,
   Download,
@@ -65,13 +67,15 @@ import type {
   SenderFilingStatus,
   SmartMailRule,
   SmartMailRuleSuggestion,
+  InboxTabDefinition,
+  InboxTabSettings,
   UserSummary
 } from "@email-client/shared";
 import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS, NEWS_SOURCE_IDS, NEWS_SOURCE_LABELS } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "inbox-tabs" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -86,6 +90,7 @@ interface SettingsDialogProps {
   onReauthorizeGoogleCalendar?(connection: GmailConnection): void;
   onStockSettingsChanged?(): void;
   onNewsSettingsChanged?(): void;
+  onInboxTabSettingsChanged?(settings: InboxTabSettings): void;
 }
 
 const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
@@ -98,6 +103,7 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "reply-styles", label: "Reply styles", icon: Sparkles },
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
   { id: "smart-rules", label: "Smart rules", icon: MailCheck },
+  { id: "inbox-tabs", label: "Inbox tabs", icon: ListFilter },
   { id: "ai", label: "AI", icon: BrainCircuit },
   { id: "resumes", label: "Resumes", icon: Paperclip },
   { id: "insights", label: "Insights", icon: BarChart3 },
@@ -115,7 +121,8 @@ export function SettingsDialog({
   onAddGoogleCalendar,
   onReauthorizeGoogleCalendar,
   onStockSettingsChanged,
-  onNewsSettingsChanged
+  onNewsSettingsChanged,
+  onInboxTabSettingsChanged
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
@@ -270,6 +277,16 @@ export function SettingsDialog({
                 {section === "smart-rules" && (
                   <SmartMailRulesPanel api={api!} busy={busy} onBusy={setBusy} onError={setError} onNotice={showNotice} />
                 )}
+                {section === "inbox-tabs" && (
+                  <InboxTabsPanel
+                    api={api!}
+                    busy={busy}
+                    onBusy={setBusy}
+                    onError={setError}
+                    onNotice={showNotice}
+                    onChanged={onInboxTabSettingsChanged}
+                  />
+                )}
                 {section === "ai" && settings && (
                   <AiPanel
                     api={api!}
@@ -317,6 +334,182 @@ export function SettingsDialog({
       </section>
     </div>
   );
+}
+
+function InboxTabsPanel({
+  api,
+  busy,
+  onBusy,
+  onError,
+  onNotice,
+  onChanged
+}: {
+  api: ApiClient;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+  onChanged?(settings: InboxTabSettings): void;
+}) {
+  const [archives, setArchives] = useState<ArchiveModel[]>([]);
+  const [archiveId, setArchiveId] = useState("");
+  const [settings, setSettings] = useState<InboxTabSettings | null>(null);
+  const [keywordText, setKeywordText] = useState<Record<string, string>>({});
+  const [domainText, setDomainText] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  const acceptSettings = useCallback((next: InboxTabSettings) => {
+    setSettings(next);
+    setKeywordText(Object.fromEntries(next.tabs.map((tab) => [tab.id, tab.keywords.join(", ")])));
+    setDomainText(Object.fromEntries(next.tabs.map((tab) => [tab.id, tab.senderDomains.join(", ")])));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void api.listArchives().then((items) => {
+      if (!active) return;
+      const configurable = items.filter((archive) => archive.status !== "failed");
+      setArchives(configurable);
+      setArchiveId((current) => configurable.some((archive) => archive.id === current)
+        ? current
+        : configurable[0]?.id ?? "");
+    }).catch((error) => { if (active) onError(errorText(error)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [api, onError]);
+
+  useEffect(() => {
+    if (!archiveId) {
+      setSettings(null);
+      return;
+    }
+    let active = true;
+    setLoading(true);
+    void api.inboxTabSettings(archiveId)
+      .then((next) => { if (active) acceptSettings(next); })
+      .catch((error) => { if (active) onError(errorText(error)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [acceptSettings, api, archiveId, onError]);
+
+  const updateTab = (id: InboxTabDefinition["id"], patch: Partial<InboxTabDefinition>) => {
+    setSettings((current) => current ? {
+      ...current,
+      tabs: current.tabs.map((tab) => tab.id === id ? { ...tab, ...patch } : tab)
+    } : current);
+  };
+
+  const moveTab = (id: InboxTabDefinition["id"], direction: -1 | 1) => {
+    setSettings((current) => {
+      if (!current) return current;
+      const ordered = [...current.tabs].sort((left, right) => left.position - right.position);
+      const index = ordered.findIndex((tab) => tab.id === id);
+      const targetIndex = index + direction;
+      if (index < 0 || targetIndex < 0 || targetIndex >= ordered.length) return current;
+      [ordered[index], ordered[targetIndex]] = [ordered[targetIndex]!, ordered[index]!];
+      return { ...current, tabs: ordered.map((tab, position) => ({ ...tab, position })) };
+    });
+  };
+
+  const persist = async (): Promise<InboxTabSettings> => {
+    if (!settings) throw new Error("Select an archive first");
+    const saved = await api.updateInboxTabSettings(settings.archiveId, {
+      tabs: settings.tabs.map((tab) => ({
+        ...tab,
+        keywords: splitTabRules(keywordText[tab.id]),
+        senderDomains: splitTabRules(domainText[tab.id])
+      })),
+      aiEnabled: settings.aiEnabled,
+      aiConfidenceThreshold: settings.aiConfidenceThreshold
+    });
+    acceptSettings(saved);
+    onChanged?.(saved);
+    return saved;
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    onBusy(true);
+    onError("");
+    try {
+      await persist();
+      onNotice("Inbox tab configuration saved.");
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const reclassify = async () => {
+    if (!settings) return;
+    onBusy(true);
+    onError("");
+    try {
+      const saved = await persist();
+      const result = await api.reclassifyInboxTabs(saved.archiveId);
+      acceptSettings(result.settings);
+      onChanged?.(result.settings);
+      onNotice(`Reclassified ${result.scannedMessages.toLocaleString()} Inbox messages; ${result.changedMessages.toLocaleString()} changed tabs.`);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3>Inbox tabs</h3>
+      <p>Configure the visible tab names, order, colors, and deterministic matching rules for each archive. Primary remains the safe fallback.</p>
+      <label className="settings-standalone-field">Archive
+        <select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={busy || loading}>
+          {archives.length === 0 && <option value="">No archives available</option>}
+          {archives.map((archive) => <option key={archive.id} value={archive.id}>{archive.name}</option>)}
+        </select>
+      </label>
+      {loading ? <div className="settings-loading"><LoaderCircle className="spin" size={18} /> Loading Inbox tabs</div> : settings && (
+        <form className="settings-form inbox-tab-settings" onSubmit={(event) => void save(event)}>
+          <div className="inbox-tab-editor-list">
+            {[...settings.tabs].sort((left, right) => left.position - right.position).map((tab, index) => (
+              <section className="inbox-tab-editor" key={tab.id} style={{ borderLeftColor: tab.color }}>
+                <div className="inbox-tab-editor-heading">
+                  <input className="inbox-tab-color" type="color" value={tab.color} onChange={(event) => updateTab(tab.id, { color: event.target.value })} aria-label={`${tab.label} color`} disabled={busy} />
+                  <label>Tab name<input value={tab.label} onChange={(event) => updateTab(tab.id, { label: event.target.value })} disabled={busy} /></label>
+                  <label className="settings-checkbox"><input type="checkbox" checked={tab.enabled} onChange={(event) => updateTab(tab.id, { enabled: event.target.checked })} disabled={busy || tab.id === "primary"} /><span>Visible</span></label>
+                  <div className="inbox-tab-order-actions">
+                    <button type="button" className="icon-button" onClick={() => moveTab(tab.id, -1)} disabled={busy || index === 0} title="Move tab up" aria-label={`Move ${tab.label} up`}><ChevronUp size={15} /></button>
+                    <button type="button" className="icon-button" onClick={() => moveTab(tab.id, 1)} disabled={busy || index === settings.tabs.length - 1} title="Move tab down" aria-label={`Move ${tab.label} down`}><ChevronDown size={15} /></button>
+                  </div>
+                </div>
+                <label>Description<input value={tab.description} onChange={(event) => updateTab(tab.id, { description: event.target.value })} disabled={busy} /></label>
+                <div className="settings-form-grid">
+                  <label>Keywords<input value={keywordText[tab.id] ?? ""} onChange={(event) => setKeywordText((current) => ({ ...current, [tab.id]: event.target.value }))} placeholder="invoice, payment due" disabled={busy} /></label>
+                  <label>Sender domains<input value={domainText[tab.id] ?? ""} onChange={(event) => setDomainText((current) => ({ ...current, [tab.id]: event.target.value }))} placeholder="example.com, alerts.example.org" disabled={busy} /></label>
+                </div>
+              </section>
+            ))}
+          </div>
+          <section className="inbox-tab-ai-settings">
+            <label className="settings-checkbox settings-toggle-row"><input type="checkbox" checked={settings.aiEnabled} onChange={(event) => setSettings({ ...settings, aiEnabled: event.target.checked })} disabled={busy} /><span><strong>Use AI tab assignment</strong><small>Analyze jobs with the Categorize skill receive these tab definitions and can update the tab when confidence is high enough.</small></span></label>
+            <label>Minimum AI confidence
+              <input type="number" min="0" max="1" step="0.05" value={settings.aiConfidenceThreshold} onChange={(event) => setSettings({ ...settings, aiConfidenceThreshold: Number(event.target.value) })} disabled={busy || !settings.aiEnabled} />
+            </label>
+          </section>
+          <div className="settings-warning neutral"><BrainCircuit size={17} /><span>Keyword and domain rules run immediately for new imported Inbox mail. AI assignment runs through your existing Analyze schedules, so queue status and progress stay in the AI panel.</span></div>
+          <div className="settings-button-row">
+            <button className="primary-button compact" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save tabs</button>
+            <button type="button" className="secondary-button" disabled={busy} onClick={() => void reclassify()}><RefreshCw size={15} /> Save and reclassify Inbox</button>
+          </div>
+        </form>
+      )}
+    </>
+  );
+}
+
+function splitTabRules(value: string | undefined): string[] {
+  return [...new Set((value ?? "").split(/[,\n]/).map((part) => part.trim()).filter(Boolean))];
 }
 
 function ReplyStylesPanel({

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageSummary } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { MessageList } from "./MessageList.js";
 
 const MESSAGE: MessageSummary = {
@@ -139,6 +140,13 @@ describe("MessageList drag and drop", () => {
         onMobileBack={vi.fn()}
         inboxCategories={{
           active: "primary",
+          tabs: DEFAULT_INBOX_TABS.map((tab) => ({
+            ...tab,
+            label: tab.id === "social" ? "Community" : tab.label,
+            enabled: tab.id === "promotions" ? false : tab.enabled,
+            keywords: [],
+            senderDomains: []
+          })),
           counts: {
             primary: 12,
             promotions: 8,
@@ -155,7 +163,8 @@ describe("MessageList drag and drop", () => {
     );
 
     expect(screen.getByRole("button", { name: "Primary, 12 messages" }).getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Social, 4 messages" }));
+    expect(screen.queryByRole("button", { name: "Promotions, 8 messages" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Community, 4 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("social");
     fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 5 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("mail_tracking");

@@ -76,6 +76,13 @@ export class AiService {
     this.requireConfiguredFor(agent.provider, true);
     const message = this.database.getMessage(messageId);
     if (!message) throw new AiMessageNotFoundError("Message not found");
+    const inboxTabPrompt = (agent.skills.length === 0 || agent.skills.includes("categorize"))
+      ? this.database.inboxTabAiPrompt(message.archiveId)
+      : null;
+    const effectiveAgent: AiAgentConfig = {
+      ...agent,
+      prompt: [agent.prompt, inboxTabPrompt].filter(Boolean).join("\n\n")
+    };
     const conversation = this.database.listConversationMessages(messageId);
     const contentHash = conversationContentHash(conversation);
     const relatedAnalyses = this.database.listRelatedMessageAnalyses(messageId);
@@ -83,12 +90,14 @@ export class AiService {
     const analysis = this.database.getMessageAnalysis(messageId);
     const latest = this.database.getLatestAiJob(messageId);
 
-    const promptVersion = requestedAgent ? configuredPromptVersion(agent) : AI_PROMPT_VERSION;
+    const promptVersion = requestedAgent || inboxTabPrompt
+      ? configuredPromptVersion(effectiveAgent)
+      : AI_PROMPT_VERSION;
     if (analysis
       && latest?.status === "completed"
       && analysis.contentHash === contentHash
       && analysis.contextHash === contextHash
-      && analysis.model === agent.model
+      && analysis.model === effectiveAgent.model
       && analysis.promptVersion === promptVersion) {
       return { job: latest, analysis };
     }
@@ -102,10 +111,10 @@ export class AiService {
         messageId,
         scheduleId: schedule?.scheduleId ?? null,
         scheduleRunId: schedule?.scheduleRunId ?? null,
-        provider: agent.provider,
-        model: agent.model,
-        skills: agent.skills,
-        prompt: agent.prompt,
+        provider: effectiveAgent.provider,
+        model: effectiveAgent.model,
+        skills: effectiveAgent.skills,
+        prompt: effectiveAgent.prompt,
         promptVersion,
         contentHash
       });
@@ -124,9 +133,9 @@ export class AiService {
         messageId,
         scheduleId: schedule?.scheduleId ?? null,
         scheduleRunId: schedule?.scheduleRunId ?? null,
-        provider: agent.provider,
-        model: agent.model,
-        skills: agent.skills
+        provider: effectiveAgent.provider,
+        model: effectiveAgent.model,
+        skills: effectiveAgent.skills
       }
     });
     this.kick();
@@ -573,6 +582,9 @@ export class AiService {
         });
         return;
       }
+      const inboxTabPrompt = (job.skills.length === 0 || job.skills.includes("categorize"))
+        ? this.database.inboxTabAiPrompt(message.archiveId)
+        : null;
       const result = await provider.analyze(
         message,
         controller.signal,
@@ -590,6 +602,13 @@ export class AiService {
         threadMessageCount: conversation.length,
         ...result.analysis
       });
+      const assignedInboxTab = inboxTabPrompt
+        ? this.database.applyAiInboxCategory(
+            job.messageId,
+            result.analysis.categories,
+            result.analysis.confidence
+          )
+        : null;
       this.database.completeAiJob(job.id);
       this.database.recordDiagnostic({
         level: "info",
@@ -604,6 +623,7 @@ export class AiService {
           threadMessages: conversation.length,
           priorThreadAnalyses: relatedAnalyses.sameThread.length,
           priorSenderAnalyses: relatedAnalyses.sameSender.length,
+          assignedInboxTab,
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens
         }
