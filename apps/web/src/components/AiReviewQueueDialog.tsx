@@ -8,6 +8,7 @@ interface AiReviewQueueDialogProps {
   queue: AiReviewQueue | null;
   loading: boolean;
   busyItemId: string | null;
+  reviewAllBusy: boolean;
   planningAction: { messageId: string; action: "calendar_event" | "todo" } | null;
   readOnly: boolean;
   onClose(): void;
@@ -17,6 +18,7 @@ interface AiReviewQueueDialogProps {
   onOpenMessage(message: Pick<MessageSummary, "id">): void;
   onCreateAction(item: AiReviewAnalysisItem, action: "calendar_event" | "todo"): void;
   onMarkAnalysisReviewed(item: AiReviewAnalysisItem): void;
+  onMarkAllAnalysesReviewed(): void;
   onCompleteFollowUp(followUp: MessageFollowUp): void;
 }
 
@@ -25,6 +27,7 @@ export function AiReviewQueueDialog({
   queue,
   loading,
   busyItemId,
+  reviewAllBusy,
   planningAction,
   readOnly,
   onClose,
@@ -34,6 +37,7 @@ export function AiReviewQueueDialog({
   onOpenMessage,
   onCreateAction,
   onMarkAnalysisReviewed,
+  onMarkAllAnalysesReviewed,
   onCompleteFollowUp
 }: AiReviewQueueDialogProps) {
   if (!open) return null;
@@ -42,13 +46,18 @@ export function AiReviewQueueDialog({
   const followUpGroups = groupFollowUps(queue?.followUps ?? []);
   const priorityCount = (queue?.analyses ?? []).filter(({ analysis }) => analysis.priority === "urgent" || analysis.priority === "high").length;
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!reviewAllBusy) onClose(); }}>
       <section className="dialog ai-review-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-review-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
           <div><BrainCircuit size={20} /><h2 id="ai-review-title">AI review queue</h2></div>
           <div className="dialog-header-actions">
-            <button className="icon-button" disabled={loading} onClick={onRefresh} title="Refresh" aria-label="Refresh review queue"><RefreshCw className={loading ? "spin" : ""} size={17} /></button>
-            <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
+            {!readOnly && Boolean(queue?.analyses.length) && (
+              <button className="secondary-button review-all-button" disabled={loading || reviewAllBusy} onClick={onMarkAllAnalysesReviewed} title="Set every Needs attention message as reviewed" aria-label="Set all reviewed">
+                {reviewAllBusy ? <LoaderCircle className="spin" size={15} /> : <CheckCheck size={15} />} <span>Set all reviewed</span>
+              </button>
+            )}
+            <button className="icon-button" disabled={loading || reviewAllBusy} onClick={onRefresh} title="Refresh" aria-label="Refresh review queue"><RefreshCw className={loading ? "spin" : ""} size={17} /></button>
+            <button className="icon-button" disabled={reviewAllBusy} onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
           </div>
         </header>
         <div className="dialog-body ai-review-body">
@@ -79,13 +88,13 @@ export function AiReviewQueueDialog({
                           </button>
                           {!readOnly && (
                             <div className="review-item-actions">
-                              <button className="review-quick-action event" disabled={busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onCreateAction(item, "calendar_event")} title="Create calendar event" aria-label={`Create event for ${item.message.subject}`}>
+                              <button className="review-quick-action event" disabled={reviewAllBusy || busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onCreateAction(item, "calendar_event")} title="Create calendar event" aria-label={`Create event for ${item.message.subject}`}>
                                 {planningAction?.messageId === item.message.id && planningAction.action === "calendar_event" ? <LoaderCircle className="spin" size={15} /> : <CalendarPlus size={15} />}<span>Event</span>
                               </button>
-                              <button className="review-quick-action todo" disabled={busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onCreateAction(item, "todo")} title="Create to-do" aria-label={`Create to-do for ${item.message.subject}`}>
+                              <button className="review-quick-action todo" disabled={reviewAllBusy || busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onCreateAction(item, "todo")} title="Create to-do" aria-label={`Create to-do for ${item.message.subject}`}>
                                 {planningAction?.messageId === item.message.id && planningAction.action === "todo" ? <LoaderCircle className="spin" size={15} /> : <ListTodo size={15} />}<span>To-do</span>
                               </button>
-                              <button className="review-mark-button" disabled={busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onMarkAnalysisReviewed(item)} title="Mark reviewed" aria-label={`Mark ${item.message.subject} reviewed`}>
+                              <button className="review-mark-button" disabled={reviewAllBusy || busyItemId === item.message.id || planningAction?.messageId === item.message.id} onClick={() => onMarkAnalysisReviewed(item)} title="Mark reviewed" aria-label={`Mark ${item.message.subject} reviewed`}>
                                 {busyItemId === item.message.id ? <LoaderCircle className="spin" size={15} /> : <CheckCheck size={15} />}<span>Mark reviewed</span>
                               </button>
                             </div>

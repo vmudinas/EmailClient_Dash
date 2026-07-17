@@ -8,6 +8,7 @@ import type {
   AiProviderId,
   AiReviewQueue,
   AiAnalysisReview,
+  AiAnalysisReviewAllResult,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleUpdate,
@@ -459,6 +460,10 @@ export class ApiClient {
 
   markMessageAnalysisReviewed(messageId: string): Promise<AiAnalysisReview> {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/ai/review`, { method: "POST" });
+  }
+
+  markAllMessageAnalysesReviewed(): Promise<AiAnalysisReviewAllResult> {
+    return this.request("/api/ai/review-queue/review-all", { method: "POST" });
   }
 
   listReplyStyles(): Promise<ReplyStyle[]> {

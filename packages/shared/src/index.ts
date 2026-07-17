@@ -484,6 +484,11 @@ export interface AiAnalysisReview {
   reviewedAt: string;
 }
 
+export interface AiAnalysisReviewAllResult {
+  reviewedCount: number;
+  reviewedAt: string;
+}
+
 export interface AiReviewQueue {
   drafts: EmailDraft[];
   analyses: AiReviewAnalysisItem[];

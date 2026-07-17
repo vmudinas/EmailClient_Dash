@@ -727,7 +727,33 @@ describe("EmailDatabase", () => {
       promptVersion: "test-v2",
       contentHash: "updated-content-hash"
     });
-    expect(database.getAiReviewQueue().analyses.map((item) => item.message.id)).toEqual([messageId]);
+    const secondMessageId = insertDeletionMessage(database, archive.id, inbox.id, "ai-message-2", "Review the deployment plan", {
+      sha256: "2".repeat(64),
+      relativePath: "22/ai-message-2",
+      sizeBytes: 18
+    });
+    database.upsertMessageAnalysis({
+      messageId: secondMessageId,
+      summary: "A deployment plan needs review.",
+      categories: ["Work", "Review"],
+      priority: "normal",
+      actionRequired: true,
+      actionSummary: "Review the deployment plan",
+      spamProbability: 0.01,
+      phishingProbability: 0.01,
+      draftRecommended: false,
+      confidence: 0.9,
+      signals: ["Explicit review request"],
+      model: "test-model",
+      promptVersion: "test-v1",
+      contentHash: "second-content-hash"
+    });
+    expect(database.getAiReviewQueue().analyses.map((item) => item.message.id)).toEqual(expect.arrayContaining([messageId, secondMessageId]));
+    expect(database.markAllMessageAnalysesReviewed()).toEqual({
+      reviewedCount: 2,
+      reviewedAt: expect.any(String)
+    });
+    expect(database.getAiReviewQueue().analyses).toEqual([]);
     expect(database.consumeAiRequest(1, 10)).toBe(true);
     expect(database.consumeAiRequest(1, 10)).toBe(false);
     database.recordAiTokenUsage(120, 35);

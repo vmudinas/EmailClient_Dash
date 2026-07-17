@@ -42,6 +42,7 @@ describe("AiReviewQueueDialog", () => {
     const onDeleteDraft = vi.fn();
     const onCreateAction = vi.fn();
     const onMarkAnalysisReviewed = vi.fn();
+    const onMarkAllAnalysesReviewed = vi.fn();
     const onCompleteFollowUp = vi.fn();
     const analysisItem = {
       message: {
@@ -116,6 +117,7 @@ describe("AiReviewQueueDialog", () => {
         queue={{ drafts: [draft], analyses: [analysisItem, urgentAnalysisItem, newerHighAnalysisItem], followUps: [followUp], totalItems: 5 }}
         loading={false}
         busyItemId={null}
+        reviewAllBusy={false}
         planningAction={null}
         readOnly={false}
         onClose={vi.fn()}
@@ -125,6 +127,7 @@ describe("AiReviewQueueDialog", () => {
         onOpenMessage={vi.fn()}
         onCreateAction={onCreateAction}
         onMarkAnalysisReviewed={onMarkAnalysisReviewed}
+        onMarkAllAnalysesReviewed={onMarkAllAnalysesReviewed}
         onCompleteFollowUp={onCompleteFollowUp}
       />
     );
@@ -137,6 +140,8 @@ describe("AiReviewQueueDialog", () => {
       expect.stringContaining("Review the updated budget"),
       expect.stringContaining("Approve the launch plan")
     ]);
+    fireEvent.click(screen.getByRole("button", { name: "Set all reviewed" }));
+    expect(onMarkAllAnalysesReviewed).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: /^Re: Contract review/i }));
     expect(onOpenDraft).toHaveBeenCalledWith(draft);
     fireEvent.click(screen.getByRole("button", { name: "Delete draft Re: Contract review" }));

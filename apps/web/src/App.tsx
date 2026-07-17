@@ -160,6 +160,7 @@ export function App() {
   const [reviewQueue, setReviewQueue] = useState<AiReviewQueue | null>(null);
   const [reviewQueueLoading, setReviewQueueLoading] = useState(false);
   const [reviewActionBusyId, setReviewActionBusyId] = useState<string | null>(null);
+  const [reviewAllBusy, setReviewAllBusy] = useState(false);
   const [reviewPlanningAction, setReviewPlanningAction] = useState<{ messageId: string; action: ReviewAction } | null>(null);
   const [reviewActionDraft, setReviewActionDraft] = useState<{
     item: AiReviewAnalysisItem;
@@ -941,6 +942,23 @@ export function App() {
     }
   };
 
+  const markAllReviewAnalysesReviewed = async () => {
+    if (!api || readOnly || !reviewQueue?.analyses.length) return;
+    if (!window.confirm("Mark every message in Needs attention as reviewed? This will hide them from the AI review queue.")) return;
+    setReviewAllBusy(true);
+    try {
+      const result = await api.markAllMessageAnalysesReviewed();
+      await refreshReviewQueue();
+      showError(result.reviewedCount === 0
+        ? "No messages needed review."
+        : `Marked ${result.reviewedCount.toLocaleString()} ${result.reviewedCount === 1 ? "message" : "messages"} reviewed.`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Messages could not be marked reviewed");
+    } finally {
+      setReviewAllBusy(false);
+    }
+  };
+
   const createReviewAnalysisAction = async (item: AiReviewAnalysisItem, action: ReviewAction) => {
     if (!api || readOnly) return;
     setReviewPlanningAction({ messageId: item.message.id, action });
@@ -1694,6 +1712,7 @@ export function App() {
         queue={reviewQueue}
         loading={reviewQueueLoading}
         busyItemId={reviewActionBusyId}
+        reviewAllBusy={reviewAllBusy}
         planningAction={reviewPlanningAction}
         readOnly={readOnly}
         onClose={() => setReviewQueueOpen(false)}
@@ -1709,6 +1728,7 @@ export function App() {
         }}
         onCreateAction={(item, action) => void createReviewAnalysisAction(item, action)}
         onMarkAnalysisReviewed={(item) => void markReviewAnalysisReviewed(item)}
+        onMarkAllAnalysesReviewed={() => void markAllReviewAnalysesReviewed()}
         onCompleteFollowUp={(followUp) => void completeReviewFollowUp(followUp.id, followUp.messageId)}
       />
       {api && reviewActionDraft && (

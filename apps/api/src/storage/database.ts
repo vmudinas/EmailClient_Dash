@@ -14,6 +14,7 @@ import type {
   AiProviderId,
   AiReviewQueue,
   AiAnalysisReview,
+  AiAnalysisReviewAllResult,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleMode,
@@ -2496,6 +2497,26 @@ export class EmailDatabase {
       ON CONFLICT(message_id) DO UPDATE SET reviewed_at = excluded.reviewed_at
     `).run(messageId, reviewedAt);
     return { messageId, reviewedAt };
+  }
+
+  markAllMessageAnalysesReviewed(): AiAnalysisReviewAllResult {
+    const reviewedAt = new Date().toISOString();
+    const result = this.db.prepare(`
+      INSERT INTO ai_analysis_reviews (message_id, reviewed_at)
+      SELECT a.message_id, ?
+      FROM ai_message_analysis a
+      JOIN messages m ON m.id = a.message_id
+      JOIN folders f ON f.id = m.folder_id
+      WHERE (a.action_required = 1 OR a.draft_recommended = 1 OR a.priority IN ('high', 'urgent'))
+        AND lower(trim(f.name)) != 'spam'
+        AND NOT EXISTS (
+          SELECT 1 FROM ai_analysis_reviews ar WHERE ar.message_id = a.message_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM conversation_replies cr WHERE cr.conversation_key = m.conversation_key
+        )
+    `).run(reviewedAt);
+    return { reviewedCount: result.changes, reviewedAt };
   }
 
   getAiUsageSummary(at = new Date()): AiUsageSummary {

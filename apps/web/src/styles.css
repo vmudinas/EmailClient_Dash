@@ -2790,6 +2790,13 @@ textarea:focus-visible {
   gap: 5px;
 }
 
+.review-all-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .drafts-body {
   min-height: 260px;
   overflow-y: auto;
@@ -6103,6 +6110,15 @@ textarea:focus-visible {
 
   .review-quick-action span,
   .review-mark-button span {
+    display: none;
+  }
+
+  .review-all-button {
+    width: 30px;
+    padding: 0;
+  }
+
+  .review-all-button span {
     display: none;
   }
 

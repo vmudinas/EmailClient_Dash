@@ -144,6 +144,30 @@ describe("Email API review queue routes", () => {
     expect(reviewed.json()).toMatchObject({ messageId, reviewedAt: expect.any(String) });
     const after = await runtime.app.inject({ method: "GET", url: "/api/ai/review-queue", headers, remoteAddress: "127.0.0.1" });
     expect(after.json()).toMatchObject({ totalItems: 0, analyses: [] });
+
+    runtime.database.upsertMessageAnalysis({
+      messageId,
+      summary: "Release approval still needs review.",
+      categories: ["Work"],
+      priority: "high",
+      actionRequired: true,
+      actionSummary: "Approve or request changes",
+      spamProbability: 0,
+      phishingProbability: 0,
+      draftRecommended: false,
+      confidence: 0.96,
+      signals: ["Updated approval request"],
+      model: "test-model",
+      promptVersion: "test-v2",
+      contentHash: "review-route-hash-2"
+    });
+    const unauthorizedBulk = await runtime.app.inject({ method: "POST", url: "/api/ai/review-queue/review-all", remoteAddress: "127.0.0.1" });
+    expect(unauthorizedBulk.statusCode).toBe(401);
+    const reviewedAll = await runtime.app.inject({ method: "POST", url: "/api/ai/review-queue/review-all", headers, remoteAddress: "127.0.0.1" });
+    expect(reviewedAll.statusCode).toBe(200);
+    expect(reviewedAll.json()).toMatchObject({ reviewedCount: 1, reviewedAt: expect.any(String) });
+    const afterBulk = await runtime.app.inject({ method: "GET", url: "/api/ai/review-queue", headers, remoteAddress: "127.0.0.1" });
+    expect(afterBulk.json()).toMatchObject({ totalItems: 0, analyses: [] });
   });
 });
 

@@ -956,6 +956,11 @@ export class EmailApiRuntime {
       return this.database.getAiReviewQueue();
     });
 
+    this.app.post("/api/ai/review-queue/review-all", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      return this.database.markAllMessageAnalysesReviewed();
+    });
+
     this.app.post<{ Params: { messageId: string } }>(
       "/api/messages/:messageId/ai/review",
       async (request, reply) => {
