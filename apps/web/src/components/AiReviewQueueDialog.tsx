@@ -33,6 +33,10 @@ export function AiReviewQueueDialog({
   onCompleteFollowUp
 }: AiReviewQueueDialogProps) {
   if (!open) return null;
+  const sortedDrafts = [...(queue?.drafts ?? [])].sort((left, right) => timestamp(right.updatedAt) - timestamp(left.updatedAt));
+  const attentionGroups = groupAnalyses(queue?.analyses ?? []);
+  const followUpGroups = groupFollowUps(queue?.followUps ?? []);
+  const priorityCount = (queue?.analyses ?? []).filter(({ analysis }) => analysis.priority === "urgent" || analysis.priority === "high").length;
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="dialog ai-review-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-review-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -46,49 +50,84 @@ export function AiReviewQueueDialog({
         <div className="dialog-body ai-review-body">
           {loading && !queue ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading review work</div> : queue?.totalItems ? (
             <>
-              <ReviewSection icon={<FileEdit size={17} />} title="Drafts to review" count={queue.drafts.length}>
-                {queue.drafts.map((draft) => (
-                  <div key={draft.id} className="review-queue-item">
-                    <button className="review-item-main" disabled={busyItemId === draft.id} onClick={() => onOpenDraft(draft)}>
-                      <span><strong>{draft.subject || "(No subject)"}</strong><small>To {draft.to.join(", ") || "No recipient"}{draft.replyStyleName ? ` · ${draft.replyStyleName}` : ""}</small></span>
-                      <FileEdit size={16} />
-                    </button>
-                    {!readOnly && (
-                      <button className="icon-button review-item-delete" disabled={busyItemId === draft.id} onClick={() => onDeleteDraft(draft)} title="Delete draft" aria-label={`Delete draft ${draft.subject || "(No subject)"}`}>
-                        {busyItemId === draft.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
-                      </button>
-                    )}
-                  </div>
-                ))}
+              <div className="review-queue-overview" aria-label="AI review queue summary">
+                <QueueMetric value={queue.totalItems} label="Total" />
+                <QueueMetric value={priorityCount} label="Priority" tone={priorityCount > 0 ? "urgent" : "neutral"} />
+                <QueueMetric value={queue.drafts.length} label="Drafts" tone="draft" />
+                <QueueMetric value={queue.followUps.length} label="Follow-ups" tone="follow-up" />
+              </div>
+              <ReviewSection icon={<BrainCircuit size={17} />} title="Needs attention" detail="Grouped by urgency · newest first" count={queue.analyses.length}>
+                <div className="review-queue-groups">
+                  {attentionGroups.map((group) => (
+                    <ReviewGroup key={group.id} title={group.title} count={group.items.length} tone={group.id}>
+                      {group.items.map((item) => (
+                        <div key={item.message.id} className={`review-queue-item attention priority-${item.analysis.priority}`}>
+                          <button data-testid="attention-message" className="review-item-main" disabled={busyItemId === item.message.id} onClick={() => onOpenMessage(item.message)}>
+                            <div className="review-item-copy">
+                              <div className="review-item-heading"><strong>{item.message.subject}</strong><span className={`ai-priority priority-${item.analysis.priority}`}>{item.analysis.priority}</span></div>
+                              <small>{displayAddress(item.message.sender)} · {formatDateTime(item.message.receivedAt ?? item.message.sentAt ?? item.analysis.updatedAt)}</small>
+                              <span className="review-item-action-summary">{item.analysis.actionSummary || item.analysis.summary}</span>
+                              <div className="review-item-tags">
+                                {item.analysis.categories.slice(0, 2).map((category) => <span key={category}>{category}</span>)}
+                                {item.analysis.draftRecommended && <span>Reply suggested</span>}
+                              </div>
+                            </div>
+                          </button>
+                          {!readOnly && (
+                            <button className="review-mark-button" disabled={busyItemId === item.message.id} onClick={() => onMarkAnalysisReviewed(item)} title="Mark reviewed" aria-label={`Mark ${item.message.subject} reviewed`}>
+                              {busyItemId === item.message.id ? <LoaderCircle className="spin" size={15} /> : <CheckCheck size={15} />}<span>Mark reviewed</span>
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </ReviewGroup>
+                  ))}
+                </div>
               </ReviewSection>
-              <ReviewSection icon={<BrainCircuit size={17} />} title="Messages needing decisions" count={queue.analyses.length}>
-                {queue.analyses.map((item) => (
-                  <div key={item.message.id} className="review-queue-item">
-                    <button className="review-item-main" disabled={busyItemId === item.message.id} onClick={() => onOpenMessage(item.message)}>
-                      <span><strong>{item.message.subject}</strong><small>{displayAddress(item.message.sender)} · {item.analysis.actionSummary || `${item.analysis.priority} priority`}</small></span>
-                      <span className={`ai-priority priority-${item.analysis.priority}`}>{item.analysis.priority}</span>
-                    </button>
-                    {!readOnly && (
-                      <button className="icon-button review-item-reviewed" disabled={busyItemId === item.message.id} onClick={() => onMarkAnalysisReviewed(item)} title="Mark reviewed" aria-label={`Mark ${item.message.subject} reviewed`}>
-                        {busyItemId === item.message.id ? <LoaderCircle className="spin" size={16} /> : <CheckCheck size={16} />}
+              <ReviewSection icon={<FileEdit size={17} />} title="Drafts to review" detail="Newest first" count={queue.drafts.length}>
+                <div className="review-queue-list">
+                  {sortedDrafts.map((draft) => (
+                    <div key={draft.id} className="review-queue-item draft">
+                      <button className="review-item-main" disabled={busyItemId === draft.id} onClick={() => onOpenDraft(draft)}>
+                        <div className="review-item-copy">
+                          <strong>{draft.subject || "(No subject)"}</strong>
+                          <small>To {draft.to.join(", ") || "No recipient"}{draft.replyStyleName ? ` · ${draft.replyStyleName}` : ""}</small>
+                          <span className="review-item-action-summary">Updated {formatDateTime(draft.updatedAt)}</span>
+                        </div>
+                        <FileEdit size={16} />
                       </button>
-                    )}
-                  </div>
-                ))}
+                      {!readOnly && (
+                        <button className="icon-button review-item-delete" disabled={busyItemId === draft.id} onClick={() => onDeleteDraft(draft)} title="Delete draft" aria-label={`Delete draft ${draft.subject || "(No subject)"}`}>
+                          {busyItemId === draft.id ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </ReviewSection>
-              <ReviewSection icon={<BellRing size={17} />} title="Follow-ups" count={queue.followUps.length}>
-                {queue.followUps.map((followUp) => (
-                  <div key={followUp.id} className={`review-queue-item follow-up ${new Date(followUp.dueAt).getTime() < Date.now() ? "overdue" : ""}`}>
-                    <button className="review-item-main" onClick={() => onOpenMessage({ id: followUp.messageId })}>
-                      <span><strong>{followUp.subject}</strong><small>{formatDateTime(followUp.dueAt)} · {followUp.note || displayAddress(followUp.sender)}</small></span>
-                    </button>
-                    {!readOnly && (
-                      <button className="icon-button" disabled={busyItemId === followUp.id} onClick={() => onCompleteFollowUp(followUp)} title="Mark complete" aria-label="Mark follow-up complete">
-                        {busyItemId === followUp.id ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
-                      </button>
-                    )}
-                  </div>
-                ))}
+              <ReviewSection icon={<BellRing size={17} />} title="Follow-ups" detail="Grouped by due date · earliest first" count={queue.followUps.length}>
+                <div className="review-queue-groups">
+                  {followUpGroups.map((group) => (
+                    <ReviewGroup key={group.id} title={group.title} count={group.items.length} tone={group.id}>
+                      {group.items.map((followUp) => (
+                        <div key={followUp.id} className={`review-queue-item follow-up ${group.id}`}>
+                          <button className="review-item-main" disabled={busyItemId === followUp.id} onClick={() => onOpenMessage({ id: followUp.messageId })}>
+                            <div className="review-item-copy">
+                              <strong>{followUp.subject}</strong>
+                              <small>{displayAddress(followUp.sender)} · {formatDateTime(followUp.dueAt)}</small>
+                              {followUp.note && <span className="review-item-action-summary">{followUp.note}</span>}
+                            </div>
+                          </button>
+                          {!readOnly && (
+                            <button className="icon-button review-item-reviewed" disabled={busyItemId === followUp.id} onClick={() => onCompleteFollowUp(followUp)} title="Mark complete" aria-label="Mark follow-up complete">
+                              {busyItemId === followUp.id ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </ReviewGroup>
+                  ))}
+                </div>
               </ReviewSection>
             </>
           ) : (
@@ -103,19 +142,84 @@ export function AiReviewQueueDialog({
 function ReviewSection({
   icon,
   title,
+  detail,
   count,
   children
 }: {
   icon: ReactNode;
   title: string;
+  detail: string;
   count: number;
   children: ReactNode;
 }) {
   if (count === 0) return null;
   return (
     <section className="review-queue-section">
-      <header>{icon}<h3>{title}</h3><span>{count}</span></header>
-      <div>{children}</div>
+      <header>{icon}<div><h3>{title}</h3><small>{detail}</small></div><span>{count}</span></header>
+      <div className="review-section-content">{children}</div>
     </section>
   );
+}
+
+function QueueMetric({ value, label, tone = "neutral" }: { value: number; label: string; tone?: string }) {
+  return <div className={`review-queue-metric ${tone}`}><strong>{value}</strong><span>{label}</span></div>;
+}
+
+function ReviewGroup({ title, count, tone, children }: { title: string; count: number; tone: string; children: ReactNode }) {
+  return (
+    <section className={`review-queue-group ${tone}`}>
+      <header><h4>{title}</h4><span>{count}</span></header>
+      <div className="review-queue-list">{children}</div>
+    </section>
+  );
+}
+
+function groupAnalyses(items: AiReviewAnalysisItem[]) {
+  const sorted = [...items].sort((left, right) => {
+    const priorityDifference = priorityRank(right.analysis.priority) - priorityRank(left.analysis.priority);
+    return priorityDifference || timestamp(right.analysis.updatedAt) - timestamp(left.analysis.updatedAt);
+  });
+  const groups = [
+    { id: "urgent", title: "Urgent", items: [] as AiReviewAnalysisItem[] },
+    { id: "high", title: "High priority", items: [] as AiReviewAnalysisItem[] },
+    { id: "reply", title: "Reply suggested", items: [] as AiReviewAnalysisItem[] },
+    { id: "action", title: "Action needed", items: [] as AiReviewAnalysisItem[] }
+  ];
+  for (const item of sorted) {
+    const id = item.analysis.priority === "urgent"
+      ? "urgent"
+      : item.analysis.priority === "high"
+        ? "high"
+        : item.analysis.draftRecommended
+          ? "reply"
+          : "action";
+    groups.find((group) => group.id === id)!.items.push(item);
+  }
+  return groups.filter((group) => group.items.length > 0);
+}
+
+function groupFollowUps(items: MessageFollowUp[]) {
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setHours(24, 0, 0, 0);
+  const groups = [
+    { id: "overdue", title: "Overdue", items: [] as MessageFollowUp[] },
+    { id: "today", title: "Due today", items: [] as MessageFollowUp[] },
+    { id: "upcoming", title: "Upcoming", items: [] as MessageFollowUp[] }
+  ];
+  for (const item of [...items].sort((left, right) => timestamp(left.dueAt) - timestamp(right.dueAt))) {
+    const dueAt = timestamp(item.dueAt);
+    const id = dueAt < now.getTime() ? "overdue" : dueAt < tomorrow.getTime() ? "today" : "upcoming";
+    groups.find((group) => group.id === id)!.items.push(item);
+  }
+  return groups.filter((group) => group.items.length > 0);
+}
+
+function priorityRank(priority: AiReviewAnalysisItem["analysis"]["priority"]): number {
+  return { low: 0, normal: 1, high: 2, urgent: 3 }[priority];
+}
+
+function timestamp(value: string): number {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
 }

@@ -78,10 +78,41 @@ describe("AiReviewQueueDialog", () => {
         updatedAt: "2026-07-16T12:01:00.000Z"
       }
     };
+    const urgentAnalysisItem = {
+      message: {
+        ...analysisItem.message,
+        id: "message-3",
+        subject: "Production outage",
+        receivedAt: "2026-07-16T11:00:00.000Z"
+      },
+      analysis: {
+        ...analysisItem.analysis,
+        id: "analysis-2",
+        messageId: "message-3",
+        priority: "urgent" as const,
+        actionSummary: "Restore service immediately",
+        updatedAt: "2026-07-16T11:01:00.000Z"
+      }
+    };
+    const newerHighAnalysisItem = {
+      message: {
+        ...analysisItem.message,
+        id: "message-4",
+        subject: "Review the updated budget",
+        receivedAt: "2026-07-16T13:00:00.000Z"
+      },
+      analysis: {
+        ...analysisItem.analysis,
+        id: "analysis-3",
+        messageId: "message-4",
+        actionSummary: "Approve the revised budget",
+        updatedAt: "2026-07-16T13:01:00.000Z"
+      }
+    };
     render(
       <AiReviewQueueDialog
         open
-        queue={{ drafts: [draft], analyses: [analysisItem], followUps: [followUp], totalItems: 3 }}
+        queue={{ drafts: [draft], analyses: [analysisItem, urgentAnalysisItem, newerHighAnalysisItem], followUps: [followUp], totalItems: 5 }}
         loading={false}
         busyItemId={null}
         readOnly={false}
@@ -95,6 +126,14 @@ describe("AiReviewQueueDialog", () => {
       />
     );
 
+    expect(screen.getByRole("heading", { name: "Urgent" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "High priority" })).toBeTruthy();
+    const attentionItems = screen.getAllByTestId("attention-message");
+    expect(attentionItems.map((item) => item.textContent)).toEqual([
+      expect.stringContaining("Production outage"),
+      expect.stringContaining("Review the updated budget"),
+      expect.stringContaining("Approve the launch plan")
+    ]);
     fireEvent.click(screen.getByRole("button", { name: /^Re: Contract review/i }));
     expect(onOpenDraft).toHaveBeenCalledWith(draft);
     fireEvent.click(screen.getByRole("button", { name: "Delete draft Re: Contract review" }));
