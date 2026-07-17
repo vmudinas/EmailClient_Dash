@@ -1610,6 +1610,68 @@ describe("Email API calendar source routes", () => {
   });
 });
 
+describe("Email API Inbox category routes", () => {
+  it("filters messages and returns category counts", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({ dataDir, port: 0, devAuthBypass: false, logger: false }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const headers = { authorization: `Bearer ${runtime.localToken}` };
+    const archive = runtime.database.createArchive({
+      name: "Inbox categories",
+      sourceType: "mbox",
+      fingerprint: "inbox-category-routes",
+      sizeBytes: 0
+    });
+    runtime.database.completeArchive(archive.id, 0);
+    const inbox = runtime.database.createFolder(archive.id, "Inbox");
+    for (const category of ["primary", "social"] as const) {
+      runtime.database.insertMessage({
+        archiveId: archive.id,
+        folderId: inbox.id,
+        inboxCategory: category,
+        sourceKey: category,
+        internetMessageId: null,
+        subject: category,
+        sender: { name: null, address: "sender@example.test" },
+        to: [],
+        cc: [],
+        bcc: [],
+        sentAt: null,
+        receivedAt: null,
+        bodyText: "category route marker",
+        bodyHtml: null,
+        headers: {},
+        sizeBytes: 1,
+        attachments: []
+      });
+    }
+
+    const filtered = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages?folderId=${inbox.id}&inboxCategory=social`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    const counts = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages/category-counts?folderId=${inbox.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    const invalid = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages?folderId=${inbox.id}&inboxCategory=unknown`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+
+    expect(filtered.json()).toMatchObject({ items: [{ subject: "social", inboxCategory: "social" }] });
+    expect(counts.json()).toEqual({ primary: 1, promotions: 0, social: 1, updates: 0 });
+    expect(invalid.statusCode).toBe(400);
+  });
+});
+
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "archive-mail-api-"));
   directories.push(directory);

@@ -83,6 +83,16 @@ export interface LocalMessageState {
   updatedAt: string | null;
 }
 
+export const INBOX_CATEGORIES = ["primary", "promotions", "social", "updates"] as const;
+export type InboxCategory = typeof INBOX_CATEGORIES[number];
+
+export interface InboxCategoryCounts {
+  primary: number;
+  promotions: number;
+  social: number;
+  updates: number;
+}
+
 export interface MessageSummary {
   id: string;
   archiveId: string;
@@ -96,6 +106,7 @@ export interface MessageSummary {
   preview: string;
   hasAttachments: boolean;
   attachmentCount: number;
+  inboxCategory?: InboxCategory;
   hasAiAnalysis?: boolean;
   hasCalendarEvent?: boolean;
   hasPendingFollowUp?: boolean;
@@ -873,6 +884,7 @@ export interface SearchFilters {
   archiveId?: string;
   folderId?: string;
   starred?: boolean;
+  inboxCategory?: InboxCategory;
   from?: string;
   to?: string;
   after?: string;

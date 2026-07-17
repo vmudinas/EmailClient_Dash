@@ -11,6 +11,7 @@ import Fastify, {
 } from "fastify";
 import {
   AI_PROVIDER_IDS,
+  INBOX_CATEGORIES,
   aiActiveProviderSchema,
   aiScheduleCreateSchema,
   aiScheduleUpdateSchema,
@@ -57,6 +58,7 @@ import {
   type DiagnosticCategory,
   type DiagnosticLevel,
   type ImportOptions,
+  type InboxCategory,
   type SessionRole,
   type SharingState
 } from "@email-client/shared";
@@ -626,17 +628,33 @@ export class EmailApiRuntime {
         archiveId?: string;
         folderId?: string;
         starred?: string;
+        inboxCategory?: string;
         cursor?: string;
         limit?: string;
       };
     }>("/api/messages", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      const inboxCategory = parseInboxCategory(request.query.inboxCategory);
+      if (request.query.inboxCategory && !inboxCategory) {
+        return reply.code(400).send({ error: "Invalid inbox category" });
+      }
       return this.database.listMessages({
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
         starred: optionalBoolean(request.query.starred),
+        inboxCategory,
         cursor: request.query.cursor,
         limit: optionalNumber(request.query.limit)
+      });
+    });
+
+    this.app.get<{
+      Querystring: { archiveId?: string; folderId?: string };
+    }>("/api/messages/category-counts", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      return this.database.countInboxCategories({
+        archiveId: request.query.archiveId,
+        folderId: request.query.folderId
       });
     });
 
@@ -646,6 +664,7 @@ export class EmailApiRuntime {
         archiveId?: string;
         folderId?: string;
         starred?: string;
+        inboxCategory?: string;
         from?: string;
         to?: string;
         after?: string;
@@ -662,11 +681,16 @@ export class EmailApiRuntime {
       if (query.length > 500) {
         return reply.code(400).send({ error: "Search query is too long" });
       }
+      const inboxCategory = parseInboxCategory(request.query.inboxCategory);
+      if (request.query.inboxCategory && !inboxCategory) {
+        return reply.code(400).send({ error: "Invalid inbox category" });
+      }
       return this.database.search({
         q: query,
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
         starred: optionalBoolean(request.query.starred),
+        inboxCategory,
         from: request.query.from,
         to: request.query.to,
         after: request.query.after,
@@ -2385,6 +2409,10 @@ function optionalBoolean(value: string | undefined): boolean | undefined {
   if (value === "true" || value === "1") return true;
   if (value === "false" || value === "0") return false;
   return undefined;
+}
+
+function parseInboxCategory(value: string | undefined): InboxCategory | undefined {
+  return INBOX_CATEGORIES.includes(value as InboxCategory) ? value as InboxCategory : undefined;
 }
 
 function diagnosticLevel(value: string | undefined): DiagnosticLevel | undefined {

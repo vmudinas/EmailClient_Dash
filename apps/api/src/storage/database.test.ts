@@ -124,6 +124,35 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("filters and counts Inbox categories", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Categorized mail",
+      sourceType: "mbox",
+      fingerprint: "categorized-mail",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const inbox = database.createFolder(archive.id, "Inbox");
+    insertDatedMessage(database, archive.id, inbox.id, "primary", "2026-07-04T12:00:00.000Z", undefined, "primary");
+    insertDatedMessage(database, archive.id, inbox.id, "promotion", "2026-07-03T12:00:00.000Z", undefined, "promotions");
+    insertDatedMessage(database, archive.id, inbox.id, "social", "2026-07-02T12:00:00.000Z", undefined, "social");
+    insertDatedMessage(database, archive.id, inbox.id, "update", "2026-07-01T12:00:00.000Z", undefined, "updates");
+
+    expect(database.countInboxCategories({ folderId: inbox.id })).toEqual({
+      primary: 1,
+      promotions: 1,
+      social: 1,
+      updates: 1
+    });
+    expect(database.listMessages({ folderId: inbox.id, inboxCategory: "social" }).items.map((message) => message.subject))
+      .toEqual(["social"]);
+    expect(database.search({ q: "ordering-marker", folderId: inbox.id, inboxCategory: "updates" }).items.map((hit) => hit.message.subject))
+      .toEqual(["update"]);
+    database.close();
+  });
+
   it("migrates existing undated mail into a dedicated child mailbox", async () => {
     const dataDir = await temporaryDirectory();
     let database = new EmailDatabase(dataDir);
@@ -1849,11 +1878,13 @@ function insertDatedMessage(
   folderId: string,
   sourceKey: string,
   receivedAt: string | null,
-  sentAt: string | null = receivedAt
+  sentAt: string | null = receivedAt,
+  inboxCategory?: "primary" | "promotions" | "social" | "updates"
 ): string {
   return database.insertMessage({
     archiveId,
     folderId,
+    inboxCategory,
     sourceKey,
     internetMessageId: null,
     subject: sourceKey,

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import BetterSqlite3, { type Database as SqliteDatabase } from "better-sqlite3";
+import { classifyInboxCategory } from "../lib/message-category.js";
 import type {
   AccountRole,
   AdminInsights,
@@ -45,6 +46,8 @@ import type {
   ImportJobStatus,
   ImportPhase,
   ImportSourceType,
+  InboxCategory,
+  InboxCategoryCounts,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
@@ -196,6 +199,7 @@ export interface MessageInput {
   id?: string;
   archiveId: string;
   folderId: string;
+  inboxCategory?: InboxCategory;
   sourceKey: string;
   internetMessageId: string | null;
   subject: string;
@@ -1357,6 +1361,44 @@ export class EmailDatabase {
         UPDATE gmail_connections SET can_manage_calendar = 0 WHERE can_manage_calendar = 1;
         PRAGMA user_version = 24;
       `);
+    }
+
+    const inboxCategoriesVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (inboxCategoriesVersion < 25) {
+      const hasInboxCategory = (this.db.pragma("table_info(messages)") as Array<{ name: string }>)
+        .some((column) => column.name === "inbox_category");
+      if (!hasInboxCategory) {
+        this.db.exec(`
+          ALTER TABLE messages ADD COLUMN inbox_category TEXT NOT NULL DEFAULT 'primary'
+            CHECK(inbox_category IN ('primary', 'promotions', 'social', 'updates'));
+        `);
+      }
+      const categoryBatch = this.db.prepare(`
+        SELECT id, sender_address, subject, substr(body_text, 1, 2000) AS body_text, headers_json
+        FROM messages
+        WHERE id > ?
+        ORDER BY id
+        LIMIT 500
+      `);
+      const updateCategory = this.db.prepare("UPDATE messages SET inbox_category = ? WHERE id = ?");
+      const updateCategoryBatch = this.db.transaction((rows: Row[]) => {
+        for (const row of rows) {
+          updateCategory.run(classifyInboxCategory({
+            senderAddress: String(row.sender_address ?? ""),
+            subject: String(row.subject ?? ""),
+            bodyText: String(row.body_text ?? ""),
+            headers: parseJson<Record<string, string>>(row.headers_json, {})
+          }), String(row.id));
+        }
+      });
+      let lastMessageId = "";
+      while (true) {
+        const rows = categoryBatch.all(lastMessageId) as Row[];
+        if (rows.length === 0) break;
+        updateCategoryBatch(rows);
+        lastMessageId = String(rows.at(-1)?.id ?? lastMessageId);
+      }
+      this.db.pragma("user_version = 25");
     }
   }
 
@@ -4254,6 +4296,12 @@ export class EmailDatabase {
       headers: input.headers,
       referencedKey
     });
+    const inboxCategory = input.inboxCategory ?? classifyInboxCategory({
+      senderAddress: input.sender.address,
+      subject: input.subject,
+      bodyText: input.bodyText,
+      headers: input.headers
+    });
 
     const insert = this.db.transaction(() => {
       const result = this.db.prepare(`
@@ -4261,8 +4309,8 @@ export class EmailDatabase {
           id, archive_id, folder_id, source_key, internet_message_id, conversation_key, subject,
           sender_name, sender_address, to_json, cc_json, bcc_json, recipients_text,
           sent_at, received_at, body_text, body_html, headers_json,
-          has_attachments, attachment_count, size_bytes, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          has_attachments, attachment_count, size_bytes, inbox_category, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         input.archiveId,
@@ -4285,6 +4333,7 @@ export class EmailDatabase {
         input.attachments.length > 0 ? 1 : 0,
         input.attachments.length,
         input.sizeBytes,
+        inboxCategory,
         now
       );
 
@@ -4381,6 +4430,7 @@ export class EmailDatabase {
     archiveId?: string;
     folderId?: string;
     starred?: boolean;
+    inboxCategory?: InboxCategory;
     cursor?: string;
     limit?: number;
   }): CursorPage<MessageSummary> {
@@ -4400,6 +4450,10 @@ export class EmailDatabase {
       conditions.push("COALESCE(s.is_starred, 0) = ?");
       params.push(options.starred ? 1 : 0);
     }
+    if (options.inboxCategory) {
+      conditions.push("m.inbox_category = ?");
+      params.push(options.inboxCategory);
+    }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.db.prepare(`
       SELECT ${MESSAGE_SUMMARY_COLUMNS}
@@ -4415,6 +4469,37 @@ export class EmailDatabase {
     const hasMore = rows.length > limit;
     const items = rows.slice(0, limit).map((row) => this.mapMessageSummary(row));
     return { items, nextCursor: hasMore ? encodeOffset(offset + limit) : null };
+  }
+
+  countInboxCategories(options: { archiveId?: string; folderId?: string }): InboxCategoryCounts {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (options.archiveId) {
+      conditions.push("archive_id = ?");
+      params.push(options.archiveId);
+    }
+    if (options.folderId) {
+      conditions.push("folder_id = ?");
+      params.push(options.folderId);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.db.prepare(`
+      SELECT inbox_category, COUNT(*) AS count FROM messages
+      ${where}
+      GROUP BY inbox_category
+    `).all(...params) as Row[];
+    const counts: InboxCategoryCounts = { primary: 0, promotions: 0, social: 0, updates: 0 };
+    for (const row of rows) {
+      const category = String(row.inbox_category) as InboxCategory;
+      if (category in counts) counts[category] = Number(row.count);
+    }
+    return counts;
+  }
+
+  updateMessageInboxCategoryBySourceKey(archiveId: string, sourceKey: string, category: InboxCategory): boolean {
+    return this.db.prepare(`
+      UPDATE messages SET inbox_category = ? WHERE archive_id = ? AND source_key = ?
+    `).run(category, archiveId, sourceKey).changes > 0;
   }
 
   getMessage(id: string): MessageDetail | null {
@@ -4736,6 +4821,10 @@ export class EmailDatabase {
     if (options.starred !== undefined) {
       filters.push("COALESCE(s.is_starred, 0) = ?");
       filterParams.push(options.starred ? 1 : 0);
+    }
+    if (options.inboxCategory) {
+      filters.push("m.inbox_category = ?");
+      filterParams.push(options.inboxCategory);
     }
     if (options.from) {
       filters.push("lower(m.sender_address || ' ' || COALESCE(m.sender_name, '')) LIKE ?");
@@ -5661,6 +5750,7 @@ export class EmailDatabase {
       preview: previewText(String(row.body_text ?? "")),
       hasAttachments: Boolean(row.has_attachments),
       attachmentCount: Number(row.attachment_count),
+      inboxCategory: row.inbox_category as InboxCategory,
       hasAiAnalysis: Boolean(row.has_ai_analysis),
       hasCalendarEvent: Boolean(row.has_calendar_event),
       hasPendingFollowUp: Boolean(row.has_pending_follow_up),
@@ -5791,6 +5881,7 @@ const MESSAGE_SUMMARY_COLUMNS = `
   m.body_text,
   m.has_attachments,
   m.attachment_count,
+  m.inbox_category,
   EXISTS(SELECT 1 FROM ai_message_analysis analysis WHERE analysis.message_id = m.id) AS has_ai_analysis,
   EXISTS(SELECT 1 FROM message_calendar_events linked_event WHERE linked_event.message_id = m.id) AS has_calendar_event,
   EXISTS(

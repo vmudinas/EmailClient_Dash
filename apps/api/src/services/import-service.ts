@@ -218,6 +218,7 @@ export class ImportService {
     this.database.insertMessage({
       archiveId: input.archiveId,
       folderId,
+      inboxCategory: input.message.inboxCategory,
       sourceKey: input.message.sourceKey,
       internetMessageId: input.message.internetMessageId,
       subject: input.message.subject,

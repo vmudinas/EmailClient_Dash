@@ -11,6 +11,7 @@ import type {
 } from "@email-client/shared";
 import { normalizeRfc822Message } from "../importers/mbox-importer.js";
 import type { RawAttachment } from "../importers/types.js";
+import { gmailInboxCategory } from "../lib/message-category.js";
 import {
   type EmailStore,
   type GmailConnectionRecord
@@ -684,12 +685,24 @@ export class GmailService {
         throwIfAborted(controller.signal);
         const sourceKey = gmailSourceKey(connection.email, messageId);
         try {
-          if (!this.database.hasMessage(connection.archiveId, sourceKey)) {
-            const rawMessage = await this.gmailJson<GmailRawMessage>(
-              `${GMAIL_API}/users/me/messages/${encodeURIComponent(messageId)}?format=raw`,
-              accessToken,
-              controller.signal
-            );
+          const exists = this.database.hasMessage(connection.archiveId, sourceKey);
+          const rawMessage = await this.gmailJson<GmailRawMessage>(
+            `${GMAIL_API}/users/me/messages/${encodeURIComponent(messageId)}?format=${exists ? "metadata" : "raw"}`,
+            accessToken,
+            controller.signal
+          );
+          const labelIds = rawMessage.labelIds ?? [];
+          this.database.updateMessageInboxCategoryBySourceKey(
+            connection.archiveId,
+            sourceKey,
+            gmailInboxCategory(labelIds)
+          );
+          this.database.setInitialMessageReadState(
+            connection.archiveId,
+            sourceKey,
+            !labelIds.includes("UNREAD")
+          );
+          if (!exists) {
             if (!rawMessage.raw) throw new Error("Gmail returned a message without raw MIME content");
             const inserted = await this.importRawMessage(
               connection,
@@ -934,6 +947,9 @@ export class GmailService {
       sourceKey,
       folderPath
     );
+    const labelIds = rawMessage.labelIds ?? [];
+    normalized.inboxCategory = gmailInboxCategory(labelIds);
+    normalized.headers["x-archive-mail-gmail-label-ids"] = labelIds.join(",");
     if (rawMessage.threadId) {
       normalized.headers["x-archive-mail-gmail-thread-id"] = rawMessage.threadId;
     }
@@ -948,9 +964,14 @@ export class GmailService {
       this.database.setInitialMessageReadState(
         connection.archiveId,
         sourceKey,
-        !(rawMessage.labelIds ?? []).includes("UNREAD")
+        !labelIds.includes("UNREAD")
       );
     }
+    this.database.updateMessageInboxCategoryBySourceKey(
+      connection.archiveId,
+      sourceKey,
+      normalized.inboxCategory
+    );
     return inserted;
   }
 

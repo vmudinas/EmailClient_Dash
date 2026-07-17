@@ -37,6 +37,8 @@ import type {
   GmailSendResult,
   GmailSettingsPatch,
   ImportJob,
+  InboxCategory,
+  InboxCategoryCounts,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
@@ -363,10 +365,15 @@ export class ApiClient {
     archiveId?: string;
     folderId?: string;
     starred?: boolean;
+    inboxCategory?: InboxCategory;
     cursor?: string;
     limit?: number;
   }): Promise<CursorPage<MessageSummary>> {
     return this.request(`/api/messages?${queryString(options)}`);
+  }
+
+  inboxCategoryCounts(options: { archiveId?: string; folderId?: string }): Promise<InboxCategoryCounts> {
+    return this.request(`/api/messages/category-counts?${queryString(options)}`);
   }
 
   search(

@@ -6,13 +6,18 @@ import {
   BrainCircuit,
   CalendarClock,
   ChevronDown,
+  CircleUserRound,
   Inbox,
+  Info,
   LoaderCircle,
   Paperclip,
   SearchX,
-  Star
+  Star,
+  Tag
 } from "lucide-react";
 import type {
+  InboxCategory,
+  InboxCategoryCounts,
   MessageSummary,
   SearchHit
 } from "@email-client/shared";
@@ -36,7 +41,23 @@ interface MessageListProps {
   onDragEnd(): void;
   onLoadMore(): void;
   onMobileBack(): void;
+  inboxCategories?: {
+    active: InboxCategory;
+    counts: InboxCategoryCounts;
+    onSelect(category: InboxCategory): void;
+  } | null;
 }
+
+const CATEGORY_TABS: Array<{
+  id: InboxCategory;
+  label: string;
+  icon: typeof Inbox;
+}> = [
+  { id: "primary", label: "Primary", icon: Inbox },
+  { id: "promotions", label: "Promotions", icon: Tag },
+  { id: "social", label: "Social", icon: CircleUserRound },
+  { id: "updates", label: "Updates", icon: Info }
+];
 
 export function MessageList({
   items,
@@ -50,7 +71,8 @@ export function MessageList({
   onDragStart,
   onDragEnd,
   onLoadMore,
-  onMobileBack
+  onMobileBack,
+  inboxCategories
 }: MessageListProps) {
   const [draggingMessageId, setDraggingMessageId] = useState<string | null>(null);
   return (
@@ -64,6 +86,27 @@ export function MessageList({
           <span>{items.length.toLocaleString()}{hasMore ? "+" : ""} shown</span>
         </div>
       </header>
+
+      {inboxCategories && (
+        <nav className="inbox-category-tabs" aria-label="Inbox categories">
+          {CATEGORY_TABS.map((category) => {
+            const Icon = category.icon;
+            return (
+              <button
+                className={`inbox-category-tab ${category.id} ${inboxCategories.active === category.id ? "active" : ""}`}
+                key={category.id}
+                onClick={() => inboxCategories.onSelect(category.id)}
+                aria-pressed={inboxCategories.active === category.id}
+                aria-label={`${category.label}, ${inboxCategories.counts[category.id].toLocaleString()} messages`}
+              >
+                <Icon size={15} />
+                <span>{category.label}</span>
+                <small>{inboxCategories.counts[category.id].toLocaleString()}</small>
+              </button>
+            );
+          })}
+        </nav>
+      )}
 
       <div className="message-list" role="listbox" aria-label={title}>
         {items.map(({ message, hit }) => (
@@ -135,8 +178,16 @@ export function MessageList({
         {!loading && items.length === 0 && (
           <div className="list-empty">
             {searching ? <SearchX size={28} /> : <Inbox size={28} />}
-            <strong>{searching ? "No matching messages" : "No messages here"}</strong>
-            <span>{searching ? "Adjust the search or filters." : "Choose another folder or import an archive."}</span>
+            <strong>{searching
+              ? "No matching messages"
+              : inboxCategories
+                ? `No ${inboxCategories.active} messages`
+                : "No messages here"}</strong>
+            <span>{searching
+              ? "Adjust the search or filters."
+              : inboxCategories
+                ? "Choose another Inbox category."
+                : "Choose another folder or import an archive."}</span>
           </div>
         )}
 

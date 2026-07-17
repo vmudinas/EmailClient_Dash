@@ -85,7 +85,7 @@ describe("GmailService", () => {
           id: "gmail-message-1",
           threadId: "gmail-thread-source",
           raw: rawMime.toString("base64url"),
-          labelIds: ["INBOX", "UNREAD"]
+          labelIds: ["INBOX", "UNREAD", "CATEGORY_PROMOTIONS"]
         });
       }
       if (url.pathname.endsWith("/users/me/messages/gmail-sent-1")) {
@@ -147,6 +147,7 @@ describe("GmailService", () => {
     expect(hit.matchedAttachmentName).toBe("gmail-notes.txt");
     const detail = database.getMessage(hit.message.id)!;
     expect(detail.folderPath).toBe("Latest Gmail/Inbox");
+    expect(detail.inboxCategory).toBe("promotions");
     expect(detail.attachments).toHaveLength(1);
     const stored = database.getAttachmentBlob(detail.attachments[0]!.id)!;
     expect((await blobStore.read(stored.relativePath)).toString("utf8")).toContain("reconciliation workbook");

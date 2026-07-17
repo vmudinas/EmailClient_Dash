@@ -811,6 +811,77 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.inbox-category-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  flex: 0 0 auto;
+  min-height: 58px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.inbox-category-tab {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 1px 5px;
+  min-width: 0;
+  padding: 8px 6px 9px;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.inbox-category-tab::after {
+  position: absolute;
+  right: 6px;
+  bottom: 0;
+  left: 6px;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: currentColor;
+  content: "";
+  opacity: 0;
+}
+
+.inbox-category-tab:hover {
+  background: var(--surface-soft);
+}
+
+.inbox-category-tab svg {
+  grid-row: 1 / 3;
+  align-self: center;
+}
+
+.inbox-category-tab span {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+}
+
+.inbox-category-tab small {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.inbox-category-tab.active {
+  background: color-mix(in srgb, currentColor 7%, var(--surface));
+}
+
+.inbox-category-tab.active::after {
+  opacity: 1;
+}
+
+.inbox-category-tab.primary.active { color: #1a73e8; }
+.inbox-category-tab.promotions.active { color: #188038; }
+.inbox-category-tab.social.active { color: #9334e6; }
+.inbox-category-tab.updates.active { color: #b06000; }
+
 .message-list {
   flex: 1;
   min-height: 0;

@@ -39,6 +39,8 @@ import type {
   GmailConnection,
   GmailSendRequest,
   ImportJob,
+  InboxCategory,
+  InboxCategoryCounts,
   LocalMessageStatePatch,
   MessageActionSuggestion,
   MessageDetail,
@@ -91,6 +93,12 @@ const EMPTY_SHARING: SharingState = {
 };
 
 const SESSION_STORAGE_KEY = "archive-mail-session-token";
+const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
+  primary: 0,
+  promotions: 0,
+  social: 0,
+  updates: 0
+};
 
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
@@ -105,6 +113,8 @@ export function App() {
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedSmartMailbox, setSelectedSmartMailbox] = useState<SmartMailbox | null>(null);
+  const [inboxCategory, setInboxCategory] = useState<InboxCategory>("primary");
+  const [inboxCategoryCounts, setInboxCategoryCounts] = useState<InboxCategoryCounts>(EMPTY_INBOX_CATEGORY_COUNTS);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -179,6 +189,8 @@ export function App() {
   const electron = Boolean(window.emailClient);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
+  const showInboxCategories = selectedFolder?.name.trim().toLowerCase() === "inbox"
+    && selectedSmartMailbox === null;
   const activeFilterCount = Object.values(filters).filter((value) => value !== "" && value !== undefined).length;
 
   const showError = useCallback((value: string) => {
@@ -385,11 +397,15 @@ export function App() {
     }
     setLoadingMessages(true);
     try {
+      const countsPromise = !append && showInboxCategories
+        ? api.inboxCategoryCounts({ archiveId: selectedArchiveId, folderId: selectedFolderId ?? undefined })
+        : Promise.resolve(null);
       if (searchTerm) {
         const searchFilters: SearchFilters = {
           archiveId: selectedArchiveId,
           folderId: selectedFolderId ?? undefined,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
+          inboxCategory: showInboxCategories ? inboxCategory : undefined,
           from: filters.from || undefined,
           to: filters.to || undefined,
           after: filters.after || undefined,
@@ -399,24 +415,28 @@ export function App() {
           cursor: append ? nextCursor ?? undefined : undefined,
           limit: 50
         };
-        const page = await api.search(searchTerm, searchFilters);
+        const [page, counts] = await Promise.all([api.search(searchTerm, searchFilters), countsPromise]);
         setItems((current) => append
           ? [...current, ...page.items.map(hitToItem)]
           : page.items.map(hitToItem));
         setNextCursor(page.nextCursor);
+        if (counts) setInboxCategoryCounts(counts);
       } else {
-        const page = await api.listMessages({
+        const [page, counts] = await Promise.all([api.listMessages({
           archiveId: selectedArchiveId,
           folderId: selectedFolderId ?? undefined,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
+          inboxCategory: showInboxCategories ? inboxCategory : undefined,
           cursor: append ? nextCursor ?? undefined : undefined,
           limit: 50
-        });
+        }), countsPromise]);
         setItems((current) => append
           ? [...current, ...page.items.map(messageToItem)]
           : page.items.map(messageToItem));
         setNextCursor(page.nextCursor);
+        if (counts) setInboxCategoryCounts(counts);
       }
+      if (!showInboxCategories) setInboxCategoryCounts(EMPTY_INBOX_CATEGORY_COUNTS);
     } catch (error) {
       showError(error instanceof Error ? error.message : "Messages could not be loaded");
     } finally {
@@ -427,6 +447,8 @@ export function App() {
     selectedArchiveId,
     selectedFolderId,
     selectedSmartMailbox,
+    showInboxCategories,
+    inboxCategory,
     searchTerm,
     filters,
     sort,
@@ -440,7 +462,7 @@ export function App() {
     setSelectedMessageId(null);
     setMessage(null);
     void loadMessages(false);
-  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort]);
+  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory]);
 
   const loadFoldersForGmail = useCallback(async (archiveId: string): Promise<Folder[]> => {
     if (!api) return [];
@@ -565,18 +587,31 @@ export function App() {
     setSelectedArchiveId(id);
     setSelectedFolderId(null);
     setSelectedSmartMailbox(null);
+    setSelectedMessageId(null);
+    setMessage(null);
     setMobileView("messages");
   };
 
   const selectFolder = (id: string | null) => {
     setSelectedFolderId(id);
     setSelectedSmartMailbox(null);
+    setInboxCategory("primary");
+    setSelectedMessageId(null);
+    setMessage(null);
     setMobileView("messages");
+  };
+
+  const selectInboxCategory = (category: InboxCategory) => {
+    setInboxCategory(category);
+    setSelectedMessageId(null);
+    setMessage(null);
   };
 
   const selectSmartMailbox = (mailbox: SmartMailbox) => {
     setSelectedFolderId(null);
     setSelectedSmartMailbox(mailbox);
+    setSelectedMessageId(null);
+    setMessage(null);
     setMobileView("messages");
   };
 
@@ -1514,6 +1549,11 @@ export function App() {
               onDragEnd={() => setDraggedMessage(null)}
               onLoadMore={() => void loadMessages(true)}
               onMobileBack={() => setMobileView("folders")}
+              inboxCategories={showInboxCategories ? {
+                active: inboxCategory,
+                counts: inboxCategoryCounts,
+                onSelect: selectInboxCategory
+              } : null}
             />
             <MessageReader
               key={message?.id ?? "empty-reader"}

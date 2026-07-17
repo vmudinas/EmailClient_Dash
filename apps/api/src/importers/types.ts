@@ -1,4 +1,4 @@
-import type { EmailAddress } from "@email-client/shared";
+import type { EmailAddress, InboxCategory } from "@email-client/shared";
 
 export interface RawAttachment {
   filename: string;
@@ -11,6 +11,7 @@ export interface RawAttachment {
 export interface NormalizedMessage {
   sourceKey: string;
   folderPath: string;
+  inboxCategory?: InboxCategory;
   internetMessageId: string | null;
   subject: string;
   sender: EmailAddress;

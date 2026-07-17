@@ -97,4 +97,34 @@ describe("MessageList drag and drop", () => {
     expect(screen.getByText("Analyzed")).toBeTruthy();
     expect(screen.getByText("Event")).toBeTruthy();
   });
+
+  it("shows Gmail-style Inbox categories with counts and selection", () => {
+    const onSelectCategory = vi.fn();
+    render(
+      <MessageList
+        items={[]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        inboxCategories={{
+          active: "primary",
+          counts: { primary: 12, promotions: 8, social: 4, updates: 6 },
+          onSelect: onSelectCategory
+        }}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Primary, 12 messages" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Social, 4 messages" }));
+    expect(onSelectCategory).toHaveBeenCalledWith("social");
+    expect(screen.getByText("No primary messages")).toBeTruthy();
+  });
 });
