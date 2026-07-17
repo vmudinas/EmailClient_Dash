@@ -1587,8 +1587,14 @@ describe("Email API calendar source routes", () => {
     runtimes.push(runtime);
     await runtime.initialize();
     const headers = { authorization: `Bearer ${runtime.localToken}` };
+    const sourceId = Buffer.from(JSON.stringify({
+      provider: "google",
+      accountId: "account-1",
+      externalId: "family13606872808419723780@group.calendar.google.com"
+    })).toString("base64url");
+    expect(sourceId.length).toBeGreaterThan(100);
     const source = {
-      id: "source-1",
+      id: sourceId,
       provider: "google" as const,
       accountId: "account-1",
       accountLabel: "owner@example.test",
@@ -1621,16 +1627,16 @@ describe("Email API calendar source routes", () => {
     const sources = await runtime.app.inject({ method: "GET", url: "/api/calendar/sources", headers, remoteAddress: "127.0.0.1" });
     const events = await runtime.app.inject({
       method: "GET",
-      url: "/api/calendar/sources/source-1/events?timeMin=2026-07-17T00%3A00%3A00.000Z&timeMax=2026-07-18T00%3A00%3A00.000Z",
+      url: `/api/calendar/sources/${sourceId}/events?timeMin=2026-07-17T00%3A00%3A00.000Z&timeMax=2026-07-18T00%3A00%3A00.000Z`,
       headers,
       remoteAddress: "127.0.0.1"
     });
 
     expect(sources.statusCode).toBe(200);
-    expect(sources.json()).toMatchObject([{ id: "source-1", name: "Personal" }]);
+    expect(sources.json()).toMatchObject([{ id: sourceId, name: "Personal" }]);
     expect(events.statusCode).toBe(200);
     expect(events.json()).toMatchObject([{ id: "event-1", title: "Planning" }]);
-    expect(listEvents).toHaveBeenCalledWith("source-1", "2026-07-17T00:00:00.000Z", "2026-07-18T00:00:00.000Z");
+    expect(listEvents).toHaveBeenCalledWith(sourceId, "2026-07-17T00:00:00.000Z", "2026-07-18T00:00:00.000Z");
   });
 });
 

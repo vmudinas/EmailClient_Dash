@@ -170,7 +170,8 @@ export class EmailApiRuntime {
     this.listeningPort = config.port;
     this.app = Fastify({
       logger: config.logger,
-      bodyLimit: 5 * 1024 * 1024
+      bodyLimit: 5 * 1024 * 1024,
+      routerOptions: { maxParamLength: 2 * 1024 }
     });
     this.storageSettings = new StorageSettingsManager(config.dataDir);
     this.activeStorage = createEmailStore(config.dataDir, this.storageSettings.current());
