@@ -166,6 +166,38 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("requires legacy Google connections to reauthorize for calendar-list access", async () => {
+    const dataDir = await temporaryDirectory();
+    let database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Gmail",
+      sourceType: "gmail",
+      fingerprint: "legacy-calendar-scope",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const folder = database.createFolder(archive.id, "Inbox");
+    database.createGmailConnection({
+      email: "legacy@example.test",
+      archiveId: archive.id,
+      folderId: folder.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canManageCalendar: true,
+      refreshToken: "refresh-token"
+    });
+    database.close();
+
+    const rawDatabase = new BetterSqlite3(join(dataDir, "archive-mail.sqlite"));
+    rawDatabase.pragma("user_version = 23");
+    rawDatabase.close();
+
+    database = new EmailDatabase(dataDir);
+    expect(database.listGmailConnections()[0]?.canManageCalendar).toBe(false);
+    database.close();
+  });
+
   it("adopts a legacy queued schedule into live run progress during migration", async () => {
     const dataDir = await temporaryDirectory();
     let database = new EmailDatabase(dataDir);
@@ -1741,6 +1773,29 @@ describe("EmailDatabase", () => {
     ]));
     expect(insights.analysis?.averageSpamProbability).toBeCloseTo(0.5, 5);
 
+    database.close();
+  });
+
+  it("stores Apple Calendar credentials without exposing them from public account reads", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+
+    const account = database.createCalendarAccount({
+      label: "Personal iCloud",
+      username: "owner@icloud.test",
+      serverUrl: "https://caldav.icloud.com",
+      secret: "abcd-efgh-ijkl-mnop"
+    });
+
+    expect(account).toMatchObject({ provider: "apple", label: "Personal iCloud", status: "connected" });
+    expect(account).not.toHaveProperty("secret");
+    expect(database.listCalendarAccounts()[0]).not.toHaveProperty("secret");
+    expect(database.getCalendarAccountRecord(account.id)).toMatchObject({ secret: "abcd-efgh-ijkl-mnop" });
+
+    database.updateCalendarAccountStatus(account.id, "error", "Authorization expired");
+    expect(database.getCalendarAccount(account.id)).toMatchObject({ status: "error", lastError: "Authorization expired" });
+    expect(database.deleteCalendarAccount(account.id)).toMatchObject({ id: account.id, secret: "abcd-efgh-ijkl-mnop" });
+    expect(database.getCalendarAccount(account.id)).toBeNull();
     database.close();
   });
 });

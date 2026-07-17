@@ -17,8 +17,11 @@ import type {
   AuditPage,
   AuthLoginResult,
   AuthSessionInfo,
+  AppleCalendarAccountCreate,
+  CalendarAccount,
   CalendarEvent,
   CalendarEventInput,
+  CalendarSource,
   CursorPage,
   DiagnosticsSnapshot,
   DraftSettingsPatch,
@@ -269,6 +272,35 @@ export class ApiClient {
   listCalendarEvents(connectionId: string, timeMinISO: string, timeMaxISO: string): Promise<CalendarEvent[]> {
     const params = new URLSearchParams({ timeMin: timeMinISO, timeMax: timeMaxISO });
     return this.request(`/api/calendar/connections/${encodeURIComponent(connectionId)}/events?${params}`);
+  }
+
+  listCalendarSources(): Promise<CalendarSource[]> {
+    return this.request("/api/calendar/sources");
+  }
+
+  listCalendarSourceEvents(sourceId: string, timeMinISO: string, timeMaxISO: string): Promise<CalendarEvent[]> {
+    const params = new URLSearchParams({ timeMin: timeMinISO, timeMax: timeMaxISO });
+    return this.request(`/api/calendar/sources/${encodeURIComponent(sourceId)}/events?${params}`);
+  }
+
+  createCalendarSourceEvent(sourceId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+    return this.request(`/api/calendar/sources/${encodeURIComponent(sourceId)}/events`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  updateCalendarSourceEvent(sourceId: string, eventId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+    return this.request(`/api/calendar/sources/${encodeURIComponent(sourceId)}/events/${encodeURIComponent(eventId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  deleteCalendarSourceEvent(sourceId: string, eventId: string): Promise<void> {
+    return this.request(`/api/calendar/sources/${encodeURIComponent(sourceId)}/events/${encodeURIComponent(eventId)}`, {
+      method: "DELETE"
+    });
   }
 
   createCalendarEvent(connectionId: string, input: CalendarEventInput): Promise<CalendarEvent> {
@@ -751,6 +783,21 @@ export class ApiClient {
 
   clearGmailSettings(): Promise<AdminSettings> {
     return this.request("/api/admin/settings/gmail", { method: "DELETE" });
+  }
+
+  listCalendarAccounts(): Promise<CalendarAccount[]> {
+    return this.request("/api/admin/calendar/accounts");
+  }
+
+  connectAppleCalendar(input: AppleCalendarAccountCreate): Promise<CalendarAccount> {
+    return this.request("/api/admin/calendar/accounts", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  disconnectAppleCalendar(accountId: string): Promise<void> {
+    return this.request(`/api/admin/calendar/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" });
   }
 
   updateDraftSettings(input: DraftSettingsPatch): Promise<AdminSettings> {

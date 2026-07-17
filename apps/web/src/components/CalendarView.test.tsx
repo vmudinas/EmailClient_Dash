@@ -1,10 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CalendarEvent, GmailConnection, TodoItem } from "@email-client/shared";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CalendarEvent, CalendarSource, GmailConnection, TodoItem } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { CalendarView } from "./CalendarView.js";
 
 afterEach(cleanup);
+beforeEach(() => window.localStorage.clear());
 
 const CONNECTION: GmailConnection = {
   id: "gmail-1",
@@ -45,6 +46,19 @@ const EVENT: CalendarEvent = {
   ]
 };
 
+const SOURCE: CalendarSource = {
+  id: "source-google-primary",
+  provider: "google",
+  accountId: CONNECTION.id,
+  accountLabel: CONNECTION.email,
+  externalId: "primary",
+  name: "Personal",
+  color: "#15805f",
+  readOnly: false,
+  primary: true,
+  selectedByDefault: true
+};
+
 const TODO: TodoItem = {
   id: "todo-1",
   date: todayIso(),
@@ -56,17 +70,20 @@ const TODO: TodoItem = {
 };
 
 describe("CalendarView", () => {
-  it("shows an empty state when no Gmail account has calendar access", async () => {
+  it("shows an empty state when no calendar is authorized", async () => {
     const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([]),
       listTodos: vi.fn().mockResolvedValue([])
     } as unknown as ApiClient;
     render(<CalendarView api={api} connections={[{ ...CONNECTION, canManageCalendar: false }]} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByText("No calendar-connected Gmail accounts")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("No authorized calendars")).toBeTruthy());
+    expect(screen.getByText("9 AM")).toBeTruthy();
   });
 
   it("lets an existing Gmail account be reauthorized for calendar access from the empty state", async () => {
     const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([]),
       listTodos: vi.fn().mockResolvedValue([])
     } as unknown as ApiClient;
     const onReauthorize = vi.fn();
@@ -80,7 +97,8 @@ describe("CalendarView", () => {
 
   it("loads the day's events and to-dos, and adds a new to-do", async () => {
     const api = {
-      listCalendarEvents: vi.fn().mockResolvedValue([EVENT]),
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([EVENT]),
       listTodos: vi.fn().mockResolvedValue([TODO]),
       createTodo: vi.fn().mockResolvedValue({
         id: "todo-2",
@@ -108,7 +126,8 @@ describe("CalendarView", () => {
 
   it("opens the edit dialog with full details when an event is clicked", async () => {
     const api = {
-      listCalendarEvents: vi.fn().mockResolvedValue([EVENT]),
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([EVENT]),
       listTodos: vi.fn().mockResolvedValue([])
     } as unknown as ApiClient;
     render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
@@ -121,7 +140,7 @@ describe("CalendarView", () => {
     expect(screen.getByLabelText("Starts")).toBeTruthy();
     expect(screen.getByLabelText("Ends")).toBeTruthy();
 
-    expect(screen.getByRole("link", { name: /Join with Google Meet/ }).getAttribute("href")).toBe("https://meet.google.com/abc-defg-hij");
+    expect(screen.getByRole("link", { name: /Join video meeting/ }).getAttribute("href")).toBe("https://meet.google.com/abc-defg-hij");
     expect(screen.getByText("Guests (2)")).toBeTruthy();
     expect(screen.getByText("Owner")).toBeTruthy();
     expect(screen.getByText("guest@example.test")).toBeTruthy();
@@ -129,7 +148,8 @@ describe("CalendarView", () => {
 
   it("toggles a to-do as completed", async () => {
     const api = {
-      listCalendarEvents: vi.fn().mockResolvedValue([]),
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([]),
       listTodos: vi.fn().mockResolvedValue([TODO]),
       updateTodo: vi.fn().mockResolvedValue({ ...TODO, completed: true })
     } as unknown as ApiClient;
@@ -139,6 +159,42 @@ describe("CalendarView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mark done" }));
 
     await waitFor(() => expect(api.updateTodo).toHaveBeenCalledWith("todo-1", { completed: true }));
+  });
+
+  it("selects multiple calendars independently and shows a 24-hour day with a mini month", async () => {
+    const appleSource: CalendarSource = {
+      ...SOURCE,
+      id: "source-apple-work",
+      provider: "apple",
+      accountId: "apple-1",
+      accountLabel: "iCloud",
+      externalId: "https://caldav.icloud.com/work/",
+      name: "Work",
+      color: "#ff3b30",
+      primary: false
+    };
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE, appleSource]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([]),
+      listTodos: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    const personal = await screen.findByRole("checkbox", { name: /Personal/ });
+    const work = screen.getByRole("checkbox", { name: /Work/ });
+    expect((personal as HTMLInputElement).checked).toBe(true);
+    expect((work as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByLabelText("Monthly date picker")).toBeTruthy();
+    expect(screen.getByText("9 AM")).toBeTruthy();
+
+    fireEvent.click(work);
+    await waitFor(() => expect((work as HTMLInputElement).checked).toBe(false));
+    await waitFor(() => expect(api.listCalendarSourceEvents).toHaveBeenLastCalledWith(
+      SOURCE.id,
+      expect.any(String),
+      expect.any(String)
+    ));
   });
 });
 

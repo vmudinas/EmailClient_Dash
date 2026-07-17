@@ -1710,6 +1710,8 @@ export function App() {
           session={session}
           onClose={() => setSettingsOpen(false)}
           onSignedOut={signOutLocally}
+          onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
+          onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
         />
       )}
       <DiagnosticsDialog

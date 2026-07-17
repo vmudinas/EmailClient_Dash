@@ -15,6 +15,7 @@ import {
   aiScheduleCreateSchema,
   aiScheduleUpdateSchema,
   aiSettingsPatchSchema,
+  appleCalendarAccountCreateSchema,
   archiveMergeSchema,
   authLoginSchema,
   calendarEventInputSchema,
@@ -187,7 +188,7 @@ export class EmailApiRuntime {
       redirectUri: () => `http://127.0.0.1:${this.listeningPort}/api/gmail/oauth/callback`,
       syncIntervalMinutes: this.gmailSettings.syncIntervalMinutes()
     });
-    this.calendar = new CalendarService(this.gmail);
+    this.calendar = new CalendarService(this.gmail, this.database);
     this.resumes = new ResumeService(this.database, this.blobStore);
     this.draftSettings = new DraftSettingsManager(config.dataDir);
     this.drafts = new DraftService(this.database, this.gmail, this.resumes, this.draftSettings);
@@ -1212,6 +1213,77 @@ export class EmailApiRuntime {
       }
     );
 
+    this.app.get("/api/calendar/sources", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      try {
+        return await this.calendar.listSources();
+      } catch (error) {
+        return this.calendarErrorReply(reply, error);
+      }
+    });
+
+    this.app.get<{ Params: { sourceId: string }; Querystring: { timeMin?: string; timeMax?: string } }>(
+      "/api/calendar/sources/:sourceId/events",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const timeMin = request.query.timeMin;
+        const timeMax = request.query.timeMax;
+        if (!timeMin || !timeMax) {
+          return reply.code(400).send({ error: "timeMin and timeMax query parameters are required" });
+        }
+        try {
+          return await this.calendar.listSourceEvents(request.params.sourceId, timeMin, timeMax);
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
+    this.app.post<{ Params: { sourceId: string }; Body: unknown }>(
+      "/api/calendar/sources/:sourceId/events",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = calendarEventInputSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
+        }
+        try {
+          return await this.calendar.createSourceEvent(request.params.sourceId, parsed.data);
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
+    this.app.patch<{ Params: { sourceId: string; eventId: string }; Body: unknown }>(
+      "/api/calendar/sources/:sourceId/events/:eventId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = calendarEventInputSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
+        }
+        try {
+          return await this.calendar.updateSourceEvent(request.params.sourceId, request.params.eventId, parsed.data);
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
+    this.app.delete<{ Params: { sourceId: string; eventId: string } }>(
+      "/api/calendar/sources/:sourceId/events/:eventId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          await this.calendar.deleteSourceEvent(request.params.sourceId, request.params.eventId);
+          return reply.code(204).send();
+        } catch (error) {
+          return this.calendarErrorReply(reply, error);
+        }
+      }
+    );
+
     this.app.post<{ Params: { messageId: string }; Body: unknown }>(
       "/api/messages/:messageId/calendar-events",
       async (request, reply) => {
@@ -1615,6 +1687,33 @@ export class EmailApiRuntime {
           error: error instanceof Error ? error.message : "Gmail OAuth settings could not be cleared"
         });
       }
+    });
+
+    this.app.get("/api/admin/calendar/accounts", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      return this.calendar.listAppleAccounts();
+    });
+
+    this.app.post<{ Body: unknown }>("/api/admin/calendar/accounts", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = appleCalendarAccountCreateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter valid Apple Calendar credentials" });
+      }
+      try {
+        return reply.code(201).send(await this.calendar.connectAppleAccount(parsed.data));
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Apple Calendar authorization failed"
+        });
+      }
+    });
+
+    this.app.delete<{ Params: { accountId: string } }>("/api/admin/calendar/accounts/:accountId", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const removed = this.calendar.disconnectAppleAccount(request.params.accountId);
+      if (!removed) return reply.code(404).send({ error: "Apple Calendar account not found" });
+      return reply.code(204).send();
     });
 
     this.app.patch<{ Body: unknown }>("/api/admin/settings/drafts", async (request, reply) => {

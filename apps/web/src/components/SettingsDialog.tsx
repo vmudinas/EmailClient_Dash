@@ -8,8 +8,10 @@ import {
 } from "react";
 import {
   AlertTriangle,
+  Apple,
   BarChart3,
   BrainCircuit,
+  CalendarDays,
   CalendarClock,
   CheckCircle2,
   CloudDownload,
@@ -49,6 +51,7 @@ import type {
   Archive as ArchiveModel,
   AuditEvent,
   AuthSessionInfo,
+  CalendarAccount,
   DatabaseProvider,
   Folder,
   GmailConnection,
@@ -64,7 +67,7 @@ import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS } from "@email-cli
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "drafts" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -75,11 +78,14 @@ interface SettingsDialogProps {
   session: AuthSessionInfo;
   onClose(): void;
   onSignedOut(): void;
+  onAddGoogleCalendar?(): void;
+  onReauthorizeGoogleCalendar?(connection: GmailConnection): void;
 }
 
 const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
   { id: "database", label: "Database", icon: Database },
   { id: "gmail", label: "Gmail", icon: MailCheck },
+  { id: "calendars", label: "Calendars", icon: CalendarDays },
   { id: "drafts", label: "Drafts", icon: FileEdit },
   { id: "reply-styles", label: "Reply styles", icon: Sparkles },
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
@@ -97,7 +103,9 @@ export function SettingsDialog({
   api,
   session,
   onClose,
-  onSignedOut
+  onSignedOut,
+  onAddGoogleCalendar,
+  onReauthorizeGoogleCalendar
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
@@ -177,6 +185,17 @@ export function SettingsDialog({
                     onSettings={setSettings}
                     onError={setError}
                     onNotice={showNotice}
+                  />
+                )}
+                {section === "calendars" && (
+                  <CalendarAccountsPanel
+                    api={api!}
+                    busy={busy}
+                    onBusy={setBusy}
+                    onError={setError}
+                    onNotice={showNotice}
+                    onAddGoogle={onAddGoogleCalendar}
+                    onReauthorizeGoogle={onReauthorizeGoogleCalendar}
                   />
                 )}
                 {section === "drafts" && settings && (
@@ -1034,6 +1053,136 @@ function GmailPanel({
         )}
       </section>
       <div className="settings-warning neutral"><MailCheck size={17} /><span>Changing the OAuth client may require existing Gmail accounts to be disconnected and authorized again.</span></div>
+    </>
+  );
+}
+
+function CalendarAccountsPanel({
+  api,
+  busy,
+  onBusy,
+  onError,
+  onNotice,
+  onAddGoogle,
+  onReauthorizeGoogle
+}: {
+  api: ApiClient;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+  onAddGoogle?: () => void;
+  onReauthorizeGoogle?: (connection: GmailConnection) => void;
+}) {
+  const [connections, setConnections] = useState<GmailConnection[]>([]);
+  const [appleAccounts, setAppleAccounts] = useState<CalendarAccount[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [label, setLabel] = useState("iCloud");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [nextConnections, nextAppleAccounts] = await Promise.all([
+        api.listGmailConnections(),
+        api.listCalendarAccounts()
+      ]);
+      setConnections(nextConnections);
+      setAppleAccounts(nextAppleAccounts);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [api, onError]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const connectApple = async (event: FormEvent) => {
+    event.preventDefault();
+    onBusy(true);
+    onError("");
+    try {
+      await api.connectAppleCalendar({
+        label: label.trim(),
+        username: username.trim(),
+        appSpecificPassword: password.trim(),
+        serverUrl: "https://caldav.icloud.com"
+      });
+      setPassword("");
+      await load();
+      onNotice("Apple Calendar account authorized. Its calendars are now available in Calendar.");
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const disconnectApple = async (account: CalendarAccount) => {
+    if (!window.confirm(`Disconnect Apple Calendar account ${account.label}?`)) return;
+    onBusy(true);
+    onError("");
+    try {
+      await api.disconnectAppleCalendar(account.id);
+      setAppleAccounts((current) => current.filter((entry) => entry.id !== account.id));
+      onNotice(`${account.label} disconnected.`);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="settings-section-heading">
+        <div><h3>Calendar accounts</h3><p>Authorize multiple accounts, then select any combination of their calendars in Calendar.</p></div>
+        <button className="primary-button compact" onClick={onAddGoogle} disabled={busy || !onAddGoogle}><Plus size={15} /> Add Google account</button>
+      </div>
+
+      <section className="settings-card calendar-account-section">
+        <div className="settings-card-heading"><div><span className="google-calendar-mark">G</span><strong>Google Calendar</strong></div></div>
+        {loading ? <div className="settings-loading"><LoaderCircle className="spin" size={16} /> Loading accounts</div> : connections.length === 0 ? (
+          <p className="settings-hint">No Google accounts connected. Add one to authorize Gmail and Google Calendar together.</p>
+        ) : (
+          <ul className="calendar-account-list">
+            {connections.map((connection) => (
+              <li key={connection.id}>
+                <div><strong>{connection.email}</strong><small>{connection.canManageCalendar ? "Calendar authorized" : "Calendar permission missing"}</small></div>
+                {connection.canManageCalendar ? <span className="status-badge success">Connected</span> : (
+                  <button className="secondary-button compact" onClick={() => onReauthorizeGoogle?.(connection)} disabled={busy || !onReauthorizeGoogle}><KeyRound size={14} /> Reauthorize</button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="settings-card calendar-account-section">
+        <div className="settings-card-heading"><div><Apple size={16} /><strong>Apple iCloud Calendar</strong></div></div>
+        <form className="settings-form calendar-account-form" onSubmit={(event) => void connectApple(event)}>
+          <label>Account label<input value={label} onChange={(event) => setLabel(event.target.value)} maxLength={100} disabled={busy} placeholder="Personal iCloud" /></label>
+          <label>Apple Account email<input type="email" value={username} onChange={(event) => setUsername(event.target.value)} disabled={busy} autoComplete="username" /></label>
+          <label>App-specific password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy} autoComplete="new-password" placeholder="xxxx-xxxx-xxxx-xxxx" /></label>
+          <small className="settings-hint">Create an app-specific password in your Apple Account. It is stored only in this app's local database and is never returned to the UI.</small>
+          <button className="primary-button" disabled={busy || !label.trim() || !username.trim() || !password.trim()}>
+            {busy ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />} Authorize Apple Calendar
+          </button>
+        </form>
+        {appleAccounts.length > 0 && (
+          <ul className="calendar-account-list apple-calendar-accounts">
+            {appleAccounts.map((account) => (
+              <li key={account.id}>
+                <div><strong>{account.label}</strong><small>{account.username}{account.lastError ? ` · ${account.lastError}` : ""}</small></div>
+                <span className={`status-badge ${account.status === "connected" ? "success" : "error"}`}>{account.status}</span>
+                <button className="icon-button" onClick={() => void disconnectApple(account)} disabled={busy} title={`Disconnect ${account.label}`} aria-label={`Disconnect ${account.label}`}><Trash2 size={15} /></button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </>
   );
 }

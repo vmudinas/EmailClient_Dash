@@ -708,9 +708,40 @@ export interface CalendarEventOrganizer {
   displayName: string | null;
 }
 
+export type CalendarProvider = "google" | "apple";
+
+export interface CalendarAccount {
+  id: string;
+  provider: "apple";
+  label: string;
+  username: string;
+  serverUrl: string;
+  status: "connected" | "error";
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CalendarSource {
+  id: string;
+  provider: CalendarProvider;
+  accountId: string;
+  accountLabel: string;
+  externalId: string;
+  name: string;
+  color: string;
+  readOnly: boolean;
+  primary: boolean;
+  selectedByDefault: boolean;
+}
+
 export interface CalendarEvent {
   id: string;
   connectionId: string;
+  sourceId?: string;
+  provider?: CalendarProvider;
+  calendarName?: string;
+  calendarColor?: string;
   title: string;
   description: string;
   location: string;
@@ -762,6 +793,15 @@ export const calendarEventInputSchema = z.object({
 }).strict();
 
 export type CalendarEventInput = z.infer<typeof calendarEventInputSchema>;
+
+export const appleCalendarAccountCreateSchema = z.object({
+  label: z.string().trim().min(1).max(100),
+  username: z.string().trim().email().max(320),
+  appSpecificPassword: z.string().trim().min(4).max(200),
+  serverUrl: z.string().trim().url().default("https://caldav.icloud.com")
+}).strict();
+
+export type AppleCalendarAccountCreate = z.infer<typeof appleCalendarAccountCreateSchema>;
 
 export const messageActionSuggestionRequestSchema = z.object({
   now: z.string().datetime({ offset: true }),

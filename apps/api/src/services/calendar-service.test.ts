@@ -1,7 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { createDAVClient } from "tsdav";
 import { BlobStore } from "../storage/blob-store.js";
 import { EmailDatabase } from "../storage/database.js";
 import { CalendarService } from "./calendar-service.js";
@@ -52,7 +53,7 @@ async function setUp(canManageCalendar: boolean, fetcher: typeof fetch) {
     fetcher
   });
   services.push({ gmail, imports, database });
-  return { gmail, connectionId: connection.id };
+  return { gmail, database, connectionId: connection.id };
 }
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -118,13 +119,14 @@ describe("CalendarService", () => {
       }
       throw new Error(`Unexpected calendar test request: ${url} ${init?.method ?? "GET"}`);
     };
-    const { gmail, connectionId } = await setUp(true, fetcher);
-    const calendar = new CalendarService(gmail, fetcher);
+    const { gmail, database, connectionId } = await setUp(true, fetcher);
+    const calendar = new CalendarService(gmail, database, fetcher);
 
     const events = await calendar.listEvents(connectionId, "2026-07-01T00:00:00.000Z", "2026-07-31T00:00:00.000Z");
-    expect(events).toEqual([{
+    expect(events).toMatchObject([{
       id: "event-1",
       connectionId,
+      provider: "google",
       title: "Standup",
       description: "",
       location: "",
@@ -167,12 +169,108 @@ describe("CalendarService", () => {
   });
 
   it("refuses calendar access for a connection that has not granted the calendar scope", async () => {
-    const { gmail, connectionId } = await setUp(false, async () => {
+    const { gmail, database, connectionId } = await setUp(false, async () => {
       throw new Error("Network must not be used without calendar permission");
     });
-    const calendar = new CalendarService(gmail);
+    const calendar = new CalendarService(gmail, database);
 
     await expect(calendar.listEvents(connectionId, "2026-07-01T00:00:00.000Z", "2026-07-31T00:00:00.000Z"))
       .rejects.toBeInstanceOf(GmailPermissionError);
+  });
+
+  it("discovers every Google calendar and preserves access and default-selection metadata", async () => {
+    const fetcher: typeof fetch = async (input) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.toString().startsWith("https://oauth2.googleapis.com/token")) {
+        return jsonResponse({ access_token: "access-token", expires_in: 3_600 });
+      }
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ items: [
+          { id: "owner@example.test", summary: "Personal", primary: true, selected: true, backgroundColor: "#123456", accessRole: "owner" },
+          { id: "team@example.test", summary: "Team", selected: true, backgroundColor: "#654321", accessRole: "reader" }
+        ] });
+      }
+      throw new Error(`Unexpected calendar source request: ${url}`);
+    };
+    const { gmail, database } = await setUp(true, fetcher);
+    const calendar = new CalendarService(gmail, database, fetcher);
+
+    const sources = await calendar.listSources();
+
+    expect(sources).toMatchObject([
+      { provider: "google", name: "Personal", primary: true, readOnly: false, selectedByDefault: true, color: "#123456" },
+      { provider: "google", name: "Team", primary: false, readOnly: true, selectedByDefault: true, color: "#654321" }
+    ]);
+  });
+
+  it("reports provider discovery failures when no calendars can be loaded", async () => {
+    const fetcher: typeof fetch = async (input) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.toString().startsWith("https://oauth2.googleapis.com/token")) {
+        return jsonResponse({ access_token: "access-token", expires_in: 3_600 });
+      }
+      if (url.pathname === "/calendar/v3/users/me/calendarList") {
+        return jsonResponse({ error: { message: "Calendar API is disabled" } }, 403);
+      }
+      throw new Error(`Unexpected calendar source request: ${url}`);
+    };
+    const { gmail, database } = await setUp(true, fetcher);
+    const calendar = new CalendarService(gmail, database, fetcher);
+
+    await expect(calendar.listSources()).rejects.toThrow(/Calendar sources could not be loaded.*owner@example\.test/);
+  });
+
+  it("authorizes an Apple account and reads its CalDAV calendars and events", async () => {
+    const { gmail, database } = await setUp(false, async () => {
+      throw new Error("Google network must not be used");
+    });
+    const calendarObject = {
+      url: "https://caldav.icloud.com/user/calendars/work/interview.ics",
+      data: [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "BEGIN:VEVENT",
+        "UID:apple-event-1",
+        "SUMMARY:Interview",
+        "DTSTART:20260721T160000Z",
+        "DTEND:20260721T170000Z",
+        "END:VEVENT",
+        "END:VCALENDAR"
+      ].join("\r\n")
+    };
+    const davClient = {
+      fetchCalendars: vi.fn().mockResolvedValue([{
+        url: "https://caldav.icloud.com/user/calendars/work/",
+        displayName: "Work",
+        calendarColor: "#ff3b30"
+      }]),
+      fetchCalendarObjects: vi.fn().mockResolvedValue([calendarObject]),
+      createCalendarObject: vi.fn(),
+      updateCalendarObject: vi.fn(),
+      deleteCalendarObject: vi.fn()
+    };
+    const factory = vi.fn().mockResolvedValue(davClient) as unknown as typeof createDAVClient;
+    const calendar = new CalendarService(gmail, database, fetch, factory);
+
+    const account = await calendar.connectAppleAccount({
+      label: "iCloud",
+      username: "owner@icloud.test",
+      appSpecificPassword: "abcd-efgh-ijkl-mnop",
+      serverUrl: "https://caldav.icloud.com"
+    });
+    const sources = await calendar.listSources();
+    const events = await calendar.listSourceEvents(
+      sources[0]!.id,
+      "2026-07-21T00:00:00.000Z",
+      "2026-07-22T00:00:00.000Z"
+    );
+
+    expect(account).toMatchObject({ provider: "apple", label: "iCloud", username: "owner@icloud.test" });
+    expect(sources).toMatchObject([{ provider: "apple", name: "Work", accountId: account.id }]);
+    expect(events).toMatchObject([{ provider: "apple", title: "Interview", calendarName: "Work" }]);
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({
+      authMethod: "Basic",
+      credentials: { username: "owner@icloud.test", password: "abcd-efgh-ijkl-mnop" }
+    }));
   });
 });

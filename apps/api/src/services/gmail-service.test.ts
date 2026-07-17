@@ -49,7 +49,7 @@ describe("GmailService", () => {
           access_token: "access-token",
           refresh_token: "refresh-token",
           expires_in: 3_600,
-          scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send"
+          scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar.events"
         });
       }
       if (url.toString().startsWith("https://oauth2.googleapis.com/revoke")) {
@@ -119,7 +119,8 @@ describe("GmailService", () => {
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.send",
       "https://www.googleapis.com/auth/gmail.settings.basic",
-      "https://www.googleapis.com/auth/calendar.events"
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
     ]);
     expect(scopes).not.toContain("https://mail.google.com/");
     expect(new URL(authorization.authorizationUrl).searchParams.get("prompt"))
@@ -133,7 +134,8 @@ describe("GmailService", () => {
       processedItems: 1,
       totalItems: 1,
       importedItems: 1,
-      canSend: true
+      canSend: true,
+      canManageCalendar: false
     });
     expect(database.getArchive(archive.id)).toMatchObject({
       messageCount: 1,

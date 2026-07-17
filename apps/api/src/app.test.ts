@@ -1550,6 +1550,66 @@ describe("Email API authorization", () => {
   });
 });
 
+describe("Email API calendar source routes", () => {
+  it("lists calendar sources and routes source-specific events", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const headers = { authorization: `Bearer ${runtime.localToken}` };
+    const source = {
+      id: "source-1",
+      provider: "google" as const,
+      accountId: "account-1",
+      accountLabel: "owner@example.test",
+      externalId: "primary",
+      name: "Personal",
+      color: "#15805f",
+      readOnly: false,
+      primary: true,
+      selectedByDefault: true
+    };
+    const event = {
+      id: "event-1",
+      connectionId: "account-1",
+      sourceId: source.id,
+      provider: "google" as const,
+      title: "Planning",
+      description: "",
+      location: "",
+      startAt: "2026-07-17T13:00:00.000Z",
+      endAt: "2026-07-17T14:00:00.000Z",
+      allDay: false,
+      htmlLink: null,
+      meetingLink: null,
+      organizer: null,
+      attendees: []
+    };
+    vi.spyOn(runtime.calendar, "listSources").mockResolvedValue([source]);
+    const listEvents = vi.spyOn(runtime.calendar, "listSourceEvents").mockResolvedValue([event]);
+
+    const sources = await runtime.app.inject({ method: "GET", url: "/api/calendar/sources", headers, remoteAddress: "127.0.0.1" });
+    const events = await runtime.app.inject({
+      method: "GET",
+      url: "/api/calendar/sources/source-1/events?timeMin=2026-07-17T00%3A00%3A00.000Z&timeMax=2026-07-18T00%3A00%3A00.000Z",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+
+    expect(sources.statusCode).toBe(200);
+    expect(sources.json()).toMatchObject([{ id: "source-1", name: "Personal" }]);
+    expect(events.statusCode).toBe(200);
+    expect(events.json()).toMatchObject([{ id: "event-1", title: "Planning" }]);
+    expect(listEvents).toHaveBeenCalledWith("source-1", "2026-07-17T00:00:00.000Z", "2026-07-18T00:00:00.000Z");
+  });
+});
+
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "archive-mail-api-"));
   directories.push(directory);

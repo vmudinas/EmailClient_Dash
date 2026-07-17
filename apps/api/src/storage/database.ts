@@ -27,6 +27,7 @@ import type {
   Attachment,
   AuditEvent,
   AuditPage,
+  CalendarAccount,
   CalendarEvent,
   CursorPage,
   DiagnosticCategory,
@@ -165,6 +166,18 @@ export interface GmailConnectionRecord extends GmailConnection {
   refreshToken: string;
   accessToken: string | null;
   accessTokenExpiresAt: string | null;
+}
+
+export interface CalendarAccountCreateInput {
+  id?: string;
+  label: string;
+  username: string;
+  serverUrl: string;
+  secret: string;
+}
+
+export interface CalendarAccountRecord extends CalendarAccount {
+  secret: string;
 }
 
 export interface AttachmentInput {
@@ -1315,6 +1328,35 @@ export class EmailDatabase {
         );
       `);
       this.db.pragma("user_version = 22");
+    }
+
+    const calendarAccountsVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (calendarAccountsVersion < 23) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS calendar_accounts (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL CHECK(provider IN ('apple')),
+          label TEXT NOT NULL,
+          username TEXT NOT NULL,
+          server_url TEXT NOT NULL,
+          secret TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('connected', 'error')),
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS calendar_accounts_provider_idx
+          ON calendar_accounts(provider, updated_at DESC);
+        PRAGMA user_version = 23;
+      `);
+    }
+
+    const calendarListScopeVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (calendarListScopeVersion < 24) {
+      this.db.exec(`
+        UPDATE gmail_connections SET can_manage_calendar = 0 WHERE can_manage_calendar = 1;
+        PRAGMA user_version = 24;
+      `);
     }
   }
 
@@ -3896,6 +3938,47 @@ export class EmailDatabase {
     return connection;
   }
 
+  createCalendarAccount(input: CalendarAccountCreateInput): CalendarAccount {
+    const id = input.id ?? randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO calendar_accounts (
+        id, provider, label, username, server_url, secret,
+        status, last_error, created_at, updated_at
+      ) VALUES (?, 'apple', ?, ?, ?, ?, 'connected', NULL, ?, ?)
+    `).run(id, input.label, input.username, input.serverUrl, input.secret, now, now);
+    return this.getCalendarAccount(id)!;
+  }
+
+  listCalendarAccounts(): CalendarAccount[] {
+    return (this.db.prepare(`
+      SELECT * FROM calendar_accounts ORDER BY provider, label COLLATE NOCASE, created_at
+    `).all() as Row[]).map((row) => this.mapCalendarAccount(row));
+  }
+
+  getCalendarAccount(id: string): CalendarAccount | null {
+    const row = this.db.prepare("SELECT * FROM calendar_accounts WHERE id = ?").get(id) as Row | undefined;
+    return row ? this.mapCalendarAccount(row) : null;
+  }
+
+  getCalendarAccountRecord(id: string): CalendarAccountRecord | null {
+    const row = this.db.prepare("SELECT * FROM calendar_accounts WHERE id = ?").get(id) as Row | undefined;
+    return row ? { ...this.mapCalendarAccount(row), secret: String(row.secret) } : null;
+  }
+
+  updateCalendarAccountStatus(id: string, status: CalendarAccount["status"], lastError: string | null): void {
+    this.db.prepare(`
+      UPDATE calendar_accounts SET status = ?, last_error = ?, updated_at = ? WHERE id = ?
+    `).run(status, lastError, new Date().toISOString(), id);
+  }
+
+  deleteCalendarAccount(id: string): CalendarAccountRecord | null {
+    const account = this.getCalendarAccountRecord(id);
+    if (!account) return null;
+    this.db.prepare("DELETE FROM calendar_accounts WHERE id = ?").run(id);
+    return account;
+  }
+
   hasActiveGmailSync(archiveIds: string[]): boolean {
     if (archiveIds.length === 0) return false;
     const placeholders = archiveIds.map(() => "?").join(", ");
@@ -5544,6 +5627,20 @@ export class EmailDatabase {
       accessTokenExpiresAt: row.access_token_expires_at
         ? String(row.access_token_expires_at)
         : null
+    };
+  }
+
+  private mapCalendarAccount(row: Row): CalendarAccount {
+    return {
+      id: String(row.id),
+      provider: "apple",
+      label: String(row.label),
+      username: String(row.username),
+      serverUrl: String(row.server_url),
+      status: row.status === "error" ? "error" : "connected",
+      lastError: row.last_error ? String(row.last_error) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at)
     };
   }
 

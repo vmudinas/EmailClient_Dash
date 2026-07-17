@@ -21,7 +21,8 @@ const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GMAIL_SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic";
 const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
-const GMAIL_SCOPES = [GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE, GMAIL_SETTINGS_SCOPE, CALENDAR_EVENTS_SCOPE];
+const CALENDAR_LIST_SCOPE = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
+const GMAIL_SCOPES = [GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE, GMAIL_SETTINGS_SCOPE, CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOPE];
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
@@ -246,7 +247,8 @@ export class GmailService {
         query: pending.request.query,
         ocrEnabled: pending.request.ocrEnabled,
         canSend: tokenGrantsScope(token, GMAIL_SEND_SCOPE),
-        canManageCalendar: tokenGrantsScope(token, CALENDAR_EVENTS_SCOPE),
+        canManageCalendar: tokenGrantsScope(token, CALENDAR_EVENTS_SCOPE)
+          && tokenGrantsScope(token, CALENDAR_LIST_SCOPE),
         refreshToken: token.refresh_token,
         accessToken: token.access_token,
         accessTokenExpiresAt: tokenExpiry(token.expires_in)
