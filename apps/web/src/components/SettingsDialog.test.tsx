@@ -879,12 +879,39 @@ describe("SettingsDialog", () => {
         updatedAt: "2026-07-15T12:00:00.000Z"
       }]
     };
+    const folders: Folder[] = [{
+      id: "folder-1",
+      archiveId: archive.id,
+      parentId: null,
+      name: "Vendor Co",
+      path: "Top Senders/Vendor Co",
+      messageCount: 42,
+      unreadCount: 0
+    }, {
+      id: "folder-2",
+      archiveId: archive.id,
+      parentId: null,
+      name: "Vendors",
+      path: "Vendors",
+      messageCount: 0,
+      unreadCount: 0
+    }];
+    const updatedStatus: SenderFilingStatus = {
+      ...organizedStatus,
+      rules: [{
+        ...organizedStatus.rules[0]!,
+        folderId: "folder-2",
+        folderPath: "Vendors"
+      }]
+    };
     const api = {
       adminSettings: vi.fn().mockResolvedValue(SETTINGS),
       listUsers: vi.fn().mockResolvedValue(USERS),
       listArchives: vi.fn().mockResolvedValue([archive]),
+      listFolders: vi.fn().mockResolvedValue(folders),
       senderFilingStatus: vi.fn().mockResolvedValue(initialStatus),
-      organizeTopSenders: vi.fn().mockResolvedValue(organizedStatus)
+      organizeTopSenders: vi.fn().mockResolvedValue(organizedStatus),
+      updateSenderFilingRuleFolder: vi.fn().mockResolvedValue(updatedStatus)
     } as unknown as ApiClient;
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -898,8 +925,14 @@ describe("SettingsDialog", () => {
 
     await waitFor(() => expect(api.organizeTopSenders).toHaveBeenCalledWith(archive.id));
     expect(await screen.findByText("Vendor Co")).toBeTruthy();
-    expect(screen.getByText("Top Senders/Vendor Co")).toBeTruthy();
+    const folderSelect = screen.getByRole("combobox", { name: "Folder for Vendor Co" });
+    expect((folderSelect as HTMLSelectElement).value).toBe("folder-1");
     expect(screen.getByText(/Moved 42 messages/)).toBeTruthy();
+
+    fireEvent.change(folderSelect, { target: { value: "folder-2" } });
+    await waitFor(() => expect(api.updateSenderFilingRuleFolder).toHaveBeenCalledWith("rule-1", "folder-2"));
+    expect((screen.getByRole("combobox", { name: "Folder for Vendor Co" }) as HTMLSelectElement).value).toBe("folder-2");
+    expect(await screen.findByText(/Sender rule updated/)).toBeTruthy();
     confirm.mockRestore();
   });
 

@@ -842,6 +842,26 @@ describe("Email API sender filing routes", () => {
       rules: [{ senderAddress: "vendor@example.test", ruleType: "spam", folderPath: "Spam" }]
     });
 
+    const spamRuleId = (spamStatus.json() as { rules: Array<{ id: string }> }).rules[0]!.id;
+    const changedDestination = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/sender-filing/rules/${spamRuleId}`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { folderId: vendors.id }
+    });
+    expect(changedDestination.statusCode).toBe(200);
+    expect(changedDestination.json()).toMatchObject({
+      rules: [{
+        id: spamRuleId,
+        senderAddress: "vendor@example.test",
+        ruleType: "folder",
+        folderId: vendors.id,
+        folderPath: "Vendors"
+      }]
+    });
+    expect(runtime.database.getMessage(messageId)?.folderPath).toBe("Vendors");
+
     const disabled = await runtime.app.inject({
       method: "DELETE",
       url: `/api/admin/sender-filing?archiveId=${archive.id}`,

@@ -1217,6 +1217,34 @@ describe("EmailDatabase", () => {
       "spammer@example.test"
     );
     expect(database.getMessage(futureMessageId)?.folderPath).toBe("Spam");
+
+    const spamRule = database.getSenderFilingStatus(archive.id).rules[0]!;
+    const updatedRule = database.updateSenderFilingRuleFolder(spamRule.id, archived.id);
+    expect(updatedRule).toMatchObject({
+      movedMessages: 126,
+      folderPath: "Archived",
+      status: {
+        rules: [{
+          id: spamRule.id,
+          ruleType: "folder",
+          folderId: archived.id,
+          folderPath: "Archived",
+          messageCount: 127
+        }]
+      }
+    });
+    expect(database.getMessage(firstMessageId)?.folderPath).toBe("Archived");
+    expect(database.getMessage(futureMessageId)?.folderPath).toBe("Archived");
+
+    const nextFutureMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "spam-sender-next-future",
+      "Persistent Spammer",
+      "spammer@example.test"
+    );
+    expect(database.getMessage(nextFutureMessageId)?.folderPath).toBe("Archived");
     database.close();
   });
 

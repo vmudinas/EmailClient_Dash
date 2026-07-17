@@ -966,6 +966,13 @@ export class ApiClient {
     });
   }
 
+  updateSenderFilingRuleFolder(ruleId: string, folderId: string): Promise<SenderFilingStatus> {
+    return this.request(`/api/admin/sender-filing/rules/${encodeURIComponent(ruleId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ folderId })
+    });
+  }
+
   disableSenderFiling(archiveId: string): Promise<SenderFilingStatus> {
     return this.request(`/api/admin/sender-filing?${queryString({ archiveId })}`, { method: "DELETE" });
   }

@@ -2308,6 +2308,35 @@ export class EmailApiRuntime {
       }
     });
 
+    this.app.patch<{ Params: { ruleId: string }; Body: unknown }>(
+      "/api/admin/sender-filing/rules/:ruleId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = messageMoveSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: "Choose a valid destination mailbox" });
+        try {
+          const result = this.database.updateSenderFilingRuleFolder(request.params.ruleId, parsed.data.folderId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: `Sender rule moved to ${result.folderPath}: ${result.senderAddress}`,
+            archiveId: result.status.archiveId,
+            context: {
+              operation: "sender_filing_destination_updated",
+              ruleId: request.params.ruleId,
+              folderId: parsed.data.folderId,
+              folderPath: result.folderPath,
+              movedMessages: result.movedMessages
+            }
+          });
+          return result.status;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Sender rule could not be updated";
+          return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+        }
+      }
+    );
+
     this.app.delete<{ Querystring: { archiveId?: string } }>("/api/admin/sender-filing", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
       const parsed = senderFilingArchiveSchema.safeParse({ archiveId: request.query.archiveId });

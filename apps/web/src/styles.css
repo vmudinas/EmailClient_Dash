@@ -5453,6 +5453,10 @@ textarea:focus-visible {
   min-width: 82px;
 }
 
+.settings-table .sender-rule-folder-select {
+  min-width: 230px;
+}
+
 .settings-actions {
   display: flex;
   gap: 5px;

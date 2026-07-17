@@ -631,8 +631,10 @@ function SenderFilingPanel({
 }) {
   const [archives, setArchives] = useState<ArchiveModel[]>([]);
   const [archiveId, setArchiveId] = useState("");
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [status, setStatus] = useState<SenderFilingStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ruleBusyId, setRuleBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -653,12 +655,18 @@ function SenderFilingPanel({
   const loadStatus = useCallback(async (selectedArchiveId: string) => {
     if (!selectedArchiveId) {
       setStatus(null);
+      setFolders([]);
       return;
     }
     setLoading(true);
     onError("");
     try {
-      setStatus(await api.senderFilingStatus(selectedArchiveId));
+      const [nextStatus, nextFolders] = await Promise.all([
+        api.senderFilingStatus(selectedArchiveId),
+        api.listFolders(selectedArchiveId)
+      ]);
+      setStatus(nextStatus);
+      setFolders(nextFolders);
     } catch (loadError) {
       onError(errorText(loadError));
     } finally {
@@ -676,10 +684,33 @@ function SenderFilingPanel({
     try {
       const nextStatus = await api.organizeTopSenders(archiveId);
       setStatus(nextStatus);
+      setFolders(await api.listFolders(archiveId));
       onNotice(`Sender rules active for ${nextStatus.rules.length} sender${nextStatus.rules.length === 1 ? "" : "s"}. Moved ${nextStatus.lastRunMovedMessages} message${nextStatus.lastRunMovedMessages === 1 ? "" : "s"}.`);
     } catch (organizeError) {
       onError(errorText(organizeError));
     } finally {
+      onBusy(false);
+    }
+  };
+
+  const changeRuleFolder = async (rule: SenderFilingStatus["rules"][number], folderId: string) => {
+    if (folderId === rule.folderId) return;
+    const folder = folders.find((entry) => entry.id === folderId);
+    if (!folder) return;
+    if (!window.confirm(
+      `Move ${rule.senderName || rule.senderAddress} from ${rule.folderPath} to ${folder.path}? Existing matching messages in the old folder and Inbox will move, and future Inbox mail will use the new folder.`
+    )) return;
+
+    setRuleBusyId(rule.id);
+    onBusy(true);
+    onError("");
+    try {
+      setStatus(await api.updateSenderFilingRuleFolder(rule.id, folderId));
+      onNotice(`Sender rule updated: ${rule.senderAddress} → ${folder.path}`);
+    } catch (updateError) {
+      onError(errorText(updateError));
+    } finally {
+      setRuleBusyId(null);
       onBusy(false);
     }
   };
@@ -738,7 +769,17 @@ function SenderFilingPanel({
                   <td><strong>{rule.senderName || rule.senderAddress}</strong>{rule.senderName && <small>{rule.senderAddress}</small>}</td>
                   <td>{rule.messageCount.toLocaleString()}</td>
                   <td>
-                    <strong>{rule.folderPath}</strong>
+                    <select
+                      className="sender-rule-folder-select"
+                      value={rule.folderId}
+                      onChange={(event) => void changeRuleFolder(rule, event.target.value)}
+                      disabled={busy || ruleBusyId === rule.id}
+                      aria-label={`Folder for ${rule.senderName || rule.senderAddress}`}
+                    >
+                      {folders.map((folder) => (
+                        <option key={folder.id} value={folder.id}>{folder.path}</option>
+                      ))}
+                    </select>
                     {rule.ruleType === "spam" && <small>Always spam</small>}
                   </td>
                 </tr>

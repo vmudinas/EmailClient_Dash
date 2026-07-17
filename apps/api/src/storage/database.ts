@@ -3593,6 +3593,79 @@ export class EmailDatabase {
     };
   }
 
+  updateSenderFilingRuleFolder(ruleId: string, targetFolderId: string): {
+    status: SenderFilingStatus;
+    movedMessages: number;
+    senderAddress: string;
+    folderPath: string;
+  } {
+    const update = this.db.transaction(() => {
+      const rule = this.db.prepare(`
+        SELECT id, archive_id, sender_address, folder_id
+        FROM sender_filing_rules WHERE id = ?
+      `).get(ruleId) as Row | undefined;
+      if (!rule) throw new Error("Sender rule not found");
+
+      const archiveId = String(rule.archive_id);
+      const senderAddress = String(rule.sender_address);
+      const previousFolderId = String(rule.folder_id);
+      const target = this.db.prepare(`
+        SELECT id, name, path FROM folders WHERE id = ? AND archive_id = ?
+      `).get(targetFolderId, archiveId) as Row | undefined;
+      if (!target) throw new Error("Destination mailbox must belong to the sender rule archive");
+
+      const folderPath = String(target.path);
+      const ruleType = String(target.name).trim().toLowerCase() === "spam" ? "spam" : "folder";
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE sender_filing_rules
+        SET folder_id = ?, rule_type = ?, updated_at = ?
+        WHERE id = ?
+      `).run(targetFolderId, ruleType, now, ruleId);
+
+      this.db.prepare(`
+        UPDATE message_fts SET folder = ?
+        WHERE message_id IN (
+          SELECT m.id FROM messages m
+          JOIN folders source_folder ON source_folder.id = m.folder_id
+          WHERE m.archive_id = ?
+            AND lower(trim(m.sender_address)) = ?
+            AND m.folder_id != ?
+            AND (m.folder_id = ? OR lower(trim(source_folder.name)) = 'inbox')
+        )
+      `).run(folderPath, archiveId, senderAddress, targetFolderId, previousFolderId);
+      const movedMessages = this.db.prepare(`
+        UPDATE messages SET folder_id = ?
+        WHERE archive_id = ?
+          AND lower(trim(sender_address)) = ?
+          AND folder_id != ?
+          AND (
+            folder_id = ? OR folder_id IN (
+              SELECT id FROM folders WHERE archive_id = ? AND lower(trim(name)) = 'inbox'
+            )
+          )
+      `).run(
+        targetFolderId,
+        archiveId,
+        senderAddress,
+        targetFolderId,
+        previousFolderId,
+        archiveId
+      ).changes;
+
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE archive_id = ?
+      `).run(archiveId);
+
+      return { archiveId, movedMessages, senderAddress, folderPath };
+    });
+
+    const result = update();
+    return { ...result, status: this.getSenderFilingStatus(result.archiveId) };
+  }
+
   organizeTopSenderFolders(archiveId: string, limit = 20): SenderFilingStatus {
     const ruleLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
     const organize = this.db.transaction(() => {
