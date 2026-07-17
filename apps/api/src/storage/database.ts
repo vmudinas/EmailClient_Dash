@@ -1483,6 +1483,38 @@ export class EmailDatabase {
         this.db.pragma("foreign_keys = ON");
       }
     }
+
+    const messageListPerformanceVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (messageListPerformanceVersion < 29) {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS messages_folder_sort_idx
+          ON messages(
+            folder_id,
+            CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+            COALESCE(received_at, sent_at) DESC,
+            created_at DESC,
+            id DESC
+          );
+        CREATE INDEX IF NOT EXISTS messages_folder_category_sort_idx
+          ON messages(
+            folder_id,
+            inbox_category,
+            CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+            COALESCE(received_at, sent_at) DESC,
+            created_at DESC,
+            id DESC
+          );
+        CREATE INDEX IF NOT EXISTS messages_archive_sort_idx
+          ON messages(
+            archive_id,
+            CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+            COALESCE(received_at, sent_at) DESC,
+            created_at DESC,
+            id DESC
+          );
+        PRAGMA user_version = 29;
+      `);
+    }
   }
 
   private reclassifyInboxCategories(): void {
@@ -4789,7 +4821,7 @@ export class EmailDatabase {
   getMessage(id: string): MessageDetail | null {
     const row = this.db.prepare(`
       SELECT ${MESSAGE_SUMMARY_COLUMNS},
-        m.cc_json, m.bcc_json, m.body_html, m.headers_json
+        m.cc_json, m.bcc_json, m.body_text AS detail_body_text, m.body_html, m.headers_json
       ${MESSAGE_SUMMARY_JOINS}
       WHERE m.id = ?
     `).get(id) as Row | undefined;
@@ -4800,7 +4832,7 @@ export class EmailDatabase {
       to: parseJson<EmailAddress[]>(row.to_json, []),
       cc: parseJson<EmailAddress[]>(row.cc_json, []),
       bcc: parseJson<EmailAddress[]>(row.bcc_json, []),
-      bodyText: String(row.body_text ?? ""),
+      bodyText: String(row.detail_body_text ?? ""),
       bodyHtml: row.body_html ? String(row.body_html) : null,
       headers: parseJson<Record<string, string>>(row.headers_json, {}),
       attachments: this.listAttachments(id)
@@ -6188,7 +6220,7 @@ const MESSAGE_SUMMARY_COLUMNS = `
   m.to_json,
   m.sent_at,
   m.received_at,
-  m.body_text,
+  substr(m.body_text, 1, 2000) AS body_text,
   m.has_attachments,
   m.attachment_count,
   m.inbox_category,
@@ -6208,7 +6240,8 @@ const MESSAGE_SUMMARY_COLUMNS = `
       OR EXISTS(
         SELECT 1 FROM messages sent_reply
         JOIN folders sent_folder ON sent_folder.id = sent_reply.folder_id
-        WHERE sent_reply.conversation_key = m.conversation_key
+        WHERE sent_reply.archive_id = m.archive_id
+          AND sent_reply.conversation_key = m.conversation_key
           AND lower(trim(sent_folder.name)) = 'sent'
       )
     )

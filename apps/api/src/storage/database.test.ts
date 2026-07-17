@@ -15,6 +15,7 @@ describe("EmailDatabase", () => {
   it("indexes message and attachment text and updates local state", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
+    const fullBodyText = `The desktop rollout is ready for review. ${"x".repeat(2_500)} full-body-tail`;
     const archive = database.createArchive({
       name: "mail.mbox",
       sourceType: "mbox",
@@ -34,7 +35,7 @@ describe("EmailDatabase", () => {
       bcc: [],
       sentAt: "2026-07-01T12:00:00.000Z",
       receivedAt: "2026-07-01T12:00:00.000Z",
-      bodyText: "The desktop rollout is ready for review.",
+      bodyText: fullBodyText,
       bodyHtml: "<p>The desktop rollout is ready for review.</p>",
       headers: { "message-id": "<one@example.test>" },
       sizeBytes: 100,
@@ -63,6 +64,7 @@ describe("EmailDatabase", () => {
     expect(database.search({ q: "launch", from: "nobody" }).items).toHaveLength(0);
 
     const message = database.listMessages({ archiveId: archive.id }).items[0]!;
+    expect(database.getMessage(message.id)?.bodyText).toBe(fullBodyText);
     expect(database.getArchive(archive.id)?.unreadCount).toBe(1);
     expect(database.listFolders(archive.id)[0]?.unreadCount).toBe(1);
     const state = database.updateMessageState(message.id, {
@@ -121,6 +123,78 @@ describe("EmailDatabase", () => {
       "older",
       "undated"
     ]);
+    database.close();
+  });
+
+  it("uses covering sort indexes and indexed conversation reply lookups for message lists", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "query-plan.mbox",
+      sourceType: "mbox",
+      fingerprint: "query-plan-fixture",
+      sizeBytes: 100
+    });
+    const folder = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    insertDatedMessage(database, archive.id, folder.id, "indexed", "2026-07-03T12:00:00.000Z");
+    database.completeArchive(archive.id, 0);
+
+    const sqlite = new BetterSqlite3(database.path, { readonly: true });
+    const folderPlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM messages
+      WHERE folder_id = ?
+      ORDER BY
+        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(received_at, sent_at) DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 51
+    `).all(folder.id) as Array<{ detail: string }>;
+    const categoryPlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM messages
+      WHERE folder_id = ? AND inbox_category = 'primary'
+      ORDER BY
+        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(received_at, sent_at) DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 51
+    `).all(folder.id) as Array<{ detail: string }>;
+    const archivePlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM messages
+      WHERE archive_id = ?
+      ORDER BY
+        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(received_at, sent_at) DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 51
+    `).all(archive.id) as Array<{ detail: string }>;
+    const replyPlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT EXISTS(
+        SELECT 1 FROM messages sent_reply
+        JOIN folders sent_folder ON sent_folder.id = sent_reply.folder_id
+        WHERE sent_reply.archive_id = m.archive_id
+          AND sent_reply.conversation_key = m.conversation_key
+          AND lower(trim(sent_folder.name)) = 'sent'
+      )
+      FROM messages m
+      WHERE m.folder_id = ?
+      LIMIT 51
+    `).all(folder.id) as Array<{ detail: string }>;
+
+    expect(folderPlan.some((row) => row.detail.includes("messages_folder_sort_idx"))).toBe(true);
+    expect(categoryPlan.some((row) => row.detail.includes("messages_folder_category_sort_idx"))).toBe(true);
+    expect(archivePlan.some((row) => row.detail.includes("messages_archive_sort_idx"))).toBe(true);
+    expect(replyPlan.some((row) => row.detail.includes("messages_conversation_idx"))).toBe(true);
+    expect(replyPlan.some((row) => row.detail.includes("SCAN sent_reply"))).toBe(false);
+    expect(sqlite.pragma("user_version", { simple: true })).toBe(29);
+
+    sqlite.close();
     database.close();
   });
 

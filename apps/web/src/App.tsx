@@ -214,6 +214,7 @@ export function App() {
   const importAbortRef = useRef<AbortController | null>(null);
   const gmailStatusRef = useRef(new Map<string, GmailConnection["status"]>());
   const messageRequestRef = useRef(0);
+  const messageListRequestRef = useRef(0);
 
   const readOnly = !session || session.role === "viewer";
   const isAdmin = session?.role === "admin";
@@ -475,6 +476,7 @@ export function App() {
   }, [api, selectedArchiveId, showError]);
 
   const loadMessages = useCallback(async (append = false) => {
+    const requestId = ++messageListRequestRef.current;
     if (!api || !selectedArchiveId) {
       setItems([]);
       setNextCursor(null);
@@ -501,6 +503,7 @@ export function App() {
           limit: 50
         };
         const [page, counts] = await Promise.all([api.search(searchTerm, searchFilters), countsPromise]);
+        if (requestId !== messageListRequestRef.current) return;
         setItems((current) => append
           ? [...current, ...page.items.map(hitToItem)]
           : page.items.map(hitToItem));
@@ -515,6 +518,7 @@ export function App() {
           cursor: append ? nextCursor ?? undefined : undefined,
           limit: 50
         }), countsPromise]);
+        if (requestId !== messageListRequestRef.current) return;
         setItems((current) => append
           ? [...current, ...page.items.map(messageToItem)]
           : page.items.map(messageToItem));
@@ -523,9 +527,10 @@ export function App() {
       }
       if (!showInboxCategories) setInboxCategoryCounts(EMPTY_INBOX_CATEGORY_COUNTS);
     } catch (error) {
+      if (requestId !== messageListRequestRef.current) return;
       showError(error instanceof Error ? error.message : "Messages could not be loaded");
     } finally {
-      setLoadingMessages(false);
+      if (requestId === messageListRequestRef.current) setLoadingMessages(false);
     }
   }, [
     api,
