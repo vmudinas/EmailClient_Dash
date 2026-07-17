@@ -7,6 +7,7 @@ import type {
   Archive,
   AuthSessionInfo,
   Folder,
+  GmailConnection,
   SenderFilingStatus,
   UserSummary
 } from "@email-client/shared";
@@ -80,9 +81,50 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
     fireEvent.click(screen.getByRole("button", { name: "Save ticker list" }));
 
-    await waitFor(() => expect(api.updateStockSettings).toHaveBeenCalledWith({ symbols: ["SPY", "AAPL", "MSFT"] }));
+    await waitFor(() => expect(api.updateStockSettings).toHaveBeenCalledWith({
+      symbols: ["SPY", "AAPL", "MSFT"],
+      secondsPerSymbol: 8
+    }));
     expect(onStockSettingsChanged).toHaveBeenCalledOnce();
     expect(await screen.findByText("Stock ticker list saved.")).toBeTruthy();
+  });
+
+  it("toggles news sources for the breaking-news ticker", async () => {
+    const updatedSettings: AdminSettings = {
+      ...SETTINGS,
+      news: { ...SETTINGS.news, enabledSources: ["bbc", "aljazeera", "foxnews"] }
+    };
+    const onNewsSettingsChanged = vi.fn();
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      updateNewsSettings: vi.fn().mockResolvedValue(updatedSettings)
+    } as unknown as ApiClient;
+
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={SESSION}
+        onClose={vi.fn()}
+        onSignedOut={vi.fn()}
+        onNewsSettingsChanged={onNewsSettingsChanged}
+      />
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "News" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "News" }));
+
+    const cnnCheckbox = screen.getByRole("checkbox", { name: "CNN" });
+    expect((cnnCheckbox as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(cnnCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: "Save news sources" }));
+
+    await waitFor(() => expect(api.updateNewsSettings).toHaveBeenCalledWith({
+      enabledSources: ["bbc", "aljazeera", "foxnews"],
+      secondsPerHeadline: 8
+    }));
+    expect(onNewsSettingsChanged).toHaveBeenCalledOnce();
+    expect(await screen.findByText("News ticker sources saved.")).toBeTruthy();
   });
 
   it("shows database, Gmail, AI, users, security, and IP audit settings", async () => {
@@ -338,9 +380,79 @@ describe("SettingsDialog", () => {
       clientId: "desktop.apps.googleusercontent.com",
       clientSecret: "desktop-secret",
       clearClientSecret: false,
-      syncIntervalMinutes: 5
+      syncIntervalMinutes: 5,
+      syncMailboxActions: false
     }));
     expect(screen.queryByDisplayValue("desktop-secret")).toBeNull();
+  });
+
+  it("enables Gmail mailbox action sync and offers reauthorization for older connections", async () => {
+    const currentSettings: AdminSettings = {
+      ...SETTINGS,
+      gmail: {
+        ...SETTINGS.gmail,
+        configured: true,
+        clientId: "desktop.apps.googleusercontent.com",
+        source: "admin"
+      }
+    };
+    const updatedSettings: AdminSettings = {
+      ...currentSettings,
+      gmail: { ...currentSettings.gmail, syncMailboxActions: true }
+    };
+    const connection: GmailConnection = {
+      id: "gmail-readonly",
+      email: "owner@example.test",
+      archiveId: "archive-1",
+      archiveName: "Gmail",
+      folderId: "folder-1",
+      folderPath: "Gmail",
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canModifyMailbox: false,
+      canManageCalendar: true,
+      status: "connected",
+      processedItems: 0,
+      totalItems: null,
+      importedItems: 0,
+      lastSyncedAt: null,
+      lastError: null,
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:00:00.000Z"
+    };
+    const onReauthorize = vi.fn();
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(currentSettings),
+      listGmailConnections: vi.fn().mockResolvedValue([connection]),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      updateGmailSettings: vi.fn().mockResolvedValue(updatedSettings)
+    } as unknown as ApiClient;
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={SESSION}
+        onClose={vi.fn()}
+        onSignedOut={vi.fn()}
+        onReauthorizeGoogleCalendar={onReauthorize}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    const toggle = await screen.findByRole("checkbox", { name: /Mirror mailbox actions to Gmail/ });
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: /Save Gmail configuration/ }));
+    await waitFor(() => expect(api.updateGmailSettings).toHaveBeenCalledWith({
+      clientId: "desktop.apps.googleusercontent.com",
+      clearClientSecret: false,
+      syncIntervalMinutes: 5,
+      syncMailboxActions: true
+    }));
+    const reauthorize = await screen.findByRole("button", { name: "Reauthorize" });
+    fireEvent.click(reauthorize);
+    expect(onReauthorize).toHaveBeenCalledWith(connection);
   });
 
   it("starts a full-history Gmail pull from the admin panel and shows progress", async () => {
@@ -888,7 +1000,9 @@ const SETTINGS: AdminSettings = {
     settingsPath: "/tmp/gmail-oauth-settings.json",
     configurationError: null,
     syncIntervalMinutes: 5,
-    syncIntervalEnvManaged: false
+    syncIntervalEnvManaged: false,
+    syncMailboxActions: false,
+    syncMailboxActionsEnvManaged: false
   },
   drafts: {
     defaultFromAddress: "ai@vitas.work",
@@ -898,7 +1012,14 @@ const SETTINGS: AdminSettings = {
   },
   stocks: {
     symbols: ["SPY", "QQQ", "AAPL"],
+    secondsPerSymbol: 8,
     settingsPath: "/tmp/stock-settings.json",
+    configurationError: null
+  },
+  news: {
+    enabledSources: ["cnn", "bbc", "aljazeera", "foxnews"],
+    secondsPerHeadline: 8,
+    settingsPath: "/tmp/news-settings.json",
     configurationError: null
   },
   ai: {

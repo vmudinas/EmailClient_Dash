@@ -81,7 +81,7 @@ Electron passes the selected local path directly to the import service, so it do
 - Removing an active archive first stops its import and then removes any managed temporary source copy. Directly selected original files are never deleted.
 - Read, star, tags, and notes are stored in SQLite.
 
-Archive and folder moves reorganize the local Archive Mail copy only. They do not remove Gmail's `INBOX` label or change any remote Gmail label because the app deliberately uses read-only Gmail synchronization scopes.
+Archive and folder moves reorganize the local Archive Mail copy only by default. Admins can opt in to **Mirror mailbox actions to Gmail** so archive, move, Spam, Trash, read/unread, and star actions run in Gmail first and update the local copy only after Gmail succeeds.
 
 ## Login, users, and audit
 
@@ -114,9 +114,9 @@ Changing the SQLite connection string takes effect after restart and does not mi
 
 ## Gmail authorization, sync, and send
 
-Gmail uses the [Gmail API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list), a desktop OAuth client with PKCE, and a loopback callback. Archive Mail never asks for a Gmail password. Authorization requests the granular `gmail.readonly` and `gmail.send` scopes, plus `gmail.settings.basic` (read-only access to send-as aliases) and `calendar.events` (read/write access to primary-calendar events only). It does not request `gmail.modify`, the broad `mail.google.com` scope, or full `calendar` access to calendar settings.
+Gmail uses the [Gmail API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list), a desktop OAuth client with PKCE, and a loopback callback. Archive Mail never asks for a Gmail password. By default, authorization requests granular `gmail.readonly` and `gmail.send` scopes, plus `gmail.settings.basic` and calendar scopes. Enabling **Mirror mailbox actions to Gmail** replaces `gmail.readonly` with `gmail.modify`; it never requests the broad `mail.google.com` scope or permanent-delete permission.
 
-POP, IMAP, and SMTP are intentionally not used. Google requires the broad `https://mail.google.com/` scope for those protocols, which includes permanent-delete capability. The granular API scopes enforce pull-only synchronization plus sending without permission to delete, move, label, or mark remote Gmail messages.
+POP, IMAP, and SMTP are intentionally not used. Google requires the broad `https://mail.google.com/` scope for those protocols, which includes permanent-delete capability. The granular API scopes keep mailbox mutation off by default and, when explicitly enabled, allow label-based moves and state changes without granting permanent deletion.
 
 1. In Google Cloud, enable the Gmail API and configure the OAuth consent screen.
 2. Create an OAuth client with application type **Desktop app**.
@@ -128,10 +128,11 @@ Managed installations can use environment variables instead. Environment setting
 GMAIL_CLIENT_ID="your-client-id.apps.googleusercontent.com" \
 GMAIL_CLIENT_SECRET="your-desktop-client-secret" \
 GMAIL_SYNC_INTERVAL_MINUTES="5" \
+GMAIL_SYNC_MAILBOX_ACTIONS="true" \
 npm start
 ```
 
-`GMAIL_SYNC_INTERVAL_MINUTES` is optional and independent of the OAuth client variables; when set, it overrides the admin-configured auto-sync interval and the Admin settings control becomes read-only.
+`GMAIL_SYNC_INTERVAL_MINUTES` and `GMAIL_SYNC_MAILBOX_ACTIONS` are optional and independent of the OAuth client variables. When set, each overrides its Admin setting and makes that control read-only.
 
 For Electron development, pass the same variables to `npm run dev:desktop`.
 
@@ -149,7 +150,7 @@ Compose includes **Save draft**. Open the Drafts button in the top toolbar to re
 
 If a connected account has verified "Send mail as" aliases in Gmail (**Settings > Accounts > Send mail as**) — for example a custom domain address — Compose shows a **Send as** dropdown once more than one verified address is available, so a message can go out from `you@yourdomain.com` instead of the primary Gmail address. An address is rejected if it is not one of the account's verified aliases. Connections authorized before this feature was added need to be reconnected once to grant the `gmail.settings.basic` scope.
 
-Unread counts are local. A newly imported Gmail message initially follows Gmail's `UNREAD` label, but opening or marking it in Archive Mail does not modify its remote Gmail state.
+Unread counts are local when mailbox action sync is disabled. A newly imported Gmail message initially follows Gmail's `UNREAD` label; with mailbox action sync enabled, marking read/unread and starring/un-starring update Gmail first. Existing accounts must be reauthorized once after enabling the option.
 
 Raw Gmail MIME is processed by the same importer as MBOX. Attachments are written to the SHA-256 blob store, included in archive counts, available for download, and indexed by filename and extracted/OCR text. Per-message and attachment failures appear under **Diagnostics > Gmail sync** and in the event log.
 

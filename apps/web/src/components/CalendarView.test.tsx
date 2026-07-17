@@ -124,6 +124,24 @@ describe("CalendarView", () => {
     await waitFor(() => expect(screen.getByText("Call the vendor")).toBeTruthy());
   });
 
+  it("highlights days with events or to-dos on the mini month and shows details in the tooltip", async () => {
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([EVENT]),
+      listTodos: vi.fn().mockResolvedValue([TODO])
+    } as unknown as ApiClient;
+    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    const highlighted = await waitFor(() => screen.getByTitle(/Standup/));
+    expect(highlighted.className).toContain("has-items");
+    expect(highlighted.title).toContain("Write the report");
+    expect(highlighted.querySelector(".mini-day-dot.events")).toBeTruthy();
+    expect(highlighted.querySelector(".mini-day-dot.todos")).toBeTruthy();
+
+    const grid = highlighted.closest(".calendar-mini-grid")!;
+    expect(grid.querySelectorAll(".has-items")).toHaveLength(1);
+  });
+
   it("opens the edit dialog with full details when an event is clicked", async () => {
     const api = {
       listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),

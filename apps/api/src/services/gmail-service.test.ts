@@ -135,6 +135,7 @@ describe("GmailService", () => {
       totalItems: 1,
       importedItems: 1,
       canSend: true,
+      canModifyMailbox: false,
       canManageCalendar: false
     });
     expect(database.getArchive(archive.id)).toMatchObject({
@@ -618,6 +619,167 @@ describe("GmailService", () => {
       bodyText: "This should not be sent."
     })).rejects.toBeInstanceOf(GmailPermissionError);
   });
+
+  it("requests Gmail modify access only when mailbox action sync is enabled", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "archive-mail-gmail-modify-scope-"));
+    directories.push(dataDir);
+    const database = new EmailDatabase(dataDir);
+    const imports = new ImportService(database, new BlobStore(dataDir));
+    await imports.initialize();
+    const archive = database.createArchive({
+      name: "Gmail",
+      sourceType: "gmail",
+      fingerprint: "gmail-modify-scope",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const folder = database.createFolder(archive.id, "Gmail");
+    const gmail = new GmailService(database, imports, {
+      clientId: "desktop-client-id",
+      clientSecret: null,
+      redirectUri: () => "http://127.0.0.1:3001/api/gmail/oauth/callback",
+      syncMailboxActions: true
+    });
+    services.push({ gmail, imports, database });
+
+    const authorization = gmail.startAuthorization({
+      archiveId: archive.id,
+      folderId: folder.id,
+      archiveName: "Gmail",
+      folderName: "Inbox",
+      query: "",
+      ocrEnabled: false
+    });
+    const scopes = new URL(authorization.authorizationUrl).searchParams.get("scope")!.split(" ");
+    expect(scopes).toContain("https://www.googleapis.com/auth/gmail.modify");
+    expect(scopes).not.toContain("https://www.googleapis.com/auth/gmail.readonly");
+  });
+
+  it("syncs read, star, archive, and custom-folder actions through Gmail batchModify", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "archive-mail-gmail-actions-"));
+    directories.push(dataDir);
+    const database = new EmailDatabase(dataDir);
+    const imports = new ImportService(database, new BlobStore(dataDir));
+    await imports.initialize();
+    const archive = database.createArchive({
+      name: "Gmail",
+      sourceType: "gmail",
+      fingerprint: "gmail-actions",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const root = database.ensureFolder(archive.id, "Gmail", "Gmail", null);
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Gmail/Inbox", root.id);
+    const archived = database.ensureFolder(archive.id, "Archived", "Gmail/Archived", root.id);
+    const jobs = database.ensureFolder(archive.id, "Jobs", "Gmail/Jobs", root.id);
+    const connection = database.createGmailConnection({
+      email: "owner@example.test",
+      archiveId: archive.id,
+      folderId: root.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: false,
+      canModifyMailbox: true,
+      canManageCalendar: false,
+      refreshToken: "refresh-token",
+      accessToken: "access-token",
+      accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    });
+    const firstMessageId = insertGmailActionMessage(database, archive.id, inbox.id, connection.email, "gmail-1");
+    const secondMessageId = insertGmailActionMessage(database, archive.id, inbox.id, connection.email, "gmail-2");
+    const requests: Array<{ ids: string[]; addLabelIds: string[]; removeLabelIds: string[] }> = [];
+    let createdLabel = false;
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname.endsWith("/users/me/labels") && init?.method === "POST") {
+        createdLabel = true;
+        expect(JSON.parse(String(init.body))).toMatchObject({ name: "Jobs" });
+        return jsonResponse({ id: "Label_Jobs", name: "Jobs", type: "user" });
+      }
+      if (url.pathname.endsWith("/users/me/labels")) {
+        return jsonResponse({ labels: [
+          { id: "INBOX", name: "INBOX", type: "system" },
+          { id: "UNREAD", name: "UNREAD", type: "system" },
+          { id: "STARRED", name: "STARRED", type: "system" }
+        ] });
+      }
+      if (url.pathname.endsWith("/users/me/messages/batchModify")) {
+        requests.push(JSON.parse(String(init?.body)));
+        return jsonResponse({});
+      }
+      throw new Error(`Unexpected Gmail test request: ${url}`);
+    };
+    const gmail = new GmailService(database, imports, {
+      clientId: "desktop-client-id",
+      clientSecret: null,
+      redirectUri: () => "http://127.0.0.1:3001/api/gmail/oauth/callback",
+      fetcher,
+      syncMailboxActions: true
+    });
+    services.push({ gmail, imports, database });
+
+    await gmail.syncMessageState(firstMessageId, { isRead: true, isStarred: true });
+    await gmail.syncMessagesMove([firstMessageId, secondMessageId], archived.id);
+    database.moveMessage(firstMessageId, archived.id);
+    await gmail.syncMessageMove(firstMessageId, jobs.id);
+
+    expect(requests[0]).toEqual({
+      ids: ["gmail-1"],
+      addLabelIds: ["STARRED"],
+      removeLabelIds: ["UNREAD"]
+    });
+    expect(requests[1]).toMatchObject({
+      ids: expect.arrayContaining(["gmail-1", "gmail-2"]),
+      addLabelIds: [],
+      removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
+    });
+    expect(requests[2]).toMatchObject({
+      ids: ["gmail-1"],
+      addLabelIds: ["Label_Jobs"],
+      removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
+    });
+    expect(createdLabel).toBe(true);
+  });
+
+  it("refuses mailbox actions for connections that have not been reauthorized", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "archive-mail-gmail-actions-permission-"));
+    directories.push(dataDir);
+    const database = new EmailDatabase(dataDir);
+    const imports = new ImportService(database, new BlobStore(dataDir));
+    await imports.initialize();
+    const archive = database.createArchive({
+      name: "Gmail",
+      sourceType: "gmail",
+      fingerprint: "gmail-actions-permission",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const root = database.createFolder(archive.id, "Gmail");
+    const inbox = database.createFolder(archive.id, "Inbox", root.id);
+    const connection = database.createGmailConnection({
+      email: "readonly@example.test",
+      archiveId: archive.id,
+      folderId: root.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: false,
+      canModifyMailbox: false,
+      canManageCalendar: false,
+      refreshToken: "refresh-token"
+    });
+    const messageId = insertGmailActionMessage(database, archive.id, inbox.id, connection.email, "gmail-readonly");
+    const gmail = new GmailService(database, imports, {
+      clientId: "desktop-client-id",
+      clientSecret: null,
+      redirectUri: () => "http://127.0.0.1:3001/api/gmail/oauth/callback",
+      fetcher: async () => { throw new Error("Network must not be used without permission"); },
+      syncMailboxActions: true
+    });
+    services.push({ gmail, imports, database });
+
+    await expect(gmail.syncMessageState(messageId, { isRead: true }))
+      .rejects.toBeInstanceOf(GmailPermissionError);
+  });
 });
 
 async function waitForSync(database: EmailDatabase, connectionId: string) {
@@ -663,6 +825,33 @@ function insertLegacyGmailMessage(
     bodyText: subject,
     bodyHtml: null,
     headers: {},
+    sizeBytes: 10,
+    attachments: []
+  });
+}
+
+function insertGmailActionMessage(
+  database: EmailDatabase,
+  archiveId: string,
+  folderId: string,
+  email: string,
+  gmailMessageId: string
+): string {
+  return database.insertMessage({
+    archiveId,
+    folderId,
+    sourceKey: `gmail:${email}:${gmailMessageId}`,
+    internetMessageId: null,
+    subject: gmailMessageId,
+    sender: { name: null, address: "sender@example.test" },
+    to: [],
+    cc: [],
+    bcc: [],
+    sentAt: null,
+    receivedAt: null,
+    bodyText: gmailMessageId,
+    bodyHtml: null,
+    headers: { "x-archive-mail-gmail-label-ids": "INBOX,UNREAD" },
     sizeBytes: 10,
     attachments: []
   });

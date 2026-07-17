@@ -341,6 +341,18 @@ describe("AiService", () => {
     expect(reused).toEqual({ job: null, draft: drafts[0] });
     expect(draftReply).toHaveBeenCalledTimes(1);
 
+    database.deleteEmailDraft(drafts[0]!.id);
+    const redrafted = service.startMessageDraftReply(messageId, {
+      gmailConnectionId: connection.id,
+      resumeId: null,
+      replyStyleId: replyStyle.id
+    });
+    expect(redrafted.job).not.toBeNull();
+    expect(redrafted.job!.id).not.toBe(started.job!.id);
+    await waitForJob(database, redrafted.job!.id, "completed");
+    expect(draftReply).toHaveBeenCalledTimes(2);
+    expect(database.listEmailDrafts()).toHaveLength(1);
+
     await service.close();
     database.close();
   });

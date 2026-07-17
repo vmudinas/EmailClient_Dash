@@ -61,7 +61,7 @@ textarea:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr) 30px;
+  grid-template-rows: 58px minmax(0, 1fr) 30px 30px;
   width: 100%;
   height: 100%;
   background: #f4f5f2;
@@ -208,6 +208,137 @@ textarea:focus-visible {
   }
 }
 
+.news-ticker-bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 30px;
+  align-items: center;
+  min-width: 0;
+  height: 30px;
+  overflow: hidden;
+  border-top: 1px solid #26313d;
+  color: #eaf0f7;
+  background: #131c26;
+  z-index: 24;
+}
+
+.news-ticker-label {
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 5px;
+  padding: 0 12px;
+  border-right: 1px solid #2f3d4a;
+  color: #cfdbe7;
+  background: #182430;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.news-ticker-viewport {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.news-ticker-track {
+  display: flex;
+  width: max-content;
+  animation: news-ticker-scroll 60s linear infinite;
+  will-change: transform;
+}
+
+.news-ticker-bar:hover .news-ticker-track,
+.news-ticker-bar:focus-within .news-ticker-track {
+  animation-play-state: paused;
+}
+
+.news-ticker-group {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 30px;
+  padding: 0 30px 0 0;
+}
+
+.news-ticker-headline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  max-width: 460px;
+  height: 29px;
+  overflow: hidden;
+  color: #eaf0f7;
+  text-decoration: none;
+  font-size: 10px;
+}
+
+.news-ticker-headline:hover {
+  text-decoration: underline;
+}
+
+.news-ticker-headline strong {
+  flex: 0 0 auto;
+  color: #7fb4ff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.news-ticker-headline span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.news-ticker-empty {
+  display: block;
+  padding: 0 14px;
+  overflow: hidden;
+  color: #a9b7c5;
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.news-ticker-empty.error {
+  color: #ffaaa3;
+}
+
+.news-ticker-refresh {
+  display: inline-grid;
+  place-items: center;
+  align-self: stretch;
+  width: 30px;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid #2f3d4a;
+  color: #b7c4d1;
+  background: #182430;
+  cursor: pointer;
+}
+
+.news-ticker-refresh:hover:not(:disabled) {
+  color: #ffffff;
+  background: #202f3d;
+}
+
+.news-ticker-refresh:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+@keyframes news-ticker-scroll {
+  to { transform: translateX(-33.333333%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .news-ticker-track {
+    animation: none;
+  }
+}
+
 .topbar {
   display: grid;
   grid-template-columns: 300px minmax(280px, 680px) minmax(300px, 1fr);
@@ -334,6 +465,15 @@ textarea:focus-visible {
   border-color: #8bb7a3;
   color: var(--green);
   background: var(--green-soft);
+}
+
+.icon-button.danger {
+  color: var(--red);
+}
+
+.icon-button.danger:hover:not(:disabled) {
+  border-color: #d5a19d;
+  background: var(--red-soft);
 }
 
 .filter-count {
@@ -968,6 +1108,33 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.message-select-all {
+  width: 16px;
+  height: 16px;
+  margin: 0 2px;
+  accent-color: var(--green);
+  cursor: pointer;
+}
+
+.message-bulk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.message-bulk-toolbar span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.message-bulk-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .inbox-category-tabs {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1062,6 +1229,23 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
+.message-row.selectable {
+  grid-template-columns: 18px 34px minmax(0, 1fr);
+}
+
+.message-row-checkbox {
+  align-self: start;
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  accent-color: var(--green);
+  cursor: pointer;
+}
+
+.message-row.checked {
+  background: var(--green-soft);
+}
+
 .message-row[draggable="true"] {
   cursor: grab;
 }
@@ -1069,6 +1253,11 @@ textarea:focus-visible {
 .message-row.dragging {
   opacity: 0.5;
   cursor: grabbing;
+}
+
+.message-row:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
 }
 
 .message-row:hover {
@@ -3348,8 +3537,11 @@ textarea:focus-visible {
 }
 
 .calendar-mini-grid button {
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
   width: 24px;
   height: 24px;
   margin: auto;
@@ -3382,6 +3574,27 @@ textarea:focus-visible {
   background: var(--green);
   box-shadow: none;
   font-weight: 700;
+}
+
+.calendar-mini-grid .mini-day-dots {
+  display: flex;
+  gap: 2px;
+  height: 4px;
+}
+
+.calendar-mini-grid .mini-day-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.calendar-mini-grid .mini-day-dot.todos {
+  background: var(--amber);
+}
+
+.calendar-mini-grid button.selected .mini-day-dot {
+  background: rgba(255, 255, 255, 0.85);
 }
 
 .calendar-day-panel {
@@ -4412,6 +4625,22 @@ textarea:focus-visible {
   min-width: 0;
   color: var(--green-dark);
   font-size: 12px;
+}
+
+.news-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.news-source-list li {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
 }
 
 .stock-symbol-empty {
@@ -6036,21 +6265,28 @@ textarea:focus-visible {
   }
 
   .app-shell {
-    grid-template-rows: 56px minmax(0, 1fr) 30px 58px;
+    grid-template-rows: 56px minmax(0, 1fr) 30px 30px 58px;
     height: 100dvh;
   }
 
-  .stock-ticker-label {
+  .stock-ticker-label,
+  .news-ticker-label {
     width: 29px;
     padding: 0 8px;
   }
 
-  .stock-ticker-label svg {
+  .stock-ticker-label svg,
+  .news-ticker-label svg {
     flex: 0 0 auto;
   }
 
-  .stock-ticker-label {
+  .stock-ticker-label,
+  .news-ticker-label {
     font-size: 0;
+  }
+
+  .news-ticker-headline {
+    max-width: 260px;
   }
 
   .topbar {

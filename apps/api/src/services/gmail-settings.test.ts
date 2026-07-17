@@ -36,7 +36,8 @@ describe("GmailSettingsManager", () => {
     expect(JSON.parse(await readFile(manager.settingsPath, "utf8"))).toEqual({
       clientId: "desktop.apps.googleusercontent.com",
       clientSecret: "local-client-secret",
-      syncIntervalMinutes: 5
+      syncIntervalMinutes: 5,
+      syncMailboxActions: false
     });
 
     const reloaded = new GmailSettingsManager(dataDir, { clientId: null, clientSecret: null, syncIntervalMinutes: null });
@@ -105,6 +106,36 @@ describe("GmailSettingsManager", () => {
     expect(manager.view()).toMatchObject({ syncIntervalMinutes: 15, syncIntervalEnvManaged: true });
     manager.update({ clientId: "desktop.apps.googleusercontent.com", clearClientSecret: false, syncIntervalMinutes: 30 });
     expect(manager.syncIntervalMinutes()).toBe(15);
+  });
+
+  it("persists opt-in mailbox actions and supports an environment override", async () => {
+    const dataDir = await temporaryDirectory();
+    const manager = new GmailSettingsManager(dataDir, {
+      clientId: null,
+      clientSecret: null,
+      syncIntervalMinutes: null,
+      syncMailboxActions: null
+    });
+    manager.update({
+      clientId: "desktop.apps.googleusercontent.com",
+      clearClientSecret: false,
+      syncMailboxActions: true
+    });
+    expect(manager.view()).toMatchObject({
+      syncMailboxActions: true,
+      syncMailboxActionsEnvManaged: false
+    });
+
+    const environmentManaged = new GmailSettingsManager(dataDir, {
+      clientId: null,
+      clientSecret: null,
+      syncIntervalMinutes: null,
+      syncMailboxActions: false
+    });
+    expect(environmentManaged.view()).toMatchObject({
+      syncMailboxActions: false,
+      syncMailboxActionsEnvManaged: true
+    });
   });
 });
 

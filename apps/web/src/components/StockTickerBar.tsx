@@ -5,17 +5,20 @@ interface StockTickerBarProps {
   quotes: StockQuote[];
   loading: boolean;
   error: string;
+  secondsPerSymbol: number;
   onRefresh(): void;
 }
 
-export function StockTickerBar({ quotes, loading, error, onRefresh }: StockTickerBarProps) {
+export function StockTickerBar({ quotes, loading, error, secondsPerSymbol, onRefresh }: StockTickerBarProps) {
   const content = quotes.length > 0 ? quotes : null;
+  const minDurationSeconds = Math.max(15, secondsPerSymbol * 3);
+  const durationSeconds = Math.max(minDurationSeconds, (content?.length ?? 0) * secondsPerSymbol);
   return (
     <footer className="stock-ticker-bar" aria-label="Market prices">
       <span className="stock-ticker-label"><TrendingUp size={13} /> Markets</span>
       <div className="stock-ticker-viewport">
         {content ? (
-          <div className="stock-ticker-track">
+          <div className="stock-ticker-track" style={{ animationDuration: `${durationSeconds}s` }}>
             {[0, 1, 2].map((copy) => (
               <div className="stock-ticker-group" key={copy} aria-hidden={copy > 0 || undefined}>
                 {content.map((quote) => <StockTickerQuote key={`${copy}-${quote.symbol}`} quote={quote} />)}

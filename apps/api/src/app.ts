@@ -19,6 +19,7 @@ import {
   appleCalendarAccountCreateSchema,
   archiveMergeSchema,
   authLoginSchema,
+  bulkMoveMessagesSchema,
   calendarEventInputSchema,
   clientDiagnosticSchema,
   databaseSettingsPatchSchema,
@@ -40,6 +41,7 @@ import {
   messageFollowUpCreateSchema,
   messageFollowUpPatchSchema,
   messageMoveSchema,
+  newsSettingsPatchSchema,
   pinChangeSchema,
   senderFilingArchiveSchema,
   replyStyleCreateSchema,
@@ -56,6 +58,8 @@ import {
   type AdminSettings,
   type AiJob,
   type AiProviderId,
+  type BulkMoveDestination,
+  type BulkMoveResult,
   type DiagnosticCategory,
   type DiagnosticLevel,
   type ImportOptions,
@@ -122,6 +126,7 @@ import {
   UploadService,
   UploadValidationError
 } from "./services/upload-service.js";
+import { NewsService } from "./services/news-service.js";
 import { StockService } from "./services/stock-service.js";
 
 type Role = "viewer" | "local" | "admin";
@@ -134,6 +139,18 @@ type Role = "viewer" | "local" | "admin";
 // open in the same browser call /api/auth/login and steal the bearer token, which is
 // especially dangerous while the first-run admin/2332 PIN is still active.
 const ALLOWED_CORS_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"];
+
+const BULK_DESTINATION_MATCH_NAMES: Record<BulkMoveDestination, string[]> = {
+  trash: ["trash", "deleted items", "deleted"],
+  archived: ["archive", "archived"],
+  spam: ["spam", "junk"]
+};
+
+const BULK_DESTINATION_CREATE_NAME: Record<BulkMoveDestination, string> = {
+  trash: "Trash",
+  archived: "Archived",
+  spam: "Spam"
+};
 
 export interface StartedApi {
   runtime: EmailApiRuntime;
@@ -160,6 +177,7 @@ export class EmailApiRuntime {
   readonly aiSettings: AiSettingsManager;
   readonly aiSchedules: AiScheduleService;
   readonly stocks: StockService;
+  readonly news: NewsService;
   readonly uploads: UploadService;
   readonly adminToken = randomToken();
   readonly localToken = randomToken();
@@ -185,14 +203,16 @@ export class EmailApiRuntime {
     this.gmailSettings = new GmailSettingsManager(config.dataDir, {
       clientId: config.gmailClientId,
       clientSecret: config.gmailClientSecret,
-      syncIntervalMinutes: config.gmailSyncIntervalMinutes
+      syncIntervalMinutes: config.gmailSyncIntervalMinutes,
+      syncMailboxActions: config.gmailSyncMailboxActions
     });
     const gmailCredentials = this.gmailSettings.credentials();
     this.gmail = new GmailService(this.database, this.imports, {
       clientId: gmailCredentials.clientId,
       clientSecret: gmailCredentials.clientSecret,
       redirectUri: () => `http://127.0.0.1:${this.listeningPort}/api/gmail/oauth/callback`,
-      syncIntervalMinutes: this.gmailSettings.syncIntervalMinutes()
+      syncIntervalMinutes: this.gmailSettings.syncIntervalMinutes(),
+      syncMailboxActions: this.gmailSettings.syncMailboxActions()
     });
     this.calendar = new CalendarService(this.gmail, this.database);
     this.resumes = new ResumeService(this.database, this.blobStore);
@@ -205,6 +225,7 @@ export class EmailApiRuntime {
     this.ai = new AiService(this.database, this.aiSettings, undefined, undefined, this.draftSettings);
     this.aiSchedules = new AiScheduleService(this.database, this.ai);
     this.stocks = new StockService(config.dataDir);
+    this.news = new NewsService(config.dataDir);
     this.uploads = new UploadService(config.dataDir, this.database, this.imports);
   }
 
@@ -786,9 +807,10 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: "Invalid message-state update" });
       }
       try {
+        await this.gmail.syncMessageState(request.params.messageId, parsed.data);
         return this.database.updateMessageState(request.params.messageId, parsed.data);
-      } catch {
-        return reply.code(404).send({ error: "Message not found" });
+      } catch (error) {
+        return this.mailboxActionErrorReply(reply, error, "Message state could not be updated");
       }
     });
 
@@ -802,12 +824,85 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: "Choose a destination mailbox" });
       }
       try {
+        await this.gmail.syncMessageMove(request.params.messageId, parsed.data.folderId);
         this.database.moveMessage(request.params.messageId, parsed.data.folderId);
         return this.database.getMessage(request.params.messageId);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Message could not be moved";
-        return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+        return this.mailboxActionErrorReply(reply, error, "Message could not be moved");
       }
+    });
+
+    // Delete resolves to a local "Trash" mailbox rather than a hard delete, so a bulk
+    // Delete/Archive/Spam action is always reversible the same way a single-message
+    // Archive move already is (see BULK_DESTINATION_NAMES below).
+    this.app.post<{ Body: unknown }>("/api/messages/bulk-move", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = bulkMoveMessagesSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose messages and a destination" });
+      }
+      const { messageIds, destination } = parsed.data;
+      const matchNames = BULK_DESTINATION_MATCH_NAMES[destination];
+      const createName = BULK_DESTINATION_CREATE_NAME[destination];
+      const folderCache = new Map<string, { id: string; path: string }>();
+      const folderPaths = new Set<string>();
+      const pendingMoves: Array<{ messageId: string; targetFolderId: string }> = [];
+      let moved = 0;
+      let alreadyThere = 0;
+      let failed = 0;
+      for (const messageId of messageIds) {
+        const existing = this.database.getMessage(messageId);
+        if (!existing) {
+          failed += 1;
+          continue;
+        }
+        const cacheKey = `${existing.archiveId}:${existing.folderId}`;
+        let folder = folderCache.get(cacheKey);
+        if (!folder) {
+          try {
+            folder = this.resolveNamedFolder(existing.archiveId, existing.folderId, matchNames, createName);
+            folderCache.set(cacheKey, folder);
+          } catch {
+            failed += 1;
+            continue;
+          }
+        }
+        folderPaths.add(folder.path);
+        if (folder.id === existing.folderId) {
+          alreadyThere += 1;
+          continue;
+        }
+        pendingMoves.push({ messageId, targetFolderId: folder.id });
+      }
+      const remoteGroups = new Map<string, string[]>();
+      for (const move of pendingMoves) {
+        const ids = remoteGroups.get(move.targetFolderId) ?? [];
+        ids.push(move.messageId);
+        remoteGroups.set(move.targetFolderId, ids);
+      }
+      try {
+        for (const [targetFolderId, ids] of remoteGroups) {
+          await this.gmail.syncMessagesMove(ids, targetFolderId);
+        }
+      } catch (error) {
+        return this.mailboxActionErrorReply(reply, error, "Selected messages could not be moved");
+      }
+      for (const move of pendingMoves) {
+        try {
+          this.database.moveMessage(move.messageId, move.targetFolderId);
+          moved += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const result: BulkMoveResult = { destination, folderPaths: [...folderPaths], moved, alreadyThere, failed };
+      this.database.recordDiagnostic({
+        level: failed > 0 ? "warning" : "info",
+        category: "system",
+        message: `Bulk ${destination} moved ${moved} message${moved === 1 ? "" : "s"}${failed ? `, ${failed} failed` : ""}`,
+        context: { operation: "bulk_move", destination, requested: messageIds.length, moved, alreadyThere, failed }
+      });
+      return result;
     });
 
     this.app.post<{ Params: { messageId: string } }>(
@@ -817,6 +912,8 @@ export class EmailApiRuntime {
         const parsed = messageMoveSchema.safeParse(request.body);
         if (!parsed.success) return reply.code(400).send({ error: "Choose a destination mailbox" });
         try {
+          const messageIds = this.database.listSenderMessageIds(request.params.messageId);
+          await this.gmail.syncMessagesMove(messageIds, parsed.data.folderId);
           const result = this.database.moveSenderMessagesToFolder(request.params.messageId, parsed.data.folderId);
           this.database.recordDiagnostic({
             level: "info",
@@ -832,8 +929,7 @@ export class EmailApiRuntime {
           });
           return result;
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Sender messages could not be moved";
-          return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+          return this.mailboxActionErrorReply(reply, error, "Sender messages could not be moved");
         }
       }
     );
@@ -843,6 +939,16 @@ export class EmailApiRuntime {
       async (request, reply) => {
         if (!this.requireRole(request, reply, ["local", "admin"])) return;
         try {
+          const message = this.database.getMessage(request.params.messageId);
+          if (!message) throw new Error("Message not found");
+          const spamFolder = this.resolveNamedFolder(
+            message.archiveId,
+            message.folderId,
+            ["spam"],
+            "Spam"
+          );
+          const messageIds = this.database.listSenderMessageIds(request.params.messageId, true);
+          await this.gmail.syncMessagesMove(messageIds, spamFolder.id);
           const result = this.database.markSenderAsSpam(request.params.messageId);
           this.database.recordDiagnostic({
             level: "info",
@@ -857,8 +963,7 @@ export class EmailApiRuntime {
           });
           return result;
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Sender could not be marked as spam";
-          return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+          return this.mailboxActionErrorReply(reply, error, "Sender could not be marked as spam");
         }
       }
     );
@@ -1656,6 +1761,13 @@ export class EmailApiRuntime {
       return this.stocks.quotes();
     });
 
+    // Display-only setting every session role needs for the ticker, unlike the full
+    // admin-only /api/admin/settings/stocks payload (symbol list, settings file path, etc).
+    this.app.get("/api/stocks/display-settings", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      return { secondsPerSymbol: this.stocks.view().secondsPerSymbol };
+    });
+
     this.app.patch<{ Body: unknown }>("/api/admin/settings/stocks", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
       const parsed = stockSettingsPatchSchema.safeParse(request.body);
@@ -1670,12 +1782,56 @@ export class EmailApiRuntime {
           level: "info",
           category: "system",
           message: "Stock ticker configuration saved",
-          context: { operation: "stock_ticker_update", symbols: updated.symbols }
+          context: {
+            operation: "stock_ticker_update",
+            symbols: updated.symbols,
+            secondsPerSymbol: updated.secondsPerSymbol
+          }
         });
         return this.getAdminSettings();
       } catch (error) {
         return reply.code(400).send({
           error: error instanceof Error ? error.message : "Stock ticker settings could not be saved"
+        });
+      }
+    });
+
+    this.app.get("/api/news/headlines", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      return this.news.headlines();
+    });
+
+    // Display-only setting every session role needs for the ticker, unlike the full
+    // admin-only /api/admin/settings/news payload (source list, settings file path, etc).
+    this.app.get("/api/news/display-settings", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      return { secondsPerHeadline: this.news.view().secondsPerHeadline };
+    });
+
+    this.app.patch<{ Body: unknown }>("/api/admin/settings/news", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = newsSettingsPatchSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: parsed.error.issues[0]?.message ?? "Enter valid news sources"
+        });
+      }
+      try {
+        const updated = this.news.update(parsed.data);
+        this.database.recordDiagnostic({
+          level: "info",
+          category: "system",
+          message: "News ticker configuration saved",
+          context: {
+            operation: "news_ticker_update",
+            enabledSources: updated.enabledSources,
+            secondsPerHeadline: updated.secondsPerHeadline
+          }
+        });
+        return this.getAdminSettings();
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "News ticker settings could not be saved"
         });
       }
     });
@@ -1707,13 +1863,15 @@ export class EmailApiRuntime {
         const credentials = this.gmailSettings.update(parsed.data);
         this.gmail.configureCredentials(credentials.clientId, credentials.clientSecret);
         this.gmail.configureSyncInterval(this.gmailSettings.syncIntervalMinutes());
+        this.gmail.configureMailboxActionSync(this.gmailSettings.syncMailboxActions());
         this.database.recordDiagnostic({
           level: "info",
           category: "gmail",
           message: "Gmail OAuth configuration saved",
           context: {
             operation: "oauth_configuration_update",
-            clientSecretConfigured: Boolean(credentials.clientSecret)
+            clientSecretConfigured: Boolean(credentials.clientSecret),
+            syncMailboxActions: this.gmailSettings.syncMailboxActions()
           }
         });
         return this.getAdminSettings();
@@ -1737,6 +1895,7 @@ export class EmailApiRuntime {
         const credentials = this.gmailSettings.clear();
         this.gmail.configureCredentials(credentials.clientId, credentials.clientSecret);
         this.gmail.configureSyncInterval(this.gmailSettings.syncIntervalMinutes());
+        this.gmail.configureMailboxActionSync(this.gmailSettings.syncMailboxActions());
         this.database.recordDiagnostic({
           level: "info",
           category: "gmail",
@@ -2315,6 +2474,14 @@ export class EmailApiRuntime {
     return reply.code(502).send({ error: message });
   }
 
+  private mailboxActionErrorReply(reply: FastifyReply, error: unknown, fallback: string): FastifyReply {
+    const message = error instanceof Error ? error.message : fallback;
+    if (message.toLowerCase().includes("not found")) return reply.code(404).send({ error: message });
+    if (error instanceof GmailPermissionError) return reply.code(409).send({ error: message });
+    if (/^(Gmail|Google)\b/.test(message)) return reply.code(502).send({ error: message });
+    return reply.code(400).send({ error: message });
+  }
+
   private resolveRole(request: FastifyRequest): Role | null {
     const loopback = isLoopback(request.ip);
     if (this.config.devAuthBypass && loopback) return "admin";
@@ -2382,6 +2549,24 @@ export class EmailApiRuntime {
     });
   }
 
+  // Finds a same-mailbox sibling folder by name (preferring one under the message's
+  // current parent, matching how a single-message Archive move already resolves its
+  // destination), creating it if none exists. Reused by the bulk Delete/Archive/Spam action.
+  private resolveNamedFolder(
+    archiveId: string,
+    currentFolderId: string,
+    matchNames: string[],
+    createName: string
+  ): { id: string; path: string } {
+    const currentFolder = this.database.getFolder(currentFolderId);
+    const availableFolders = this.database.listFolders(archiveId);
+    const nameSet = new Set(matchNames.map((name) => name.toLowerCase()));
+    const parentId = currentFolder?.parentId ?? null;
+    return availableFolders.find((folder) => folder.parentId === parentId && nameSet.has(folder.name.trim().toLowerCase()))
+      ?? availableFolders.find((folder) => nameSet.has(folder.name.trim().toLowerCase()))
+      ?? this.database.createFolder(archiveId, createName, parentId);
+  }
+
   private getAdminSettings(): AdminSettings {
     const configured = this.storageSettings.current();
     return {
@@ -2403,6 +2588,7 @@ export class EmailApiRuntime {
       gmail: this.gmailSettings.view(),
       drafts: this.draftSettings.view(),
       stocks: this.stocks.view(),
+      news: this.news.view(),
       ai: this.aiSettings.view(this.database.getAiUsageSummary())
     };
   }

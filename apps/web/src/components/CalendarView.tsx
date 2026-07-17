@@ -62,6 +62,11 @@ interface PositionedEvent {
   columns: number;
 }
 
+interface DaySummary {
+  eventTitles: string[];
+  todoTexts: string[];
+}
+
 export function CalendarView({ api, connections, onReauthorize, onError }: CalendarViewProps) {
   const [date, setDate] = useState(todayIso());
   const [month, setMonth] = useState(todayIso().slice(0, 7));
@@ -76,6 +81,7 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
   const [todoBusy, setTodoBusy] = useState(false);
   const [draft, setDraft] = useState<EventDraft | null>(null);
   const [eventBusy, setEventBusy] = useState(false);
+  const [monthSummary, setMonthSummary] = useState<Map<string, DaySummary>>(new Map());
   const timelineRef = useRef<HTMLDivElement>(null);
 
   const selectedSources = useMemo(
@@ -136,9 +142,46 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
     }
   }, [api, date, onError]);
 
+  const loadMonthSummary = useCallback(async () => {
+    const grid = monthDays(month);
+    const gridStart = grid[0]!.date;
+    const gridEnd = grid[grid.length - 1]!.date;
+    const summary = new Map<string, DaySummary>();
+    const addEvent = (dateIso: string, title: string) => {
+      const entry = summary.get(dateIso) ?? { eventTitles: [], todoTexts: [] };
+      entry.eventTitles.push(title);
+      summary.set(dateIso, entry);
+    };
+    const addTodo = (dateIso: string, text: string) => {
+      const entry = summary.get(dateIso) ?? { eventTitles: [], todoTexts: [] };
+      entry.todoTexts.push(text);
+      summary.set(dateIso, entry);
+    };
+    try {
+      if (selectedSources.length > 0) {
+        const { startOfDay } = dayBoundsIso(gridStart);
+        const { endOfDay } = dayBoundsIso(gridEnd);
+        const results = await Promise.allSettled(
+          selectedSources.map((source) => api.listCalendarSourceEvents(source.id, startOfDay, endOfDay))
+        );
+        for (const result of results) {
+          if (result.status !== "fulfilled") continue;
+          for (const event of result.value) {
+            for (const dateIso of eventDates(event)) addEvent(dateIso, event.title);
+          }
+        }
+      }
+      for (const todo of await api.listTodos(gridStart, gridEnd)) addTodo(todo.date, todo.text);
+    } catch {
+      // Best-effort: the mini month just shows no highlights if this fails.
+    }
+    setMonthSummary(summary);
+  }, [api, month, selectedSources]);
+
   useEffect(() => { void loadSources(); }, [loadSources]);
   useEffect(() => { void loadEvents(); }, [loadEvents]);
   useEffect(() => { void loadTodos(); }, [loadTodos]);
+  useEffect(() => { void loadMonthSummary(); }, [loadMonthSummary]);
   useEffect(() => { setMonth(date.slice(0, 7)); }, [date]);
   useEffect(() => {
     if (sourcesLoading) return;
@@ -274,7 +317,7 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
             </section>
           ))}
         </div>
-        <MiniMonth month={month} selectedDate={date} onMonthChange={setMonth} onSelectDate={setDate} />
+        <MiniMonth month={month} selectedDate={date} monthSummary={monthSummary} onMonthChange={setMonth} onSelectDate={setDate} />
       </aside>
 
       <section className="calendar-day-panel">
@@ -412,11 +455,13 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
 function MiniMonth({
   month,
   selectedDate,
+  monthSummary,
   onMonthChange,
   onSelectDate
 }: {
   month: string;
   selectedDate: string;
+  monthSummary: Map<string, DaySummary>;
   onMonthChange(value: string): void;
   onSelectDate(value: string): void;
 }) {
@@ -430,18 +475,79 @@ function MiniMonth({
       </header>
       <div className="calendar-mini-weekdays">{["S", "M", "T", "W", "T", "F", "S"].map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div>
       <div className="calendar-mini-grid">
-        {days.map((day) => (
-          <button
-            key={day.date}
-            className={`${day.currentMonth ? "" : "outside"} ${day.date === selectedDate ? "selected" : ""} ${day.date === todayIso() ? "today" : ""}`}
-            onClick={() => onSelectDate(day.date)}
-            aria-label={formatDateLabel(day.date)}
-            aria-pressed={day.date === selectedDate}
-          >{Number(day.date.slice(-2))}</button>
-        ))}
+        {days.map((day) => {
+          const summary = monthSummary.get(day.date);
+          const hasEvents = Boolean(summary?.eventTitles.length);
+          const hasTodos = Boolean(summary?.todoTexts.length);
+          return (
+            <button
+              key={day.date}
+              className={[
+                day.currentMonth ? "" : "outside",
+                day.date === selectedDate ? "selected" : "",
+                day.date === todayIso() ? "today" : "",
+                hasEvents || hasTodos ? "has-items" : ""
+              ].filter(Boolean).join(" ")}
+              onClick={() => onSelectDate(day.date)}
+              aria-label={ariaLabelForDay(day.date, summary)}
+              aria-pressed={day.date === selectedDate}
+              title={dayTooltip(summary)}
+            >
+              <span className="mini-day-number">{Number(day.date.slice(-2))}</span>
+              {(hasEvents || hasTodos) && (
+                <span className="mini-day-dots">
+                  {hasEvents && <span className="mini-day-dot events" />}
+                  {hasTodos && <span className="mini-day-dot todos" />}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
     </section>
   );
+}
+
+function dayTooltip(summary: DaySummary | undefined): string | undefined {
+  if (!summary || (summary.eventTitles.length === 0 && summary.todoTexts.length === 0)) return undefined;
+  const lines: string[] = [];
+  if (summary.eventTitles.length > 0) {
+    lines.push(`Events (${summary.eventTitles.length}):`);
+    lines.push(...summary.eventTitles.slice(0, 6).map((title) => `• ${title}`));
+    if (summary.eventTitles.length > 6) lines.push(`• +${summary.eventTitles.length - 6} more`);
+  }
+  if (summary.todoTexts.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(`To-dos (${summary.todoTexts.length}):`);
+    lines.push(...summary.todoTexts.slice(0, 6).map((text) => `• ${text}`));
+    if (summary.todoTexts.length > 6) lines.push(`• +${summary.todoTexts.length - 6} more`);
+  }
+  return lines.join("\n");
+}
+
+function ariaLabelForDay(dateIso: string, summary: DaySummary | undefined): string {
+  const label = formatDateLabel(dateIso);
+  const parts: string[] = [];
+  if (summary?.eventTitles.length) parts.push(`${summary.eventTitles.length} event${summary.eventTitles.length === 1 ? "" : "s"}`);
+  if (summary?.todoTexts.length) parts.push(`${summary.todoTexts.length} to-do${summary.todoTexts.length === 1 ? "" : "s"}`);
+  return parts.length > 0 ? `${label}, ${parts.join(", ")}` : label;
+}
+
+function eventDates(event: CalendarEvent): string[] {
+  if (!event.allDay) return [dateToIso(new Date(event.startAt))];
+  const start = event.startAt.slice(0, 10);
+  const end = event.endAt.slice(0, 10);
+  const dates: string[] = [];
+  let cursor = localDate(start);
+  const endDate = localDate(end);
+  let guard = 0;
+  while (cursor.getTime() <= endDate.getTime() && guard < 62) {
+    dates.push(dateToIso(cursor));
+    cursor = new Date(cursor);
+    cursor.setDate(cursor.getDate() + 1);
+    guard += 1;
+  }
+  return dates;
 }
 
 function EventDialog({

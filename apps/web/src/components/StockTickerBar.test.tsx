@@ -39,7 +39,7 @@ describe("StockTickerBar", () => {
       error: "Price unavailable"
     }];
     const onRefresh = vi.fn();
-    render(<StockTickerBar quotes={quotes} loading={false} error="" onRefresh={onRefresh} />);
+    render(<StockTickerBar quotes={quotes} loading={false} error="" secondsPerSymbol={8} onRefresh={onRefresh} />);
 
     expect(screen.getAllByText("AAPL")).toHaveLength(3);
     expect(screen.getAllByText("$189.25")).toHaveLength(3);
@@ -52,10 +52,49 @@ describe("StockTickerBar", () => {
     expect(screen.getAllByText("Unavailable")).toHaveLength(3);
     fireEvent.click(screen.getByRole("button", { name: "Refresh market prices" }));
     expect(onRefresh).toHaveBeenCalledOnce();
+
+    const track = document.querySelector(".stock-ticker-track") as HTMLElement;
+    expect(track.style.animationDuration).toBe("24s");
+  });
+
+  it("scrolls slower as more symbols are shown, instead of a fixed duration", () => {
+    const quotes: StockQuote[] = Array.from({ length: 10 }, (_, index) => ({
+      symbol: `SYM${index}`,
+      name: null,
+      price: 100,
+      currency: "USD",
+      change: 0,
+      changePercent: 0,
+      marketState: "REGULAR",
+      quotedAt: "2026-07-17T14:00:00.000Z",
+      error: null
+    }));
+    render(<StockTickerBar quotes={quotes} loading={false} error="" secondsPerSymbol={8} onRefresh={vi.fn()} />);
+
+    const track = document.querySelector(".stock-ticker-track") as HTMLElement;
+    expect(track.style.animationDuration).toBe("80s");
+  });
+
+  it("honors a configured seconds-per-symbol pace from Admin settings", () => {
+    const quotes: StockQuote[] = Array.from({ length: 5 }, (_, index) => ({
+      symbol: `SYM${index}`,
+      name: null,
+      price: 100,
+      currency: "USD",
+      change: 0,
+      changePercent: 0,
+      marketState: "REGULAR",
+      quotedAt: "2026-07-17T14:00:00.000Z",
+      error: null
+    }));
+    render(<StockTickerBar quotes={quotes} loading={false} error="" secondsPerSymbol={20} onRefresh={vi.fn()} />);
+
+    const track = document.querySelector(".stock-ticker-track") as HTMLElement;
+    expect(track.style.animationDuration).toBe("100s");
   });
 
   it("directs an empty ticker to Admin settings", () => {
-    render(<StockTickerBar quotes={[]} loading={false} error="" onRefresh={vi.fn()} />);
+    render(<StockTickerBar quotes={[]} loading={false} error="" secondsPerSymbol={8} onRefresh={vi.fn()} />);
     expect(screen.getByText("Add symbols in Admin settings → Stocks")).toBeTruthy();
   });
 });

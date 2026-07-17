@@ -20,10 +20,12 @@ export interface GmailOAuthCredentials {
 
 export interface GmailSettingsEnvironment extends GmailOAuthCredentials {
   syncIntervalMinutes: number | null;
+  syncMailboxActions?: boolean | null;
 }
 
 interface PersistedGmailSettings extends GmailOAuthCredentials {
   syncIntervalMinutes: number;
+  syncMailboxActions: boolean;
 }
 
 export class GmailSettingsManager {
@@ -31,7 +33,8 @@ export class GmailSettingsManager {
   private persisted: PersistedGmailSettings = {
     clientId: null,
     clientSecret: null,
-    syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES
+    syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES,
+    syncMailboxActions: false
   };
   private readError: string | null = null;
 
@@ -52,6 +55,10 @@ export class GmailSettingsManager {
     return this.environment.syncIntervalMinutes ?? this.persisted.syncIntervalMinutes;
   }
 
+  syncMailboxActions(): boolean {
+    return this.environment.syncMailboxActions ?? this.persisted.syncMailboxActions;
+  }
+
   view(): AdminSettings["gmail"] {
     const credentials = this.credentials();
     const source = this.environment.clientId
@@ -67,7 +74,10 @@ export class GmailSettingsManager {
       settingsPath: this.settingsPath,
       configurationError: this.readError,
       syncIntervalMinutes: this.syncIntervalMinutes(),
-      syncIntervalEnvManaged: this.environment.syncIntervalMinutes !== null
+      syncIntervalEnvManaged: this.environment.syncIntervalMinutes !== null,
+      syncMailboxActions: this.syncMailboxActions(),
+      syncMailboxActionsEnvManaged: this.environment.syncMailboxActions !== null
+        && this.environment.syncMailboxActions !== undefined
     };
   }
 
@@ -81,7 +91,10 @@ export class GmailSettingsManager {
     const syncIntervalMinutes = this.environment.syncIntervalMinutes
       ?? input.syncIntervalMinutes
       ?? this.persisted.syncIntervalMinutes;
-    const next: PersistedGmailSettings = { clientId, clientSecret, syncIntervalMinutes };
+    const syncMailboxActions = this.environment.syncMailboxActions
+      ?? input.syncMailboxActions
+      ?? this.persisted.syncMailboxActions;
+    const next: PersistedGmailSettings = { clientId, clientSecret, syncIntervalMinutes, syncMailboxActions };
 
     mkdirSync(dirname(this.settingsPath), { recursive: true });
     const temporaryPath = `${this.settingsPath}.tmp`;
@@ -99,7 +112,8 @@ export class GmailSettingsManager {
     this.persisted = {
       clientId: null,
       clientSecret: null,
-      syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES
+      syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES,
+      syncMailboxActions: false
     };
     this.readError = null;
     return this.credentials();
@@ -115,7 +129,12 @@ export class GmailSettingsManager {
 
   private read(): PersistedGmailSettings {
     if (!existsSync(this.settingsPath)) {
-      return { clientId: null, clientSecret: null, syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES };
+      return {
+        clientId: null,
+        clientSecret: null,
+        syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES,
+        syncMailboxActions: false
+      };
     }
     try {
       const parsed = JSON.parse(readFileSync(this.settingsPath, "utf8")) as unknown;
@@ -124,7 +143,12 @@ export class GmailSettingsManager {
       return credentials;
     } catch (error) {
       this.readError = `Saved Gmail OAuth settings could not be loaded: ${errorMessage(error)}`;
-      return { clientId: null, clientSecret: null, syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES };
+      return {
+        clientId: null,
+        clientSecret: null,
+        syncIntervalMinutes: DEFAULT_SYNC_INTERVAL_MINUTES,
+        syncMailboxActions: false
+      };
     }
   }
 }
@@ -147,7 +171,10 @@ function parseCredentials(value: unknown): PersistedGmailSettings {
   const syncIntervalMinutes = Number.isInteger(root.syncIntervalMinutes) && Number(root.syncIntervalMinutes) >= 0
     ? Number(root.syncIntervalMinutes)
     : DEFAULT_SYNC_INTERVAL_MINUTES;
-  return { clientId, clientSecret, syncIntervalMinutes };
+  const syncMailboxActions = typeof root.syncMailboxActions === "boolean"
+    ? root.syncMailboxActions
+    : false;
+  return { clientId, clientSecret, syncIntervalMinutes, syncMailboxActions };
 }
 
 function stringValue(value: unknown): string | null {

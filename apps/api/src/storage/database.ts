@@ -162,6 +162,7 @@ export interface GmailConnectionCreateInput {
   query: string;
   ocrEnabled: boolean;
   canSend: boolean;
+  canModifyMailbox?: boolean;
   canManageCalendar: boolean;
   refreshToken: string;
   accessToken?: string | null;
@@ -172,6 +173,15 @@ export interface GmailConnectionRecord extends GmailConnection {
   refreshToken: string;
   accessToken: string | null;
   accessTokenExpiresAt: string | null;
+}
+
+export interface GmailMessageMutationTarget {
+  messageId: string;
+  gmailMessageId: string;
+  connection: GmailConnectionRecord;
+  currentFolderId: string;
+  currentFolderPath: string;
+  labelIds: string[];
 }
 
 export interface CalendarAccountCreateInput {
@@ -1415,6 +1425,16 @@ export class EmailDatabase {
         this.db.exec("ALTER TABLE ai_message_analysis ADD COLUMN context_hash TEXT NOT NULL DEFAULT '';");
       }
       this.db.pragma("user_version = 26");
+    }
+
+    const gmailModifyScopeVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (gmailModifyScopeVersion < 27) {
+      const hasModifyColumn = (this.db.pragma("table_info(gmail_connections)") as Array<{ name: string }>)
+        .some((column) => column.name === "can_modify_mailbox");
+      if (!hasModifyColumn) {
+        this.db.exec("ALTER TABLE gmail_connections ADD COLUMN can_modify_mailbox INTEGER NOT NULL DEFAULT 0;");
+      }
+      this.db.pragma("user_version = 27");
     }
   }
 
@@ -3941,7 +3961,7 @@ export class EmailDatabase {
         this.db.prepare(`
           UPDATE gmail_connections SET
             query = ?, ocr_enabled = ?, refresh_token = ?, access_token = ?,
-            access_token_expires_at = ?, can_send = ?, can_manage_calendar = ?,
+            access_token_expires_at = ?, can_send = ?, can_modify_mailbox = ?, can_manage_calendar = ?,
             status = 'connected', last_error = NULL,
             updated_at = ?
           WHERE id = ?
@@ -3952,6 +3972,7 @@ export class EmailDatabase {
           input.accessToken ?? null,
           input.accessTokenExpiresAt ?? null,
           input.canSend ? 1 : 0,
+          input.canModifyMailbox ? 1 : 0,
           input.canManageCalendar ? 1 : 0,
           now,
           id
@@ -3961,8 +3982,8 @@ export class EmailDatabase {
           INSERT INTO gmail_connections (
             id, email, archive_id, folder_id, query, ocr_enabled,
             refresh_token, access_token, access_token_expires_at,
-            can_send, can_manage_calendar, status, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?)
+            can_send, can_modify_mailbox, can_manage_calendar, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?)
         `).run(
           id,
           input.email,
@@ -3974,6 +3995,7 @@ export class EmailDatabase {
           input.accessToken ?? null,
           input.accessTokenExpiresAt ?? null,
           input.canSend ? 1 : 0,
+          input.canModifyMailbox ? 1 : 0,
           input.canManageCalendar ? 1 : 0,
           now,
           now
@@ -4002,6 +4024,78 @@ export class EmailDatabase {
       JOIN folders f ON f.id = c.folder_id
       ORDER BY c.updated_at DESC
     `).all() as Row[]).map((row) => this.mapGmailConnection(row));
+  }
+
+  getGmailMessageMutationTargets(messageIds: string[]): GmailMessageMutationTarget[] {
+    const ids = [...new Set(messageIds)];
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = this.db.prepare(`
+      SELECT m.id, m.archive_id, m.folder_id, m.source_key, m.headers_json,
+        f.path AS folder_path
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.id IN (${placeholders})
+    `).all(...ids) as Row[];
+    const connectionsByArchive = new Map<string, GmailConnectionRecord[]>();
+    for (const row of rows) {
+      const archiveId = String(row.archive_id);
+      if (connectionsByArchive.has(archiveId)) continue;
+      const connections = (this.db.prepare(`
+        SELECT c.*, a.name AS archive_name, f.path AS folder_path
+        FROM gmail_connections c
+        JOIN archives a ON a.id = c.archive_id
+        JOIN folders f ON f.id = c.folder_id
+        WHERE c.archive_id = ?
+      `).all(archiveId) as Row[]).map((connectionRow) => this.mapGmailConnectionRecord(connectionRow));
+      connectionsByArchive.set(archiveId, connections);
+    }
+    const targets: GmailMessageMutationTarget[] = [];
+    for (const row of rows) {
+      const sourceKey = String(row.source_key);
+      const connection = connectionsByArchive.get(String(row.archive_id))?.find((entry) => (
+        sourceKey.startsWith(`gmail:${entry.email.trim().toLowerCase()}:`)
+      ));
+      if (!connection) continue;
+      const prefix = `gmail:${connection.email.trim().toLowerCase()}:`;
+      const gmailMessageId = sourceKey.slice(prefix.length);
+      if (!gmailMessageId) continue;
+      const headers = parseJson<Record<string, string>>(row.headers_json, {});
+      targets.push({
+        messageId: String(row.id),
+        gmailMessageId,
+        connection,
+        currentFolderId: String(row.folder_id),
+        currentFolderPath: String(row.folder_path),
+        labelIds: (headers["x-archive-mail-gmail-label-ids"] ?? "")
+          .split(",")
+          .map((labelId) => labelId.trim())
+          .filter(Boolean)
+      });
+    }
+    return targets;
+  }
+
+  listSenderMessageIds(messageId: string, inboxAndSelectedOnly = false): string[] {
+    const source = this.db.prepare(`
+      SELECT archive_id, lower(trim(sender_address)) AS sender_address
+      FROM messages WHERE id = ?
+    `).get(messageId) as Row | undefined;
+    if (!source) throw new Error("Message not found");
+    const senderAddress = String(source.sender_address ?? "");
+    if (!senderAddress) throw new Error("This message does not have a sender address");
+    const rows = this.db.prepare(`
+      SELECT m.id FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.archive_id = ? AND lower(trim(m.sender_address)) = ?
+        ${inboxAndSelectedOnly ? "AND (m.id = ? OR lower(trim(f.name)) = 'inbox')" : ""}
+      ORDER BY m.id
+    `).all(
+      String(source.archive_id),
+      senderAddress,
+      ...(inboxAndSelectedOnly ? [messageId] : [])
+    ) as Row[];
+    return rows.map((row) => String(row.id));
   }
 
   updateGmailTokens(
@@ -5813,6 +5907,7 @@ export class EmailDatabase {
       query: String(row.query ?? ""),
       ocrEnabled: Boolean(row.ocr_enabled),
       canSend: Boolean(row.can_send),
+      canModifyMailbox: Boolean(row.can_modify_mailbox),
       canManageCalendar: Boolean(row.can_manage_calendar),
       status: row.status as GmailConnectionStatus,
       processedItems: Number(row.processed_items),

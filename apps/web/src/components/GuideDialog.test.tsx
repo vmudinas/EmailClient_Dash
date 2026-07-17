@@ -14,7 +14,7 @@ describe("GuideDialog", () => {
     expect(screen.getByText(/byte-for-byte raw EML/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
     expect(screen.getByRole("heading", { name: "Why Gmail API instead of POP or IMAP?" })).toBeTruthy();
-    expect(screen.getByText(/cannot delete, move, label, or mark messages/)).toBeTruthy();
+    expect(screen.getByText(/archive, move, Spam, Trash, read, and star actions run in Gmail first/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
     expect(screen.getByRole("heading", { name: "Diagnostics and failures" })).toBeTruthy();
   });

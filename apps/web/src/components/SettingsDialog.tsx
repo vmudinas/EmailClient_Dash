@@ -23,6 +23,7 @@ import {
   KeyRound,
   LoaderCircle,
   MailCheck,
+  Newspaper,
   Paperclip,
   Pencil,
   Plus,
@@ -57,6 +58,7 @@ import type {
   Folder,
   GmailConnection,
   MessageSummary,
+  NewsSourceId,
   ReplyStyle,
   ResumeAsset,
   SenderFilingStatus,
@@ -64,11 +66,11 @@ import type {
   SmartMailRuleSuggestion,
   UserSummary
 } from "@email-client/shared";
-import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS } from "@email-client/shared";
+import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS, NEWS_SOURCE_IDS, NEWS_SOURCE_LABELS } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "stocks" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -82,6 +84,7 @@ interface SettingsDialogProps {
   onAddGoogleCalendar?(): void;
   onReauthorizeGoogleCalendar?(connection: GmailConnection): void;
   onStockSettingsChanged?(): void;
+  onNewsSettingsChanged?(): void;
 }
 
 const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
@@ -90,6 +93,7 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "calendars", label: "Calendars", icon: CalendarDays },
   { id: "drafts", label: "Drafts", icon: FileEdit },
   { id: "stocks", label: "Stocks", icon: TrendingUp },
+  { id: "news", label: "News", icon: Newspaper },
   { id: "reply-styles", label: "Reply styles", icon: Sparkles },
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
   { id: "smart-rules", label: "Smart rules", icon: MailCheck },
@@ -109,7 +113,8 @@ export function SettingsDialog({
   onSignedOut,
   onAddGoogleCalendar,
   onReauthorizeGoogleCalendar,
-  onStockSettingsChanged
+  onStockSettingsChanged,
+  onNewsSettingsChanged
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
@@ -189,6 +194,7 @@ export function SettingsDialog({
                     onSettings={setSettings}
                     onError={setError}
                     onNotice={showNotice}
+                    onReauthorize={onReauthorizeGoogleCalendar}
                   />
                 )}
                 {section === "calendars" && (
@@ -223,6 +229,18 @@ export function SettingsDialog({
                     onError={setError}
                     onNotice={showNotice}
                     onChanged={onStockSettingsChanged}
+                  />
+                )}
+                {section === "news" && settings && (
+                  <NewsSettingsPanel
+                    api={api!}
+                    settings={settings}
+                    busy={busy}
+                    onBusy={setBusy}
+                    onSettings={setSettings}
+                    onError={setError}
+                    onNotice={showNotice}
+                    onChanged={onNewsSettingsChanged}
                   />
                 )}
                 {section === "sender-filing" && (
@@ -806,7 +824,8 @@ function GmailPanel({
   onBusy,
   onSettings,
   onError,
-  onNotice
+  onNotice,
+  onReauthorize
 }: {
   api: ApiClient;
   settings: AdminSettings;
@@ -815,11 +834,13 @@ function GmailPanel({
   onSettings(value: AdminSettings): void;
   onError(value: string): void;
   onNotice(value: string): void;
+  onReauthorize?(connection: GmailConnection): void;
 }) {
   const [clientId, setClientId] = useState(settings.gmail.clientId);
   const [clientSecret, setClientSecret] = useState("");
   const [clearClientSecret, setClearClientSecret] = useState(false);
   const [syncIntervalMinutes, setSyncIntervalMinutes] = useState(settings.gmail.syncIntervalMinutes);
+  const [syncMailboxActions, setSyncMailboxActions] = useState(Boolean(settings.gmail.syncMailboxActions));
   const [loadedFilename, setLoadedFilename] = useState("");
   const [connections, setConnections] = useState<GmailConnection[]>([]);
   const [connectionsLoading, setConnectionsLoading] = useState(true);
@@ -832,6 +853,7 @@ function GmailPanel({
     setClientSecret("");
     setClearClientSecret(false);
     setSyncIntervalMinutes(settings.gmail.syncIntervalMinutes);
+    setSyncMailboxActions(Boolean(settings.gmail.syncMailboxActions));
   }, [settings.gmail]);
 
   const refreshConnections = useCallback(async (showLoading = false) => {
@@ -880,7 +902,8 @@ function GmailPanel({
         clientId: clientId.trim(),
         ...(clientSecret.trim() ? { clientSecret: clientSecret.trim() } : {}),
         clearClientSecret,
-        syncIntervalMinutes
+        syncIntervalMinutes,
+        syncMailboxActions
       });
       onSettings(updated);
       setClientSecret("");
@@ -998,6 +1021,27 @@ function GmailPanel({
         {intervalEnvManaged && (
           <div className="settings-warning neutral"><ShieldCheck size={17} /><span>The sync interval comes from GMAIL_SYNC_INTERVAL_MINUTES environment settings and cannot be changed here.</span></div>
         )}
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={syncMailboxActions}
+            onChange={(event) => setSyncMailboxActions(event.target.checked)}
+            disabled={busy || environmentManaged || settings.gmail.syncMailboxActionsEnvManaged}
+          />
+          <span>
+            <strong>Mirror mailbox actions to Gmail</strong>
+            <small>Archive, move, Spam, Trash, read/unread, and star changes run in Gmail first, then update this app.</small>
+          </span>
+        </label>
+        {syncMailboxActions && (
+          <div className="settings-warning neutral">
+            <ShieldCheck size={17} />
+            <span>Connected accounts without mailbox permission must be reauthorized once. This does not enable permanent deletion.</span>
+          </div>
+        )}
+        {settings.gmail.syncMailboxActionsEnvManaged && (
+          <div className="settings-warning neutral"><ShieldCheck size={17} /><span>Mailbox action sync is managed by GMAIL_SYNC_MAILBOX_ACTIONS.</span></div>
+        )}
         <div className="settings-button-row">
           <button className="primary-button" disabled={busy || environmentManaged || !clientId.trim()}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save Gmail configuration
@@ -1038,6 +1082,11 @@ function GmailPanel({
                   <div className="admin-gmail-copy">
                     <strong>{connection.email}</strong>
                     <span>{connection.archiveName} / {connection.folderPath}</span>
+                    {syncMailboxActions && (
+                      <small className={connection.canModifyMailbox ? "" : "error"}>
+                        {connection.canModifyMailbox ? "Mailbox actions sync to Gmail" : "Reauthorization required for mailbox actions"}
+                      </small>
+                    )}
                     {connection.status === "syncing" ? (
                       <>
                         <progress max={100} value={percent} />
@@ -1053,15 +1102,22 @@ function GmailPanel({
                       </small>
                     )}
                   </div>
-                  {connection.status === "syncing" ? (
-                    <button type="button" className="danger-button" disabled={acting} onClick={() => void stopPull(connection)}>
-                      {acting ? <LoaderCircle className="spin" size={16} /> : <X size={16} />} Stop
-                    </button>
-                  ) : (
-                    <button type="button" className="primary-button compact" disabled={acting} onClick={() => void pullAll(connection)}>
-                      {acting ? <LoaderCircle className="spin" size={16} /> : <CloudDownload size={16} />} Pull all email
-                    </button>
-                  )}
+                  <div className="settings-button-row">
+                    {syncMailboxActions && !connection.canModifyMailbox && onReauthorize && (
+                      <button type="button" className="secondary-button compact" disabled={acting || busy} onClick={() => onReauthorize(connection)}>
+                        <KeyRound size={15} /> Reauthorize
+                      </button>
+                    )}
+                    {connection.status === "syncing" ? (
+                      <button type="button" className="danger-button" disabled={acting} onClick={() => void stopPull(connection)}>
+                        {acting ? <LoaderCircle className="spin" size={16} /> : <X size={16} />} Stop
+                      </button>
+                    ) : (
+                      <button type="button" className="primary-button compact" disabled={acting} onClick={() => void pullAll(connection)}>
+                        {acting ? <LoaderCircle className="spin" size={16} /> : <CloudDownload size={16} />} Pull all email
+                      </button>
+                    )}
+                  </div>
                 </article>
               );
             })}
@@ -1435,10 +1491,15 @@ function StockSettingsPanel({
 }) {
   const [symbols, setSymbols] = useState(settings.stocks.symbols);
   const [newSymbol, setNewSymbol] = useState("");
+  const [secondsPerSymbol, setSecondsPerSymbol] = useState(settings.stocks.secondsPerSymbol);
 
   useEffect(() => {
     setSymbols(settings.stocks.symbols);
   }, [settings.stocks.symbols]);
+
+  useEffect(() => {
+    setSecondsPerSymbol(settings.stocks.secondsPerSymbol);
+  }, [settings.stocks.secondsPerSymbol]);
 
   const addSymbol = () => {
     const symbol = newSymbol.trim().toUpperCase();
@@ -1464,7 +1525,7 @@ function StockSettingsPanel({
     onBusy(true);
     onError("");
     try {
-      const updated = await api.updateStockSettings({ symbols });
+      const updated = await api.updateStockSettings({ symbols, secondsPerSymbol });
       onSettings(updated);
       onNotice("Stock ticker list saved.");
       onChanged?.();
@@ -1527,8 +1588,25 @@ function StockSettingsPanel({
             ))}
           </ul>
         ) : <p className="stock-symbol-empty">No symbols selected. The footer will show a setup message.</p>}
+        <label>
+          Scroll speed (seconds per symbol)
+          <input
+            type="number"
+            min={2}
+            max={60}
+            value={secondsPerSymbol}
+            onChange={(event) => setSecondsPerSymbol(Number(event.target.value))}
+            disabled={busy}
+          />
+          <small>How long each symbol lingers before scrolling past. Higher is slower.</small>
+        </label>
         <div className="settings-button-row">
-          <button type="button" className="primary-button compact" onClick={() => void save()} disabled={busy}>
+          <button
+            type="button"
+            className="primary-button compact"
+            onClick={() => void save()}
+            disabled={busy || secondsPerSymbol < 2 || secondsPerSymbol > 60}
+          >
             {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save ticker list
           </button>
         </div>
@@ -1536,6 +1614,112 @@ function StockSettingsPanel({
       <dl className="settings-definitions">
         <div><dt>Refresh interval</dt><dd>60 seconds</dd></div>
         <div><dt>Settings file</dt><dd><code>{settings.stocks.settingsPath}</code></dd></div>
+      </dl>
+    </>
+  );
+}
+
+function NewsSettingsPanel({
+  api,
+  settings,
+  busy,
+  onBusy,
+  onSettings,
+  onError,
+  onNotice,
+  onChanged
+}: {
+  api: ApiClient;
+  settings: AdminSettings;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onSettings(value: AdminSettings): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+  onChanged?(): void;
+}) {
+  const [enabledSources, setEnabledSources] = useState<NewsSourceId[]>(settings.news.enabledSources);
+  const [secondsPerHeadline, setSecondsPerHeadline] = useState(settings.news.secondsPerHeadline);
+
+  useEffect(() => {
+    setEnabledSources(settings.news.enabledSources);
+    setSecondsPerHeadline(settings.news.secondsPerHeadline);
+  }, [settings.news.enabledSources, settings.news.secondsPerHeadline]);
+
+  const toggleSource = (sourceId: NewsSourceId, checked: boolean) => {
+    setEnabledSources((current) => (
+      checked ? [...current, sourceId] : current.filter((id) => id !== sourceId)
+    ));
+  };
+
+  const save = async () => {
+    onBusy(true);
+    onError("");
+    try {
+      const updated = await api.updateNewsSettings({ enabledSources, secondsPerHeadline });
+      onSettings(updated);
+      onNotice("News ticker sources saved.");
+      onChanged?.();
+    } catch (saveError) {
+      onError(errorText(saveError));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3>News ticker</h3>
+      <p>Choose which outlets feed the scrolling breaking-news row at the bottom of Archive Mail.</p>
+      {settings.news.configurationError && (
+        <div className="settings-warning"><AlertTriangle size={17} /><span>{settings.news.configurationError}</span></div>
+      )}
+      <div className="settings-warning neutral">
+        <Newspaper size={17} />
+        <span>Headlines are pulled server-side from each outlet&apos;s public RSS feed. A source that&apos;s temporarily unreachable is skipped rather than blanking the whole ticker.</span>
+      </div>
+      <div className="settings-form">
+        <ul className="news-source-list" aria-label="News sources">
+          {NEWS_SOURCE_IDS.map((sourceId) => (
+            <li key={sourceId}>
+              <label className="settings-checkbox">
+                <input
+                  type="checkbox"
+                  checked={enabledSources.includes(sourceId)}
+                  onChange={(event) => toggleSource(sourceId, event.target.checked)}
+                  disabled={busy}
+                />
+                <Newspaper size={14} /><span>{NEWS_SOURCE_LABELS[sourceId]}</span>
+              </label>
+            </li>
+          ))}
+        </ul>
+        <label>
+          Scroll speed (seconds per headline)
+          <input
+            type="number"
+            min={2}
+            max={60}
+            value={secondsPerHeadline}
+            onChange={(event) => setSecondsPerHeadline(Number(event.target.value))}
+            disabled={busy}
+          />
+          <small>How long each headline lingers before scrolling past. Higher is slower.</small>
+        </label>
+        <div className="settings-button-row">
+          <button
+            type="button"
+            className="primary-button compact"
+            onClick={() => void save()}
+            disabled={busy || secondsPerHeadline < 2 || secondsPerHeadline > 60}
+          >
+            {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save news sources
+          </button>
+        </div>
+      </div>
+      <dl className="settings-definitions">
+        <div><dt>Refresh interval</dt><dd>10 minutes</dd></div>
+        <div><dt>Settings file</dt><dd><code>{settings.news.settingsPath}</code></dd></div>
       </dl>
     </>
   );

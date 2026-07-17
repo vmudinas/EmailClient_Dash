@@ -12,6 +12,7 @@ export interface ApiConfig {
   gmailClientId: string | null;
   gmailClientSecret: string | null;
   gmailSyncIntervalMinutes: number | null;
+  gmailSyncMailboxActions: boolean | null;
   openAiApiKey: string | null;
   deepSeekApiKey: string | null;
 }
@@ -35,6 +36,9 @@ export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     gmailSyncIntervalMinutes: overrides.gmailSyncIntervalMinutes !== undefined
       ? overrides.gmailSyncIntervalMinutes
       : parseOptionalInt(process.env.GMAIL_SYNC_INTERVAL_MINUTES),
+    gmailSyncMailboxActions: overrides.gmailSyncMailboxActions !== undefined
+      ? overrides.gmailSyncMailboxActions
+      : parseOptionalBoolean(process.env.GMAIL_SYNC_MAILBOX_ACTIONS),
     openAiApiKey: overrides.openAiApiKey !== undefined
       ? overrides.openAiApiKey
       : process.env.OPENAI_API_KEY ?? null,
@@ -48,4 +52,9 @@ function parseOptionalInt(value: string | undefined): number | null {
   if (value === undefined || value.trim() === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+function parseOptionalBoolean(value: string | undefined): boolean | null {
+  if (value === undefined || value.trim() === "") return null;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }

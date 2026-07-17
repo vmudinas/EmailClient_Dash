@@ -168,7 +168,14 @@ export class AiService {
       "draft_reply",
       options.scheduleId ?? undefined
     );
-    if (latest?.status === "completed"
+    // Scheduled jobs may legitimately complete without a draft (message judged not
+    // work-related), and reusing that cached result avoids re-spending AI budget on
+    // unchanged content every run. On-demand requests have no such suppression — a
+    // draft is always attempted — so a completed job with no draft here only means
+    // the user deleted it; skip the cache and regenerate instead of reporting a
+    // false "AI finished" with nothing to show.
+    if (options.scheduleId
+      && latest?.status === "completed"
       && latest.contentHash === contentHash
       && latest.model === agent.model
       && latest.promptVersion === promptVersion) {

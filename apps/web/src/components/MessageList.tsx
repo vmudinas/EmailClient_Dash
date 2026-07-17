@@ -1,6 +1,7 @@
 import DOMPurify from "dompurify";
 import { useState } from "react";
 import {
+  Archive,
   ArrowLeft,
   BellRing,
   BrainCircuit,
@@ -12,8 +13,11 @@ import {
   LoaderCircle,
   Paperclip,
   SearchX,
+  ShieldAlert,
   Star,
-  Tag
+  Tag,
+  Trash2,
+  X
 } from "lucide-react";
 import type {
   InboxCategory,
@@ -46,6 +50,14 @@ interface MessageListProps {
     counts: InboxCategoryCounts;
     onSelect(category: InboxCategory): void;
   } | null;
+  selectedIds: Set<string>;
+  onToggleSelect(messageId: string): void;
+  onToggleSelectAll(): void;
+  onClearSelection(): void;
+  bulkBusy: boolean;
+  onBulkDelete(): void;
+  onBulkArchive(): void;
+  onBulkSpam(): void;
 }
 
 const CATEGORY_TABS: Array<{
@@ -72,19 +84,61 @@ export function MessageList({
   onDragEnd,
   onLoadMore,
   onMobileBack,
-  inboxCategories
+  inboxCategories,
+  selectedIds,
+  onToggleSelect,
+  onToggleSelectAll,
+  onClearSelection,
+  bulkBusy,
+  onBulkDelete,
+  onBulkArchive,
+  onBulkSpam
 }: MessageListProps) {
   const [draggingMessageId, setDraggingMessageId] = useState<string | null>(null);
+  const selectedCount = selectedIds.size;
+  const allVisibleSelected = items.length > 0 && items.every((item) => selectedIds.has(item.message.id));
   return (
     <section className="message-list-pane" aria-label="Messages">
       <header className="pane-header message-list-header">
-        <button className="icon-button mobile-only" onClick={onMobileBack} title="Back to folders" aria-label="Back to folders">
-          <ArrowLeft size={18} />
-        </button>
-        <div>
-          <h2>{title}</h2>
-          <span>{items.length.toLocaleString()}{hasMore ? "+" : ""} shown</span>
-        </div>
+        {selectedCount > 0 ? (
+          <div className="message-bulk-toolbar">
+            <button className="icon-button" onClick={onClearSelection} title="Clear selection" aria-label="Clear selection" disabled={bulkBusy}>
+              <X size={17} />
+            </button>
+            <span>{selectedCount.toLocaleString()} selected</span>
+            <div className="message-bulk-actions">
+              <button className="icon-button" onClick={onBulkArchive} disabled={bulkBusy} title="Move to Archive" aria-label="Move selected to Archive">
+                <Archive size={17} />
+              </button>
+              <button className="icon-button" onClick={onBulkSpam} disabled={bulkBusy} title="Move to Spam" aria-label="Move selected to Spam">
+                <ShieldAlert size={17} />
+              </button>
+              <button className="icon-button danger" onClick={onBulkDelete} disabled={bulkBusy} title="Delete" aria-label="Delete selected">
+                {bulkBusy ? <LoaderCircle className="spin" size={17} /> : <Trash2 size={17} />}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <button className="icon-button mobile-only" onClick={onMobileBack} title="Back to folders" aria-label="Back to folders">
+              <ArrowLeft size={18} />
+            </button>
+            {!readOnly && items.length > 0 && (
+              <input
+                type="checkbox"
+                className="message-select-all"
+                checked={allVisibleSelected}
+                onChange={onToggleSelectAll}
+                title={allVisibleSelected ? "Deselect all" : "Select all shown"}
+                aria-label={allVisibleSelected ? "Deselect all shown messages" : "Select all shown messages"}
+              />
+            )}
+            <div>
+              <h2>{title}</h2>
+              <span>{items.length.toLocaleString()}{hasMore ? "+" : ""} shown</span>
+            </div>
+          </>
+        )}
       </header>
 
       {inboxCategories && (
@@ -110,13 +164,20 @@ export function MessageList({
 
       <div className="message-list" role="listbox" aria-label={title}>
         {items.map(({ message, hit }) => (
-          <button
-            className={`message-row ${selectedMessageId === message.id ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${message.hasCalendarEvent ? "calendar-linked" : message.hasPendingFollowUp ? "follow-up-linked" : message.hasAiAnalysis ? "analyzed" : ""} ${draggingMessageId === message.id ? "dragging" : ""}`}
+          <div
+            className={`message-row ${readOnly ? "" : "selectable"} ${selectedMessageId === message.id ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${message.hasCalendarEvent ? "calendar-linked" : message.hasPendingFollowUp ? "follow-up-linked" : message.hasAiAnalysis ? "analyzed" : ""} ${draggingMessageId === message.id ? "dragging" : ""} ${selectedIds.has(message.id) ? "checked" : ""}`}
             key={message.id}
             role="option"
+            tabIndex={0}
             aria-selected={selectedMessageId === message.id}
             draggable={!readOnly}
             onClick={() => onSelect(message)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelect(message);
+              }
+            }}
             onDragStart={(event) => {
               if (readOnly) return;
               event.dataTransfer.effectAllowed = "move";
@@ -129,6 +190,16 @@ export function MessageList({
               onDragEnd();
             }}
           >
+            {!readOnly && (
+              <input
+                type="checkbox"
+                className="message-row-checkbox"
+                checked={selectedIds.has(message.id)}
+                onClick={(event) => event.stopPropagation()}
+                onChange={() => onToggleSelect(message.id)}
+                aria-label={`Select ${message.subject || "message"}`}
+              />
+            )}
             <span className="avatar" aria-hidden="true">{initials(message.sender)}</span>
             <span className="message-row-content">
               <span className="message-row-top">
@@ -172,7 +243,7 @@ export function MessageList({
                 )}
               </span>
             </span>
-          </button>
+          </div>
         ))}
 
         {!loading && items.length === 0 && (

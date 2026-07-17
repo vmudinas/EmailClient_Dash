@@ -32,6 +32,7 @@ import type {
   AiReviewAnalysisItem,
   AiReviewQueue,
   AuthSessionInfo,
+  BulkMoveDestination,
   DiagnosticsSnapshot,
   EmailDraft,
   Folder,
@@ -45,6 +46,7 @@ import type {
   MessageActionSuggestion,
   MessageDetail,
   MessageSummary,
+  NewsHeadline,
   RuntimeConfig,
   SearchFilters,
   SearchHit,
@@ -80,6 +82,7 @@ import { SettingsDialog } from "./components/SettingsDialog.js";
 import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
 import { MessageActionDialog, type ReviewAction } from "./components/MessageActionDialog.js";
 import { StockTickerBar } from "./components/StockTickerBar.js";
+import { NewsTickerBar } from "./components/NewsTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
 type MobileView = "folders" | "messages" | "reader";
@@ -102,6 +105,12 @@ const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   updates: 0
 };
 
+const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string }> = {
+  trash: { verb: "delete", noun: "Trash" },
+  archived: { verb: "archive", noun: "Archive" },
+  spam: { verb: "mark as spam", noun: "Spam" }
+};
+
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [api, setApi] = useState<ApiClient | null>(null);
@@ -109,6 +118,11 @@ export function App() {
   const [stockQuotes, setStockQuotes] = useState<StockQuote[]>([]);
   const [stockQuotesLoading, setStockQuotesLoading] = useState(false);
   const [stockQuotesError, setStockQuotesError] = useState("");
+  const [newsHeadlines, setNewsHeadlines] = useState<NewsHeadline[]>([]);
+  const [newsHeadlinesLoading, setNewsHeadlinesLoading] = useState(false);
+  const [newsHeadlinesError, setNewsHeadlinesError] = useState("");
+  const [newsSecondsPerHeadline, setNewsSecondsPerHeadline] = useState(8);
+  const [stockSecondsPerSymbol, setStockSecondsPerSymbol] = useState(8);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [archives, setArchives] = useState<ArchiveModel[]>([]);
@@ -121,6 +135,8 @@ export function App() {
   const [inboxCategory, setInboxCategory] = useState<InboxCategory>("primary");
   const [inboxCategoryCounts, setInboxCategoryCounts] = useState<InboxCategoryCounts>(EMPTY_INBOX_CATEGORY_COUNTS);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkActionBusy, setBulkActionBusy] = useState(false);
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -219,7 +235,12 @@ export function App() {
     setStockQuotesLoading(true);
     setStockQuotesError("");
     try {
-      setStockQuotes(await client.stockQuotes());
+      const [quotes, displaySettings] = await Promise.all([
+        client.stockQuotes(),
+        client.stockDisplaySettings().catch(() => null)
+      ]);
+      setStockQuotes(quotes);
+      if (displaySettings) setStockSecondsPerSymbol(displaySettings.secondsPerSymbol);
     } catch (error) {
       setStockQuotesError(error instanceof Error ? error.message : "Market prices are unavailable");
     } finally {
@@ -227,9 +248,27 @@ export function App() {
     }
   }, []);
 
+  const refreshNewsHeadlines = useCallback(async (client: ApiClient) => {
+    setNewsHeadlinesLoading(true);
+    setNewsHeadlinesError("");
+    try {
+      const [headlines, displaySettings] = await Promise.all([
+        client.newsHeadlines(),
+        client.newsDisplaySettings().catch(() => null)
+      ]);
+      setNewsHeadlines(headlines);
+      if (displaySettings) setNewsSecondsPerHeadline(displaySettings.secondsPerHeadline);
+    } catch (error) {
+      setNewsHeadlinesError(error instanceof Error ? error.message : "Headlines are unavailable");
+    } finally {
+      setNewsHeadlinesLoading(false);
+    }
+  }, []);
+
   const loadAuthenticatedData = useCallback(async (client: ApiClient) => {
     const loadedArchives = await client.listArchives();
     void refreshStockQuotes(client);
+    void refreshNewsHeadlines(client);
     void client.flushClientDiagnostics().then(() => {
       setPendingDiagnosticCount(client.pendingDiagnosticCount());
     });
@@ -239,13 +278,19 @@ export function App() {
         ? current
         : loadedArchives[0]?.id ?? null
     ));
-  }, [refreshStockQuotes]);
+  }, [refreshStockQuotes, refreshNewsHeadlines]);
 
   useEffect(() => {
     if (!api || !session) return;
     const timer = window.setInterval(() => void refreshStockQuotes(api), 60_000);
     return () => window.clearInterval(timer);
   }, [api, session, refreshStockQuotes]);
+
+  useEffect(() => {
+    if (!api || !session) return;
+    const timer = window.setInterval(() => void refreshNewsHeadlines(api), 10 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [api, session, refreshNewsHeadlines]);
 
   const connect = useCallback(async () => {
     setInitializing(true);
@@ -494,6 +539,7 @@ export function App() {
     setNextCursor(null);
     setSelectedMessageId(null);
     setMessage(null);
+    setBulkSelectedIds(new Set());
     void loadMessages(false);
   }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory]);
 
@@ -1121,7 +1167,7 @@ export function App() {
       }
       const senderAddress = source?.sender.address.trim() ?? "";
       const moveAllFromSender = Boolean(senderAddress && destination) && window.confirm(
-        `Move every local email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
+        `Move every email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there. If Gmail mailbox sync is enabled, current Gmail messages move too.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
       );
       const result = moveAllFromSender
         ? await api.moveSenderMessagesToFolder(messageId, folderId)
@@ -1185,7 +1231,7 @@ export function App() {
       return;
     }
     if (!window.confirm(
-      `Move this message and every Inbox message from ${senderAddress} to Spam locally, including messages not currently loaded, and automatically file future imported Inbox messages from this sender there? Other messages outside Inbox will remain unchanged.`
+      `Move this message and every Inbox message from ${senderAddress} to Spam, including messages not currently loaded, and automatically file future imported Inbox messages from this sender there? If Gmail mailbox sync is enabled, current Gmail messages move too. Other messages outside Inbox will remain unchanged.`
     )) return;
 
     setSpamBusy(true);
@@ -1206,6 +1252,54 @@ export function App() {
       showError(error instanceof Error ? error.message : "Sender could not be marked as spam");
     } finally {
       setSpamBusy(false);
+    }
+  };
+
+  const toggleBulkSelect = (messageId: string) => {
+    setBulkSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) next.delete(messageId); else next.add(messageId);
+      return next;
+    });
+  };
+
+  const toggleBulkSelectAll = () => {
+    setBulkSelectedIds((current) => {
+      const allVisibleSelected = items.length > 0 && items.every((item) => current.has(item.message.id));
+      return allVisibleSelected ? new Set() : new Set(items.map((item) => item.message.id));
+    });
+  };
+
+  const clearBulkSelection = () => setBulkSelectedIds(new Set());
+
+  const bulkMove = async (destination: BulkMoveDestination) => {
+    if (!api || readOnly || bulkSelectedIds.size === 0) return;
+    const messageIds = [...bulkSelectedIds];
+    const { verb, noun } = BULK_MOVE_LABELS[destination];
+    if (!window.confirm(
+      `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${messageIds.length.toLocaleString()} selected message${messageIds.length === 1 ? "" : "s"}? They will be moved to ${noun}.`
+    )) return;
+    setBulkActionBusy(true);
+    try {
+      const result = await api.bulkMoveMessages(messageIds, destination);
+      if (message && messageIds.includes(message.id)) {
+        setSelectedMessageId(null);
+        setMessage(null);
+      }
+      setBulkSelectedIds(new Set());
+      await Promise.all([
+        refreshArchives(),
+        loadMessages(false),
+        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+      ]);
+      showError(
+        `Moved ${result.moved.toLocaleString()} message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || noun}`
+        + (result.failed ? `, ${result.failed} could not be moved` : "")
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Selected messages could not be moved");
+    } finally {
+      setBulkActionBusy(false);
     }
   };
 
@@ -1605,6 +1699,14 @@ export function App() {
                 counts: inboxCategoryCounts,
                 onSelect: selectInboxCategory
               } : null}
+              selectedIds={bulkSelectedIds}
+              onToggleSelect={toggleBulkSelect}
+              onToggleSelectAll={toggleBulkSelectAll}
+              onClearSelection={clearBulkSelection}
+              bulkBusy={bulkActionBusy}
+              onBulkDelete={() => void bulkMove("trash")}
+              onBulkArchive={() => void bulkMove("archived")}
+              onBulkSpam={() => void bulkMove("spam")}
             />
             <MessageReader
               key={message?.id ?? "empty-reader"}
@@ -1631,10 +1733,18 @@ export function App() {
         )}
       </main>
 
+      <NewsTickerBar
+        headlines={newsHeadlines}
+        loading={newsHeadlinesLoading}
+        error={newsHeadlinesError}
+        secondsPerHeadline={newsSecondsPerHeadline}
+        onRefresh={() => { if (api) void refreshNewsHeadlines(api); }}
+      />
       <StockTickerBar
         quotes={stockQuotes}
         loading={stockQuotesLoading}
         error={stockQuotesError}
+        secondsPerSymbol={stockSecondsPerSymbol}
         onRefresh={() => { if (api) void refreshStockQuotes(api); }}
       />
 
@@ -1813,6 +1923,7 @@ export function App() {
           onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
           onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
           onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
+          onNewsSettingsChanged={() => { if (api) void refreshNewsHeadlines(api); }}
         />
       )}
       <DiagnosticsDialog

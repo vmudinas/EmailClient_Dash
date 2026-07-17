@@ -266,10 +266,10 @@ describe("Email API stock ticker routes", () => {
       url: "/api/admin/settings/stocks",
       headers,
       remoteAddress: "127.0.0.1",
-      payload: { symbols: ["msft", "MSFT", "brk-b"] }
+      payload: { symbols: ["msft", "MSFT", "brk-b"], secondsPerSymbol: 20 }
     });
     expect(updated.statusCode).toBe(200);
-    expect(updated.json()).toMatchObject({ stocks: { symbols: ["MSFT", "BRK-B"] } });
+    expect(updated.json()).toMatchObject({ stocks: { symbols: ["MSFT", "BRK-B"], secondsPerSymbol: 20 } });
 
     const quotes = await runtime.app.inject({
       method: "GET",
@@ -288,6 +288,197 @@ describe("Email API stock ticker routes", () => {
       payload: { symbols: ["AAPL!"] }
     });
     expect(invalid.statusCode).toBe(400);
+
+    const invalidSpeed = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/stocks",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { symbols: ["AAPL"], secondsPerSymbol: 999 }
+    });
+    expect(invalidSpeed.statusCode).toBe(400);
+  });
+
+  it("exposes the scroll-speed setting to non-admin sessions without the full admin payload", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const before = await runtime.app.inject({
+      method: "GET",
+      url: "/api/stocks/display-settings",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(before.statusCode).toBe(200);
+    expect(before.json()).toEqual({ secondsPerSymbol: 8 });
+
+    await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/stocks",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { symbols: ["AAPL"], secondsPerSymbol: 30 }
+    });
+
+    const after = await runtime.app.inject({
+      method: "GET",
+      url: "/api/stocks/display-settings",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(after.json()).toEqual({ secondsPerSymbol: 30 });
+
+    const unauthorized = await runtime.app.inject({
+      method: "GET",
+      url: "/api/stocks/display-settings",
+      remoteAddress: "127.0.0.1"
+    });
+    expect(unauthorized.statusCode).toBe(401);
+  });
+});
+
+describe("Email API news ticker routes", () => {
+  it("protects headlines and persists an Admin-managed source list", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const unauthorized = await runtime.app.inject({
+      method: "GET",
+      url: "/api/news/headlines",
+      remoteAddress: "127.0.0.1"
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const headline = {
+      id: "https://bbc.test/1",
+      sourceId: "bbc",
+      sourceName: "BBC News",
+      title: "Breaking story",
+      link: "https://bbc.test/1",
+      publishedAt: "2026-07-17T14:00:00.000Z"
+    };
+    vi.spyOn(runtime.news, "headlines").mockResolvedValue([headline]);
+
+    const updated = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/news",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { enabledSources: ["bbc", "bbc", "cnn"], secondsPerHeadline: 20 }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ news: { enabledSources: ["bbc", "cnn"], secondsPerHeadline: 20 } });
+
+    const headlines = await runtime.app.inject({
+      method: "GET",
+      url: "/api/news/headlines",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(headlines.statusCode).toBe(200);
+    expect(headlines.json()).toEqual([headline]);
+
+    const invalid = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/news",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { enabledSources: ["not-a-real-source"] }
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    const invalidSpeed = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/news",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { enabledSources: ["bbc"], secondsPerHeadline: 999 }
+    });
+    expect(invalidSpeed.statusCode).toBe(400);
+  });
+
+  it("exposes the scroll-speed setting to non-admin sessions without the full admin payload", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const before = await runtime.app.inject({
+      method: "GET",
+      url: "/api/news/display-settings",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(before.statusCode).toBe(200);
+    expect(before.json()).toEqual({ secondsPerHeadline: 8 });
+
+    await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/admin/settings/news",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { enabledSources: ["bbc"], secondsPerHeadline: 30 }
+    });
+
+    const after = await runtime.app.inject({
+      method: "GET",
+      url: "/api/news/display-settings",
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(after.json()).toEqual({ secondsPerHeadline: 30 });
+
+    const unauthorized = await runtime.app.inject({
+      method: "GET",
+      url: "/api/news/display-settings",
+      remoteAddress: "127.0.0.1"
+    });
+    expect(unauthorized.statusCode).toBe(401);
   });
 });
 
@@ -659,6 +850,117 @@ describe("Email API sender filing routes", () => {
     });
     expect(disabled.statusCode).toBe(200);
     expect(disabled.json()).toMatchObject({ enabled: false, rules: [] });
+  });
+});
+
+describe("Email API bulk message actions", () => {
+  async function setUpInboxMessages(runtime: EmailApiRuntime, count: number) {
+    const archive = runtime.database.createArchive({
+      name: "Bulk action mail",
+      sourceType: "gmail",
+      fingerprint: "bulk-action",
+      sizeBytes: 10
+    });
+    const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageIds = Array.from({ length: count }, (_, index) => runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: `bulk-message-${index}`,
+      internetMessageId: null,
+      subject: `Bulk message ${index}`,
+      sender: { name: "Sender", address: "sender@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T12:00:00.000Z",
+      receivedAt: "2026-07-15T12:00:00.000Z",
+      bodyText: "Bulk action test body",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 10,
+      attachments: []
+    }));
+    runtime.database.completeArchive(archive.id, 0);
+    return { archive, inbox, messageIds };
+  }
+
+  it("moves selected messages to a same-mailbox Trash/Archived/Spam folder, creating it on first use", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const { messageIds } = await setUpInboxMessages(runtime, 3);
+
+    const unauthorized = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move",
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [messageIds[0]], destination: "trash" }
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    const trashed = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [messageIds[0], messageIds[1]], destination: "trash" }
+    });
+    expect(trashed.statusCode).toBe(200);
+    expect(trashed.json()).toMatchObject({ destination: "trash", folderPaths: ["Trash"], moved: 2, alreadyThere: 0, failed: 0 });
+
+    const archived = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [messageIds[2]], destination: "archived" }
+    });
+    expect(archived.statusCode).toBe(200);
+    expect(archived.json()).toMatchObject({ destination: "archived", folderPaths: ["Archived"], moved: 1, alreadyThere: 0, failed: 0 });
+
+    // Re-trashing an already-trashed message is a no-op move, not a failure.
+    const retrash = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [messageIds[0]], destination: "trash" }
+    });
+    expect(retrash.json()).toMatchObject({ moved: 0, alreadyThere: 1, failed: 0 });
+
+    const spammed = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [messageIds[2], "11111111-1111-4111-8111-111111111111"], destination: "spam" }
+    });
+    expect(spammed.statusCode).toBe(200);
+    expect(spammed.json()).toMatchObject({ destination: "spam", folderPaths: ["Spam"], moved: 1, alreadyThere: 0, failed: 1 });
+
+    const invalid = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [], destination: "trash" }
+    });
+    expect(invalid.statusCode).toBe(400);
   });
 });
 

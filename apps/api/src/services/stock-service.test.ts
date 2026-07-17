@@ -31,9 +31,9 @@ describe("StockService", () => {
     }), { status: 200 }));
     const service = new StockService(dataDir, fetchQuote as unknown as typeof fetch);
 
-    expect(service.view().symbols).toEqual(["SPY", "QQQ", "AAPL"]);
-    service.update({ symbols: ["msft", "MSFT"] });
-    expect(service.view().symbols).toEqual(["MSFT"]);
+    expect(service.view()).toMatchObject({ symbols: ["SPY", "QQQ", "AAPL"], secondsPerSymbol: 8 });
+    service.update({ symbols: ["msft", "MSFT"], secondsPerSymbol: 15 });
+    expect(service.view()).toMatchObject({ symbols: ["MSFT"], secondsPerSymbol: 15 });
 
     const first = await service.quotes();
     const second = await service.quotes();
@@ -48,24 +48,43 @@ describe("StockService", () => {
     })]);
     expect(second).toEqual(first);
     expect(fetchQuote).toHaveBeenCalledOnce();
-    expect(JSON.parse(await readFile(join(dataDir, "stock-settings.json"), "utf8"))).toEqual({ symbols: ["MSFT"] });
+    expect(JSON.parse(await readFile(join(dataDir, "stock-settings.json"), "utf8"))).toEqual({
+      symbols: ["MSFT"],
+      secondsPerSymbol: 15
+    });
     expect((await stat(service.settingsPath)).mode & 0o777).toBe(0o600);
 
     const reloaded = new StockService(dataDir, fetchQuote as unknown as typeof fetch);
-    expect(reloaded.view().symbols).toEqual(["MSFT"]);
+    expect(reloaded.view()).toMatchObject({ symbols: ["MSFT"], secondsPerSymbol: 15 });
   });
 
   it("returns an unavailable item instead of failing the entire ticker", async () => {
     const dataDir = await temporaryDirectory();
     const fetchQuote = vi.fn().mockRejectedValue(new Error("provider offline"));
     const service = new StockService(dataDir, fetchQuote as unknown as typeof fetch);
-    service.update({ symbols: ["AAPL"] });
+    service.update({ symbols: ["AAPL"], secondsPerSymbol: 8 });
 
     await expect(service.quotes()).resolves.toEqual([expect.objectContaining({
       symbol: "AAPL",
       price: null,
       error: "provider offline"
     })]);
+  });
+
+  it("defaults the scroll speed for settings files saved before it existed", async () => {
+    const dataDir = await temporaryDirectory();
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(join(dataDir, "stock-settings.json"), JSON.stringify({ symbols: ["AAPL"] }));
+
+    const service = new StockService(dataDir, vi.fn() as unknown as typeof fetch);
+    expect(service.view()).toMatchObject({ symbols: ["AAPL"], secondsPerSymbol: 8, configurationError: null });
+  });
+
+  it("rejects a scroll speed outside the allowed range", async () => {
+    const dataDir = await temporaryDirectory();
+    const service = new StockService(dataDir, vi.fn() as unknown as typeof fetch);
+    expect(() => service.update({ symbols: ["AAPL"], secondsPerSymbol: 1 })).toThrow();
+    expect(() => service.update({ symbols: ["AAPL"], secondsPerSymbol: 61 })).toThrow();
   });
 });
 

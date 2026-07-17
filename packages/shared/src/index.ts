@@ -696,6 +696,7 @@ export interface GmailConnection {
   query: string;
   ocrEnabled: boolean;
   canSend: boolean;
+  canModifyMailbox?: boolean;
   canManageCalendar: boolean;
   status: GmailConnectionStatus;
   processedItems: number;
@@ -1015,6 +1016,8 @@ export interface AdminSettings {
     configurationError: string | null;
     syncIntervalMinutes: number;
     syncIntervalEnvManaged: boolean;
+    syncMailboxActions: boolean;
+    syncMailboxActionsEnvManaged: boolean;
   };
   drafts: DraftIdentitySettings & {
     settingsPath: string;
@@ -1022,6 +1025,13 @@ export interface AdminSettings {
   };
   stocks: {
     symbols: string[];
+    secondsPerSymbol: number;
+    settingsPath: string;
+    configurationError: string | null;
+  };
+  news: {
+    enabledSources: NewsSourceId[];
+    secondsPerHeadline: number;
     settingsPath: string;
     configurationError: string | null;
   };
@@ -1047,6 +1057,25 @@ export interface StockQuote {
   marketState: string | null;
   quotedAt: string;
   error: string | null;
+}
+
+export const NEWS_SOURCE_IDS = ["cnn", "bbc", "aljazeera", "foxnews"] as const;
+export type NewsSourceId = typeof NEWS_SOURCE_IDS[number];
+
+export const NEWS_SOURCE_LABELS: Record<NewsSourceId, string> = {
+  cnn: "CNN",
+  bbc: "BBC News",
+  aljazeera: "Al Jazeera",
+  foxnews: "Fox News"
+};
+
+export interface NewsHeadline {
+  id: string;
+  sourceId: NewsSourceId;
+  sourceName: string;
+  title: string;
+  link: string;
+  publishedAt: string | null;
 }
 
 export interface AiProviderSettings {
@@ -1079,6 +1108,24 @@ export const messageMoveSchema = z.object({
 }).strict();
 
 export type MessageMove = z.infer<typeof messageMoveSchema>;
+
+export const BULK_MOVE_DESTINATIONS = ["trash", "archived", "spam"] as const;
+export type BulkMoveDestination = typeof BULK_MOVE_DESTINATIONS[number];
+
+export const bulkMoveMessagesSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(500),
+  destination: z.enum(BULK_MOVE_DESTINATIONS)
+}).strict();
+
+export type BulkMoveMessagesRequest = z.infer<typeof bulkMoveMessagesSchema>;
+
+export interface BulkMoveResult {
+  destination: BulkMoveDestination;
+  folderPaths: string[];
+  moved: number;
+  alreadyThere: number;
+  failed: number;
+}
 
 export const senderFilingArchiveSchema = z.object({
   archiveId: z.string().uuid()
@@ -1203,10 +1250,18 @@ const stockSymbolSchema = z.string()
   .regex(/^[A-Z0-9.^=_-]+$/, "Use a valid ticker symbol");
 
 export const stockSettingsPatchSchema = z.object({
-  symbols: z.array(stockSymbolSchema).max(20).transform((symbols) => [...new Set(symbols)])
+  symbols: z.array(stockSymbolSchema).max(20).transform((symbols) => [...new Set(symbols)]),
+  secondsPerSymbol: z.number().int().min(2).max(60).default(8)
 }).strict();
 
 export type StockSettingsPatch = z.infer<typeof stockSettingsPatchSchema>;
+
+export const newsSettingsPatchSchema = z.object({
+  enabledSources: z.array(z.enum(NEWS_SOURCE_IDS)).max(NEWS_SOURCE_IDS.length).transform((sources) => [...new Set(sources)]),
+  secondsPerHeadline: z.number().int().min(2).max(60).default(8)
+}).strict();
+
+export type NewsSettingsPatch = z.infer<typeof newsSettingsPatchSchema>;
 
 export const uploadSessionCreateSchema = z.object({
   filename: z.string().trim().min(1).max(240),
@@ -1283,7 +1338,8 @@ export const gmailSettingsPatchSchema = z.object({
   clientId: z.string().trim().min(1).max(1_000),
   clientSecret: z.string().trim().min(1).max(1_000).optional(),
   clearClientSecret: z.boolean().default(false),
-  syncIntervalMinutes: z.number().int().min(0).max(1_440).optional()
+  syncIntervalMinutes: z.number().int().min(0).max(1_440).optional(),
+  syncMailboxActions: z.boolean().optional()
 }).strict().refine(
   (value) => !(value.clientSecret && value.clearClientSecret),
   { message: "Provide a client secret or clear the saved one, not both", path: ["clientSecret"] }

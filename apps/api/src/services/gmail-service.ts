@@ -14,16 +14,18 @@ import type { RawAttachment } from "../importers/types.js";
 import { gmailInboxCategory } from "../lib/message-category.js";
 import {
   type EmailStore,
-  type GmailConnectionRecord
+  type GmailConnectionRecord,
+  type GmailMessageMutationTarget
 } from "../storage/database.js";
 import { ImportService } from "./import-service.js";
 
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GMAIL_SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic";
 const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 const CALENDAR_LIST_SCOPE = "https://www.googleapis.com/auth/calendar.calendarlist.readonly";
-const GMAIL_SCOPES = [GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE, GMAIL_SETTINGS_SCOPE, CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOPE];
+const GMAIL_ADDITIONAL_SCOPES = [GMAIL_SEND_SCOPE, GMAIL_SETTINGS_SCOPE, CALENDAR_EVENTS_SCOPE, CALENDAR_LIST_SCOPE];
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
@@ -34,6 +36,7 @@ interface PendingAuthorization {
   verifier: string;
   redirectUri: string;
   expiresAt: number;
+  mailboxModifyRequested: boolean;
 }
 
 interface TokenResponse {
@@ -75,6 +78,11 @@ interface GmailLabelsResponse {
   labels?: GmailLabel[];
 }
 
+interface GmailLabelMutation {
+  addLabelIds: string[];
+  removeLabelIds: string[];
+}
+
 interface GmailSendAsEntry {
   sendAsEmail: string;
   displayName?: string;
@@ -101,6 +109,7 @@ export interface GmailServiceOptions {
   redirectUri(): string;
   fetcher?: typeof fetch;
   syncIntervalMinutes?: number;
+  syncMailboxActions?: boolean;
 }
 
 export class GmailConfigurationError extends Error {}
@@ -122,6 +131,7 @@ export class GmailService {
   private clientSecret: string | null;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
   private syncIntervalMinutes = 0;
+  private syncMailboxActionsEnabled: boolean;
 
   constructor(
     private readonly database: EmailStore,
@@ -131,6 +141,7 @@ export class GmailService {
     this.fetcher = options.fetcher ?? fetch;
     this.clientId = options.clientId;
     this.clientSecret = options.clientSecret;
+    this.syncMailboxActionsEnabled = options.syncMailboxActions ?? false;
     this.configureSyncInterval(options.syncIntervalMinutes ?? 0);
   }
 
@@ -151,6 +162,11 @@ export class GmailService {
     if (this.syncIntervalMinutes <= 0) return;
     this.syncTimer = setInterval(() => this.runScheduledSyncs(), this.syncIntervalMinutes * 60_000);
     this.syncTimer.unref?.();
+  }
+
+  configureMailboxActionSync(enabled: boolean): void {
+    if (enabled !== this.syncMailboxActionsEnabled) this.pending.clear();
+    this.syncMailboxActionsEnabled = enabled;
   }
 
   private runScheduledSyncs(): void {
@@ -200,13 +216,22 @@ export class GmailService {
     const challenge = createHash("sha256").update(verifier).digest("base64url");
     const redirectUri = this.options.redirectUri();
     const expiresAt = Date.now() + 10 * 60 * 1000;
-    this.pending.set(state, { request, verifier, redirectUri, expiresAt });
+    this.pending.set(state, {
+      request,
+      verifier,
+      redirectUri,
+      expiresAt,
+      mailboxModifyRequested: this.syncMailboxActionsEnabled
+    });
 
     const url = new URL(AUTHORIZATION_ENDPOINT);
     url.searchParams.set("client_id", this.clientId);
     url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("response_type", "code");
-    url.searchParams.set("scope", GMAIL_SCOPES.join(" "));
+    url.searchParams.set("scope", [
+      this.syncMailboxActionsEnabled ? GMAIL_MODIFY_SCOPE : GMAIL_READONLY_SCOPE,
+      ...GMAIL_ADDITIONAL_SCOPES
+    ].join(" "));
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("prompt", "select_account consent");
     url.searchParams.set("state", state);
@@ -248,6 +273,7 @@ export class GmailService {
         query: pending.request.query,
         ocrEnabled: pending.request.ocrEnabled,
         canSend: tokenGrantsScope(token, GMAIL_SEND_SCOPE),
+        canModifyMailbox: pending.mailboxModifyRequested && tokenGrantsScope(token, GMAIL_MODIFY_SCOPE),
         canManageCalendar: tokenGrantsScope(token, CALENDAR_EVENTS_SCOPE)
           && tokenGrantsScope(token, CALENDAR_LIST_SCOPE),
         refreshToken: token.refresh_token,
@@ -438,6 +464,168 @@ export class GmailService {
       pageToken = page.nextPageToken;
     } while (pageToken);
     return [...new Set(ids)];
+  }
+
+  async syncMessageState(
+    messageId: string,
+    patch: { isRead?: boolean; isStarred?: boolean }
+  ): Promise<void> {
+    if (!this.syncMailboxActionsEnabled) return;
+    const target = this.database.getGmailMessageMutationTargets([messageId])[0];
+    if (!target || (patch.isRead === undefined && patch.isStarred === undefined)) return;
+    this.requireMailboxModifyPermission(target.connection);
+    const addLabelIds: string[] = [];
+    const removeLabelIds: string[] = [];
+    if (patch.isRead !== undefined) {
+      (patch.isRead ? removeLabelIds : addLabelIds).push("UNREAD");
+    }
+    if (patch.isStarred !== undefined) {
+      (patch.isStarred ? addLabelIds : removeLabelIds).push("STARRED");
+    }
+    await this.modifyTargets(target.connection, [target], { addLabelIds, removeLabelIds });
+    this.recordMailboxMutation(target.connection, "message_state", 1, {
+      messageId,
+      isRead: patch.isRead,
+      isStarred: patch.isStarred
+    });
+  }
+
+  async syncMessageMove(messageId: string, targetFolderId: string): Promise<void> {
+    return this.syncMessagesMove([messageId], targetFolderId);
+  }
+
+  async syncMessagesMove(messageIds: string[], targetFolderId: string): Promise<void> {
+    if (!this.syncMailboxActionsEnabled || messageIds.length === 0) return;
+    const targetFolder = this.database.getFolder(targetFolderId);
+    if (!targetFolder) throw new Error("Target mailbox not found");
+    const targets = this.database.getGmailMessageMutationTargets(messageIds);
+    if (targets.length === 0) return;
+    const byConnection = new Map<string, GmailMessageMutationTarget[]>();
+    for (const target of targets) {
+      if (target.connection.archiveId !== targetFolder.archiveId) {
+        throw new Error("Messages can only be moved within the same archive");
+      }
+      this.requireMailboxModifyPermission(target.connection);
+      const group = byConnection.get(target.connection.id) ?? [];
+      group.push(target);
+      byConnection.set(target.connection.id, group);
+    }
+
+    for (const connectionTargets of byConnection.values()) {
+      const connection = connectionTargets[0]!.connection;
+      const signal = AbortSignal.timeout(60_000);
+      const accessToken = await this.accessToken(connection, signal);
+      const labelsById = await this.fetchLabels(accessToken, signal);
+      const targetLabelId = await this.resolveTargetUserLabel(
+        connection,
+        targetFolder.path,
+        labelsById,
+        accessToken,
+        signal
+      );
+      const byMutation = new Map<string, { mutation: GmailLabelMutation; targets: GmailMessageMutationTarget[] }>();
+      for (const target of connectionTargets) {
+        const mutation = resolveMoveMutation(
+          connection.folderPath,
+          target.currentFolderPath,
+          targetFolder.path,
+          labelsById,
+          targetLabelId
+        );
+        const key = `${mutation.addLabelIds.slice().sort().join(",")}|${mutation.removeLabelIds.slice().sort().join(",")}`;
+        const group = byMutation.get(key) ?? { mutation, targets: [] };
+        group.targets.push(target);
+        byMutation.set(key, group);
+      }
+      for (const group of byMutation.values()) {
+        await this.modifyTargets(connection, group.targets, group.mutation, accessToken, signal);
+      }
+      this.recordMailboxMutation(connection, "message_move", connectionTargets.length, {
+        targetFolderId,
+        targetFolderPath: targetFolder.path
+      });
+    }
+  }
+
+  private requireMailboxModifyPermission(connection: GmailConnectionRecord): void {
+    if (connection.canModifyMailbox) return;
+    throw new GmailPermissionError(
+      `Reconnect ${connection.email} to grant Gmail mailbox access before syncing archive, move, spam, read, or star actions.`
+    );
+  }
+
+  private async modifyTargets(
+    connection: GmailConnectionRecord,
+    targets: GmailMessageMutationTarget[],
+    mutation: GmailLabelMutation,
+    existingAccessToken?: string,
+    existingSignal?: AbortSignal
+  ): Promise<void> {
+    if (targets.length === 0 || (mutation.addLabelIds.length === 0 && mutation.removeLabelIds.length === 0)) return;
+    const signal = existingSignal ?? AbortSignal.timeout(60_000);
+    const accessToken = existingAccessToken ?? await this.accessToken(connection, signal);
+    for (let index = 0; index < targets.length; index += 1_000) {
+      const ids = targets.slice(index, index + 1_000).map((target) => target.gmailMessageId);
+      await this.gmailJson<unknown>(
+        `${GMAIL_API}/users/me/messages/batchModify`,
+        accessToken,
+        signal,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids, ...mutation })
+        }
+      );
+    }
+  }
+
+  private async resolveTargetUserLabel(
+    connection: GmailConnectionRecord,
+    targetFolderPath: string,
+    labelsById: Map<string, GmailLabel>,
+    accessToken: string,
+    signal: AbortSignal
+  ): Promise<string | null> {
+    const kind = mailboxKind(targetFolderPath);
+    if (kind !== "custom") return null;
+    const labelName = gmailLabelName(connection.folderPath, targetFolderPath);
+    const existing = [...labelsById.values()].find((label) => (
+      label.type === "user" && normalizeLabelName(label.name) === normalizeLabelName(labelName)
+    ));
+    if (existing) return existing.id;
+    const created = await this.gmailJson<GmailLabel>(
+      `${GMAIL_API}/users/me/labels`,
+      accessToken,
+      signal,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: labelName,
+          labelListVisibility: "labelShow",
+          messageListVisibility: "show"
+        })
+      }
+    );
+    if (!created.id) throw new Error("Gmail created a label without returning its ID");
+    labelsById.set(created.id, { ...created, type: "user" });
+    return created.id;
+  }
+
+  private recordMailboxMutation(
+    connection: GmailConnectionRecord,
+    operation: string,
+    messageCount: number,
+    context: Record<string, unknown>
+  ): void {
+    this.database.recordDiagnostic({
+      level: "info",
+      category: "gmail",
+      message: `Gmail mailbox action synced for ${messageCount} message${messageCount === 1 ? "" : "s"}`,
+      archiveId: connection.archiveId,
+      sourceName: connection.email,
+      context: { connectionId: connection.id, operation, messageCount, ...context }
+    });
   }
 
   async sendMessage(
@@ -831,12 +1019,7 @@ export class GmailService {
     signal: AbortSignal
   ): Promise<Map<string, GmailLabel>> {
     try {
-      const response = await this.gmailJson<GmailLabelsResponse>(
-        `${GMAIL_API}/users/me/labels`,
-        accessToken,
-        signal
-      );
-      return new Map((response.labels ?? []).map((label) => [label.id, label]));
+      return await this.fetchLabels(accessToken, signal);
     } catch (error) {
       if (isAbortError(error)) throw error;
       this.database.recordDiagnostic({
@@ -849,6 +1032,15 @@ export class GmailService {
       });
       return new Map();
     }
+  }
+
+  private async fetchLabels(accessToken: string, signal: AbortSignal): Promise<Map<string, GmailLabel>> {
+    const response = await this.gmailJson<GmailLabelsResponse>(
+      `${GMAIL_API}/users/me/labels`,
+      accessToken,
+      signal
+    );
+    return new Map((response.labels ?? []).map((label) => [label.id, label]));
   }
 
   private async fetchSendAsAliases(accessToken: string, signal: AbortSignal): Promise<GmailSendAsAlias[]> {
@@ -1154,6 +1346,84 @@ function resolveMessageFolderPath(
     if (labelPath) return `${baseFolderPath}/${labelPath}`;
   }
   return `${baseFolderPath}/Archived`;
+}
+
+function resolveMoveMutation(
+  baseFolderPath: string,
+  currentFolderPath: string,
+  targetFolderPath: string,
+  labelsById: ReadonlyMap<string, GmailLabel>,
+  targetLabelId: string | null
+): GmailLabelMutation {
+  const kind = mailboxKind(targetFolderPath);
+  if (kind === "drafts" || kind === "sent") {
+    throw new Error(`Gmail does not allow messages to be moved into ${kind === "drafts" ? "Drafts" : "Sent"}`);
+  }
+  const addLabelIds: string[] = [];
+  const removeLabelIds = new Set<string>();
+  const currentKind = mailboxKind(currentFolderPath);
+  if (currentKind === "custom" && normalizeLabelName(currentFolderPath) !== normalizeLabelName(baseFolderPath)) {
+    const sourceLabelName = gmailLabelName(baseFolderPath, currentFolderPath);
+    const sourceLabel = [...labelsById.values()].find((label) => (
+      label.type === "user" && normalizeLabelName(label.name) === normalizeLabelName(sourceLabelName)
+    ));
+    if (sourceLabel) removeLabelIds.add(sourceLabel.id);
+  }
+
+  if (kind === "inbox") {
+    addLabelIds.push("INBOX");
+    removeLabelIds.add("SPAM");
+    removeLabelIds.add("TRASH");
+  } else if (kind === "spam") {
+    addLabelIds.push("SPAM");
+    removeLabelIds.add("INBOX");
+    removeLabelIds.add("TRASH");
+  } else if (kind === "trash") {
+    addLabelIds.push("TRASH");
+    removeLabelIds.add("INBOX");
+    removeLabelIds.add("SPAM");
+  } else if (kind === "archive") {
+    removeLabelIds.add("INBOX");
+    removeLabelIds.add("SPAM");
+    removeLabelIds.add("TRASH");
+  } else {
+    if (!targetLabelId) throw new Error("Gmail label could not be resolved for the destination mailbox");
+    addLabelIds.push(targetLabelId);
+    removeLabelIds.add("INBOX");
+    removeLabelIds.add("SPAM");
+    removeLabelIds.add("TRASH");
+    removeLabelIds.delete(targetLabelId);
+  }
+
+  return {
+    addLabelIds: [...new Set(addLabelIds)].filter((labelId) => !removeLabelIds.has(labelId)),
+    removeLabelIds: [...removeLabelIds]
+  };
+}
+
+function mailboxKind(folderPath: string): "archive" | "inbox" | "spam" | "trash" | "drafts" | "sent" | "custom" {
+  const name = folderPath.split("/").at(-1)?.trim().toLowerCase() ?? "";
+  if (["archive", "archived", "all mail", "allmail"].includes(name)) return "archive";
+  if (name === "inbox") return "inbox";
+  if (name === "spam") return "spam";
+  if (name === "trash") return "trash";
+  if (name === "draft" || name === "drafts") return "drafts";
+  if (name === "sent") return "sent";
+  return "custom";
+}
+
+function gmailLabelName(baseFolderPath: string, folderPath: string): string {
+  const base = baseFolderPath.replace(/\/+$/, "");
+  const relative = folderPath.startsWith(`${base}/`)
+    ? folderPath.slice(base.length + 1)
+    : folderPath;
+  const labelName = relative.split("/").map((part) => part.trim()).filter(Boolean).join("/");
+  if (!labelName) throw new Error("Choose a Gmail mailbox below the connected account folder");
+  return labelName;
+}
+
+function normalizeLabelName(value: string): string {
+  return value.split("/").map((part) => part.trim()).filter(Boolean).join("/").toLowerCase();
 }
 
 function tokenExpiry(expiresIn: number): string {

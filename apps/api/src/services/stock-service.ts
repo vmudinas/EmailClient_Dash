@@ -16,6 +16,7 @@ import {
 
 const SETTINGS_FILENAME = "stock-settings.json";
 const DEFAULT_SYMBOLS = ["SPY", "QQQ", "AAPL"];
+const DEFAULT_SECONDS_PER_SYMBOL = 8;
 const QUOTE_CACHE_MS = 60_000;
 const QUOTE_TIMEOUT_MS = 8_000;
 
@@ -45,7 +46,10 @@ interface CachedQuote {
 
 export class StockService {
   readonly settingsPath: string;
-  private persisted: StockSettingsPatch = { symbols: [...DEFAULT_SYMBOLS] };
+  private persisted: StockSettingsPatch = {
+    symbols: [...DEFAULT_SYMBOLS],
+    secondsPerSymbol: DEFAULT_SECONDS_PER_SYMBOL
+  };
   private readError: string | null = null;
   private readonly cache = new Map<string, CachedQuote>();
 
@@ -60,6 +64,7 @@ export class StockService {
   view(): AdminSettings["stocks"] {
     return {
       symbols: [...this.persisted.symbols],
+      secondsPerSymbol: this.persisted.secondsPerSymbol,
       settingsPath: this.settingsPath,
       configurationError: this.readError
     };
@@ -111,14 +116,16 @@ export class StockService {
   }
 
   private read(): StockSettingsPatch {
-    if (!existsSync(this.settingsPath)) return { symbols: [...DEFAULT_SYMBOLS] };
+    if (!existsSync(this.settingsPath)) {
+      return { symbols: [...DEFAULT_SYMBOLS], secondsPerSymbol: DEFAULT_SECONDS_PER_SYMBOL };
+    }
     try {
       const parsed = stockSettingsPatchSchema.parse(JSON.parse(readFileSync(this.settingsPath, "utf8")));
       chmodSync(this.settingsPath, 0o600);
       return parsed;
     } catch (error) {
       this.readError = `Saved stock settings could not be loaded: ${errorMessage(error)}`;
-      return { symbols: [...DEFAULT_SYMBOLS] };
+      return { symbols: [...DEFAULT_SYMBOLS], secondsPerSymbol: DEFAULT_SECONDS_PER_SYMBOL };
     }
   }
 }

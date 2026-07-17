@@ -364,7 +364,7 @@ export function MessageReader({
             </button>
             <button
               className="icon-button spam-sender-button"
-              title="Always send this sender to Spam locally"
+              title="Always send this sender to Spam"
               aria-label="Always send sender to Spam"
               disabled={spamBusy || !message.sender.address.trim()}
               onClick={() => void onSpamSender(message)}
@@ -374,7 +374,7 @@ export function MessageReader({
             {!archived && (
               <button
                 className="reader-archive-button"
-                title="Move to Archived locally"
+                title="Move to Archived"
                 aria-label="Archive message"
                 disabled={moveBusy}
                 onClick={() => void onArchive(message)}
@@ -916,7 +916,7 @@ function AiMessageActions({
                   </button>
                 )}
                 <button className="ai-more-item" role="menuitem" onClick={() => void showFolders()}>
-                  <FolderInput size={16} /><span><strong>Move to folder</strong><small>Choose a local mailbox</small></span>
+                  <FolderInput size={16} /><span><strong>Move to folder</strong><small>Choose a mailbox</small></span>
                 </button>
                 {!archived && (
                   <button className="ai-more-item" role="menuitem" disabled={moveBusy} onClick={() => { close(); onArchive(); }}>

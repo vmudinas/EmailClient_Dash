@@ -19,6 +19,8 @@ import type {
   AuthLoginResult,
   AuthSessionInfo,
   AppleCalendarAccountCreate,
+  BulkMoveDestination,
+  BulkMoveResult,
   CalendarAccount,
   CalendarEvent,
   CalendarEventInput,
@@ -53,6 +55,8 @@ import type {
   MessageDraftReplyRequest,
   MessageDraftReplyStart,
   MessageSummary,
+  NewsHeadline,
+  NewsSettingsPatch,
   RuntimeConfig,
   ResumeAsset,
   ReplyStyle,
@@ -530,6 +534,13 @@ export class ApiClient {
     });
   }
 
+  bulkMoveMessages(messageIds: string[], destination: BulkMoveDestination): Promise<BulkMoveResult> {
+    return this.request("/api/messages/bulk-move", {
+      method: "POST",
+      body: JSON.stringify({ messageIds, destination })
+    });
+  }
+
   moveSenderMessagesToFolder(messageId: string, folderId: string): Promise<SenderFolderRuleResult> {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/sender-folder`, {
       method: "POST",
@@ -785,6 +796,18 @@ export class ApiClient {
     return this.request("/api/stocks/quotes");
   }
 
+  stockDisplaySettings(): Promise<{ secondsPerSymbol: number }> {
+    return this.request("/api/stocks/display-settings");
+  }
+
+  newsHeadlines(): Promise<NewsHeadline[]> {
+    return this.request("/api/news/headlines");
+  }
+
+  newsDisplaySettings(): Promise<{ secondsPerHeadline: number }> {
+    return this.request("/api/news/display-settings");
+  }
+
   updateDatabaseSettings(input: DatabaseSettingsPatch): Promise<AdminSettings> {
     return this.request("/api/admin/settings/database", {
       method: "PATCH",
@@ -827,6 +850,13 @@ export class ApiClient {
 
   updateStockSettings(input: StockSettingsPatch): Promise<AdminSettings> {
     return this.request("/api/admin/settings/stocks", {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  updateNewsSettings(input: NewsSettingsPatch): Promise<AdminSettings> {
+    return this.request("/api/admin/settings/news", {
       method: "PATCH",
       body: JSON.stringify(input)
     });

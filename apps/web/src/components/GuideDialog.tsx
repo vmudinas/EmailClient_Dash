@@ -98,8 +98,8 @@ function GuideContent({ section }: { section: GuideSection }) {
     return (
       <>
         <h3>Authorize, sync, and send</h3>
-        <p>Connect Gmail opens Google OAuth in the system browser. Archive Mail requests separate read-only and send permissions and stores the refresh token only in the local database.</p>
-        <div className="guide-assurance"><ShieldCheck size={18} /><span>Sync can list and download mail, but it cannot delete, move, label, or mark messages in Gmail.</span></div>
+        <p>Connect Gmail opens Google OAuth in the system browser. Archive Mail uses read-only access by default and stores the refresh token only in the local database.</p>
+        <div className="guide-assurance"><ShieldCheck size={18} /><span>Admins can opt in to mailbox action sync. When enabled, archive, move, Spam, Trash, read, and star actions run in Gmail first; permanent deletion remains unavailable.</span></div>
         <h4>One-time Google setup</h4>
         <ol>
           <li>In Google Cloud Console, enable the Gmail API and configure the OAuth consent screen.</li>
@@ -108,7 +108,7 @@ function GuideContent({ section }: { section: GuideSection }) {
         </ol>
         <h4>Multiple accounts and destinations</h4>
         <p>The same Desktop OAuth configuration can authorize multiple Gmail accounts. For each account, choose a new archive, create a mailbox in an existing archive, or merge incoming mail into an existing mailbox. Accounts that share a mailbox retain separate sync and send identities.</p>
-        <p>A connection created by an older read-only version must be authorized again before it can send.</p>
+        <p>A connection created by an older read-only version must be authorized again before it can send or mirror mailbox actions.</p>
         <h4>Why Gmail API instead of POP or IMAP?</h4>
         <p>Google requires a broad full-mail permission for POP, IMAP, and SMTP. The Gmail API provides narrower permissions that enforce pull-only synchronization and sending without remote deletion access.</p>
         <h4>Unread state</h4>
