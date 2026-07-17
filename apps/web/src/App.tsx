@@ -184,6 +184,7 @@ export function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const importAbortRef = useRef<AbortController | null>(null);
   const gmailStatusRef = useRef(new Map<string, GmailConnection["status"]>());
+  const messageRequestRef = useRef(0);
 
   const readOnly = !session || session.role === "viewer";
   const isAdmin = session?.role === "admin";
@@ -276,6 +277,7 @@ export function App() {
   };
 
   const signOutLocally = () => {
+    messageRequestRef.current += 1;
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
     api?.setAccessToken("");
     setSession(null);
@@ -384,7 +386,12 @@ export function App() {
     let active = true;
     void api.listFolders(selectedArchiveId)
       .then((loaded) => {
-        if (active) setFolders(loaded);
+        if (!active) return;
+        setFolders(loaded);
+        setSelectedFolderId((current) => {
+          if (current && loaded.some((folder) => folder.id === current)) return current;
+          return loaded.find((folder) => folder.name.trim().toLowerCase() === "inbox")?.id ?? null;
+        });
       })
       .catch((error) => showError(error instanceof Error ? error.message : "Folders could not be loaded"));
     return () => { active = false; };
@@ -458,6 +465,7 @@ export function App() {
   ]);
 
   useEffect(() => {
+    messageRequestRef.current += 1;
     setItems([]);
     setNextCursor(null);
     setSelectedMessageId(null);
@@ -525,29 +533,37 @@ export function App() {
     if (selectedArchiveId) setFolders(await api.listFolders(selectedArchiveId));
   }, [api, refreshArchives, selectedArchiveId]);
 
-  useEffect(() => {
-    if (!selectedMessageId && runtime?.platform !== "mobile" && items[0]) {
-      void openMessage(items[0].message, false);
-    }
-  }, [items, runtime?.platform]);
+  const closeMessage = useCallback(() => {
+    messageRequestRef.current += 1;
+    setSelectedMessageId(null);
+    setMessage(null);
+    setLoadingMessage(false);
+    setMobileView("messages");
+  }, []);
 
   const openMessage = async (summary: Pick<MessageSummary, "id">, moveMobile = true) => {
     if (!api) return;
+    const requestId = ++messageRequestRef.current;
     setSelectedMessageId(summary.id);
+    setMessage(null);
     if (moveMobile) setMobileView("reader");
     setLoadingMessage(true);
     try {
       const detail = await api.getMessage(summary.id);
+      if (requestId !== messageRequestRef.current) return;
       setMessage(detail);
       if (!readOnly && !detail.state.isRead) {
         const state = await api.updateMessageState(detail.id, { isRead: true });
+        if (requestId !== messageRequestRef.current) return;
         mergeMessageState(detail.id, state);
         void refreshMailboxCounts();
       }
     } catch (error) {
+      if (requestId !== messageRequestRef.current) return;
       showError(error instanceof Error ? error.message : "Message could not be opened");
+      closeMessage();
     } finally {
-      setLoadingMessage(false);
+      if (requestId === messageRequestRef.current) setLoadingMessage(false);
     }
   };
 
@@ -588,32 +604,25 @@ export function App() {
     setSelectedArchiveId(id);
     setSelectedFolderId(null);
     setSelectedSmartMailbox(null);
-    setSelectedMessageId(null);
-    setMessage(null);
-    setMobileView("messages");
+    closeMessage();
   };
 
   const selectFolder = (id: string | null) => {
     setSelectedFolderId(id);
     setSelectedSmartMailbox(null);
     setInboxCategory("primary");
-    setSelectedMessageId(null);
-    setMessage(null);
-    setMobileView("messages");
+    closeMessage();
   };
 
   const selectInboxCategory = (category: InboxCategory) => {
     setInboxCategory(category);
-    setSelectedMessageId(null);
-    setMessage(null);
+    closeMessage();
   };
 
   const selectSmartMailbox = (mailbox: SmartMailbox) => {
     setSelectedFolderId(null);
     setSelectedSmartMailbox(mailbox);
-    setSelectedMessageId(null);
-    setMessage(null);
-    setMobileView("messages");
+    closeMessage();
   };
 
   const openImport = () => {
@@ -1521,7 +1530,7 @@ export function App() {
         </div>
       </header>
 
-      <main className="workspace">
+      <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""}`}>
         {viewMode === "calendar" ? (
           api && <CalendarView api={api} connections={gmailConnections} onReauthorize={reauthorizeGmail} onError={showError} />
         ) : (
@@ -1580,7 +1589,7 @@ export function App() {
               readOnly={readOnly}
               api={api}
               connections={gmailConnections}
-              onMobileBack={() => setMobileView("messages")}
+              onMobileBack={closeMessage}
               onUpdateState={updateState}
               onError={showError}
               onReply={(target) => openReply(target, "reply")}
@@ -1602,7 +1611,7 @@ export function App() {
         <button className={mobileView === "folders" ? "selected" : ""} onClick={() => setMobileView("folders")}>
           <FolderOpen size={19} /><span>Folders</span>
         </button>
-        <button className={mobileView === "messages" ? "selected" : ""} onClick={() => setMobileView("messages")}>
+        <button className={mobileView === "messages" ? "selected" : ""} onClick={closeMessage}>
           <List size={19} /><span>Messages</span>
         </button>
         <button className={mobileView === "reader" ? "selected" : ""} onClick={() => setMobileView("reader")} disabled={!message}>

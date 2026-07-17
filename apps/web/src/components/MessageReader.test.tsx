@@ -7,6 +7,16 @@ import { MessageReader } from "./MessageReader.js";
 afterEach(cleanup);
 
 describe("MessageReader AI analysis", () => {
+  it("returns to the message list from the reader toolbar", () => {
+    const api = { getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null }) } as unknown as ApiClient;
+    const onMobileBack = vi.fn();
+    renderReader(api, MESSAGE, { onMobileBack });
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to messages" }));
+
+    expect(onMobileBack).toHaveBeenCalledOnce();
+  });
+
   it("loads a saved structured analysis and can request it again", async () => {
     const state = analysisState();
     const api = {

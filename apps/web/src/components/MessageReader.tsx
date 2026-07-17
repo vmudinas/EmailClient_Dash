@@ -340,7 +340,7 @@ export function MessageReader({
   return (
     <article className="reader-pane" aria-label={message.subject}>
       <header className="reader-toolbar">
-        <button className="icon-button mobile-only" onClick={onMobileBack} title="Back to messages" aria-label="Back to messages">
+        <button className="icon-button reader-back-button" onClick={onMobileBack} title="Back to messages" aria-label="Back to messages">
           <ArrowLeft size={18} />
         </button>
         <span className="reader-location">{message.folderPath}</span>
