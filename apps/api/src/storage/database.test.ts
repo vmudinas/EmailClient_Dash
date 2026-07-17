@@ -1006,6 +1006,76 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("moves every local message from a sender to a chosen folder and files future Inbox mail", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Sender move rules",
+      sourceType: "gmail",
+      fingerprint: "sender-move-rules-fixture",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const archived = database.ensureFolder(archive.id, "Archived", "Archived", null);
+    const jobs = database.ensureFolder(archive.id, "Jobs", "Jobs", null);
+    const firstMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "sender-move-first",
+      "Recruiter",
+      "Recruiter@example.test"
+    );
+    const archivedMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      archived.id,
+      "sender-move-archived",
+      "Recruiter",
+      " recruiter@example.test "
+    );
+    const otherMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "sender-move-other",
+      "Other Sender",
+      "other@example.test"
+    );
+    database.completeArchive(archive.id, 0);
+
+    const result = database.moveSenderMessagesToFolder(firstMessageId, jobs.id);
+
+    expect(result).toMatchObject({
+      senderAddress: "recruiter@example.test",
+      folderId: jobs.id,
+      folderPath: "Jobs",
+      movedMessages: 2,
+      message: { id: firstMessageId, folderPath: "Jobs" }
+    });
+    expect(database.getMessage(archivedMessageId)?.folderPath).toBe("Jobs");
+    expect(database.getMessage(otherMessageId)?.folderPath).toBe("Inbox");
+    expect(database.getSenderFilingStatus(archive.id).rules).toEqual([
+      expect.objectContaining({
+        senderAddress: "recruiter@example.test",
+        ruleType: "folder",
+        folderPath: "Jobs",
+        messageCount: 2
+      })
+    ]);
+
+    const futureMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "sender-move-future",
+      "Recruiter",
+      "recruiter@example.test"
+    );
+    expect(database.getMessage(futureMessageId)?.folderPath).toBe("Jobs");
+    database.close();
+  });
+
   it("deduplicates draft work across RFC-linked messages and records answered conversations", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);

@@ -781,6 +781,34 @@ export class EmailApiRuntime {
     });
 
     this.app.post<{ Params: { messageId: string } }>(
+      "/api/messages/:messageId/sender-folder",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = messageMoveSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: "Choose a destination mailbox" });
+        try {
+          const result = this.database.moveSenderMessagesToFolder(request.params.messageId, parsed.data.folderId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: `Sender filed to ${result.folderPath}: ${result.senderAddress}`,
+            archiveId: result.message.archiveId,
+            context: {
+              operation: "sender_filed_to_folder",
+              movedMessages: result.movedMessages,
+              folderId: result.folderId,
+              folderPath: result.folderPath
+            }
+          });
+          return result;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Sender messages could not be moved";
+          return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+        }
+      }
+    );
+
+    this.app.post<{ Params: { messageId: string } }>(
       "/api/messages/:messageId/spam-sender",
       async (request, reply) => {
         if (!this.requireRole(request, reply, ["local", "admin"])) return;

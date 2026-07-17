@@ -464,6 +464,7 @@ describe("Email API sender filing routes", () => {
       sizeBytes: 10
     });
     const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const vendors = runtime.database.ensureFolder(archive.id, "Vendors", "Vendors", null);
     const messageId = runtime.database.insertMessage({
       archiveId: archive.id,
       folderId: inbox.id,
@@ -513,6 +514,22 @@ describe("Email API sender filing routes", () => {
       enabled: true,
       lastRunMovedMessages: 1,
       rules: [{ senderAddress: "vendor@example.test", ruleType: "folder", folderPath: "Top Senders/Vendor Co" }]
+    });
+
+    const filed = await runtime.app.inject({
+      method: "POST",
+      url: `/api/messages/${messageId}/sender-folder`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { folderId: vendors.id }
+    });
+    expect(filed.statusCode).toBe(200);
+    expect(filed.json()).toMatchObject({
+      senderAddress: "vendor@example.test",
+      folderId: vendors.id,
+      folderPath: "Vendors",
+      movedMessages: 1,
+      message: { id: messageId, folderPath: "Vendors" }
     });
 
     const markedSpam = await runtime.app.inject({

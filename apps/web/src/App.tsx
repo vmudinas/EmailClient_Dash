@@ -998,12 +998,34 @@ export function App() {
 
   const moveMessage = async (messageId: string, folderId: string) => {
     if (!api || readOnly) return;
+    const source = message?.id === messageId
+      ? message
+      : items.find((item) => item.message.id === messageId)?.message ?? draggedMessage;
     setMoveBusy(true);
     try {
-      const moved = await api.moveMessage(messageId, folderId);
+      let destination = folders.find((folder) => folder.id === folderId) ?? null;
+      if (!destination && source) {
+        const availableFolders = await api.listFolders(source.archiveId);
+        destination = availableFolders.find((folder) => folder.id === folderId) ?? null;
+        if (source.archiveId === selectedArchiveId) setFolders(availableFolders);
+      }
+      const senderAddress = source?.sender.address.trim() ?? "";
+      const moveAllFromSender = Boolean(senderAddress && destination) && window.confirm(
+        `Move every local email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
+      );
+      const result = moveAllFromSender
+        ? await api.moveSenderMessagesToFolder(messageId, folderId)
+        : null;
+      const moved = result?.message ?? await api.moveMessage(messageId, folderId);
       if (message?.id === messageId) setMessage(moved);
-      await Promise.all([refreshArchives(), loadMessages(false)]);
-      showError(`Moved to ${moved.folderPath}`);
+      await Promise.all([
+        refreshArchives(),
+        loadMessages(false),
+        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+      ]);
+      showError(result
+        ? `Moved ${result.movedMessages.toLocaleString()} email${result.movedMessages === 1 ? "" : "s"} from ${result.senderAddress} to ${result.folderPath}. Future Inbox email from this sender will be filed there.`
+        : `Moved to ${moved.folderPath}`);
     } catch (error) {
       showError(error instanceof Error ? error.message : "Message could not be moved");
     } finally {

@@ -55,6 +55,7 @@ import type {
   SearchFilters,
   SearchHit,
   SenderFilingStatus,
+  SenderFolderRuleResult,
   SenderSpamRuleResult,
   SharingState,
   SmartMailRule,
@@ -478,6 +479,13 @@ export class ApiClient {
 
   moveMessage(messageId: string, folderId: string): Promise<MessageDetail> {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/move`, {
+      method: "POST",
+      body: JSON.stringify({ folderId })
+    });
+  }
+
+  moveSenderMessagesToFolder(messageId: string, folderId: string): Promise<SenderFolderRuleResult> {
+    return this.request(`/api/messages/${encodeURIComponent(messageId)}/sender-folder`, {
       method: "POST",
       body: JSON.stringify({ folderId })
     });

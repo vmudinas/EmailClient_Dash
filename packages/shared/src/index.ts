@@ -638,6 +638,14 @@ export interface SenderSpamRuleResult {
   message: MessageDetail;
 }
 
+export interface SenderFolderRuleResult {
+  senderAddress: string;
+  folderId: string;
+  folderPath: string;
+  movedMessages: number;
+  message: MessageDetail;
+}
+
 export interface GmailConnection {
   id: string;
   email: string;

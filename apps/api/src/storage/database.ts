@@ -63,6 +63,7 @@ import type {
   SearchHit,
   SenderFilingRule,
   SenderFilingStatus,
+  SenderFolderRuleResult,
   SenderSpamRuleResult,
   SessionRole,
   SmartMailRule,
@@ -3673,6 +3674,66 @@ export class EmailDatabase {
       `).run(archiveId);
 
       return { archiveId, senderAddress, spamFolderId, spamFolderPath, movedMessages };
+    });
+
+    const result = applyRule();
+    const message = this.getMessage(messageId);
+    if (!message) throw new Error("Message not found");
+    return { ...result, message };
+  }
+
+  moveSenderMessagesToFolder(messageId: string, targetFolderId: string): SenderFolderRuleResult {
+    const applyRule = this.db.transaction(() => {
+      const source = this.db.prepare(`
+        SELECT m.archive_id, m.sender_name, m.sender_address
+        FROM messages m
+        WHERE m.id = ?
+      `).get(messageId) as Row | undefined;
+      if (!source) throw new Error("Message not found");
+
+      const archiveId = String(source.archive_id);
+      const senderAddress = String(source.sender_address ?? "").trim().toLowerCase();
+      const senderName = source.sender_name ? String(source.sender_name) : null;
+      if (!senderAddress) throw new Error("This message does not have a sender address");
+
+      const targetFolder = this.db.prepare(`
+        SELECT id, path FROM folders WHERE id = ? AND archive_id = ?
+      `).get(targetFolderId, archiveId) as Row | undefined;
+      if (!targetFolder) throw new Error("Destination mailbox must belong to the message archive");
+
+      const folderId = String(targetFolder.id);
+      const folderPath = String(targetFolder.path);
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO sender_filing_rules (
+          id, archive_id, sender_address, sender_name, rule_type, folder_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'folder', ?, ?, ?)
+        ON CONFLICT(archive_id, sender_address) DO UPDATE SET
+          sender_name = COALESCE(excluded.sender_name, sender_filing_rules.sender_name),
+          rule_type = 'folder',
+          folder_id = excluded.folder_id,
+          updated_at = excluded.updated_at
+      `).run(randomUUID(), archiveId, senderAddress, senderName, folderId, now, now);
+
+      this.db.prepare(`
+        UPDATE message_fts SET folder = ?
+        WHERE message_id IN (
+          SELECT id FROM messages
+          WHERE archive_id = ? AND lower(trim(sender_address)) = ? AND folder_id != ?
+        )
+      `).run(folderPath, archiveId, senderAddress, folderId);
+      const movedMessages = this.db.prepare(`
+        UPDATE messages SET folder_id = ?
+        WHERE archive_id = ? AND lower(trim(sender_address)) = ? AND folder_id != ?
+      `).run(folderId, archiveId, senderAddress, folderId).changes;
+
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE archive_id = ?
+      `).run(archiveId);
+
+      return { senderAddress, folderId, folderPath, movedMessages };
     });
 
     const result = applyRule();
