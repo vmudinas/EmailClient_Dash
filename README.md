@@ -71,17 +71,28 @@ Electron passes the selected local path directly to the import service, so it do
 ## Local changes
 
 - Use the pencil buttons beside an archive or mailbox to rename it.
-- Use the plus button beside **Folders** to create a top-level or child mailbox.
+- Use the plus button beside **Folders** to create a mailbox. When a mailbox is selected, it is preselected as the parent so a child mailbox takes one step; choose the archive top level in the dialog when needed.
 - Use the combine button beside an archive to move it into another completed archive. Folder paths with the same name are combined; message IDs, read/star/tag/note state, attachment references, and search entries are retained. The source archive is removed only after the SQLite transaction commits.
 - Use the combine button beside a mailbox to move all messages from it and its child mailboxes into another mailbox in the same archive. Gmail destinations follow the messages, search paths are refreshed, and the source mailbox tree is removed only inside the committed SQLite transaction.
 - Open an email and click **Archive** to move it into a sibling **Archived** mailbox. If that mailbox does not exist, Archive Mail creates it automatically. The adjacent folder button can move the email to any other local mailbox.
-- On desktop, drag an email row from the message list onto any visible mailbox in the sidebar. The destination highlights before drop; read-only viewer sessions cannot drag messages.
+- On desktop, drag an email row from the message list onto any visible mailbox in the sidebar. If the dragged row is checked, every selected message moves together after one confirmation; dragging an unchecked row moves only that email. The destination highlights before drop, and read-only viewer sessions cannot drag messages.
+- Drag one mailbox onto another to choose between merging the source tree into the destination or moving the intact source tree underneath it as a child mailbox.
+- Open **Search filters** to search the current view, the entire archive, or one specific mailbox. The active mailbox scope appears in the search placeholder and results title.
+- Use the eye button beside **Search filters** to hide read messages across every mailbox and search result. The preference remains selected after restarting the app.
 - Renames affect local display and search metadata only. PST and MBOX sources are never rewritten.
 - Use the trash button to remove an archive or a completed mailbox. Mailbox deletion includes its child mailboxes, messages, search rows, and unreferenced attachment blobs.
 - Removing an active archive first stops its import and then removes any managed temporary source copy. Directly selected original files are never deleted.
 - Read, star, tags, and notes are stored in SQLite.
 
 Archive and folder moves reorganize the local Archive Mail copy only by default. Admins can opt in to **Mirror mailbox actions to Gmail** so archive, move, Spam, Trash, read/unread, and star actions run in Gmail first and update the local copy only after Gmail succeeds.
+
+## Mobile layout
+
+At widths up to 800px, Archive Mail uses separate folder, message, and reader screens with a five-item bottom navigation for folders, mail, compose, calendar, and additional actions. Swipe a writable message right to reveal Archive and Read/Unread, swipe left to reveal the sender-level Spam action, or press and hold a row to enter bulk selection. Inbox category tabs scroll horizontally.
+
+Compose, review, import, and admin dialogs use the full viewport on phones. Calendar switches to an agenda view; calendar selection, the highlighted monthly date picker, and the local to-do list open as touch-friendly sheets. Admin settings use section-level navigation instead of the desktop side menu. On narrow phones the news ticker is hidden so the message area retains usable height; the stock ticker remains visible.
+
+The desktop QR/LAN sharing flow is still intentionally read-only. Making archive, compose, calendar, or admin mutations from a separate phone requires a future authenticated HTTPS deployment rather than weakening the paired viewer role.
 
 ## Login, users, and audit
 
@@ -140,7 +151,7 @@ Open the Gmail button beside **Archives** and choose **New archive**, **New mail
 
 Each connected account is synced automatically on an interval (5 minutes by default; configurable under **Admin settings > Gmail > Auto-sync every**, or set to Off for manual sync only), in addition to the **Sync now** button on each connection. Automatic sync runs in the API process itself, so it keeps pulling mail even while no browser tab is open. A sync pulls an overlapping date window and deduplicates by Gmail account plus message ID, so a retry or an overlapping automatic sync never duplicates mail.
 
-To backfill an account beyond its original recent-mail query, open **Admin settings > Gmail > Connected account pulls** and choose **Pull all email**. This walks every Gmail API result page, includes Spam and Trash, removes the original date restriction for future syncs, and shows checked-message count, newly imported count, percentage, completion time, errors, and a Stop action. The same full-history action is also available from the Gmail accounts dialog.
+To backfill an account beyond its original recent-mail query, open **Admin settings > Gmail > Connected account pulls** and choose **Pull all email**. This walks every Gmail API result page, includes Spam and Trash, removes the original date restriction for future syncs, and shows checked-message count, newly imported count, percentage, completion time, errors, and a Stop action. When mailbox action sync is enabled, the pull also reconciles local folder positions back to Gmail in batches, repairing messages filed by rules or moved while Gmail permissions were unavailable. The same full-history action is also available from the Gmail accounts dialog.
 
 Gmail's own folder/label structure is mirrored locally underneath the account's local folder: **Inbox**, **Sent**, **Drafts**, **Spam**, and **Trash** each become their own local sub-folder, and custom Gmail labels (including `Parent/Child`-style nested labels) become nested local folders under the same name. A message with no matching label — for example mail archived out of the Inbox without any other label — is filed under **Archived**. To make this possible, sync queries widen to include Spam and Trash, which Gmail's API excludes by default.
 
@@ -230,7 +241,7 @@ Each schedule can be edited, toggled on/off, triggered immediately with **Run no
 
 ## Diagnostics
 
-Open **Diagnostics** from the activity button in the top toolbar. It shows:
+Open **Admin settings > Tools > Diagnostics**. It shows:
 
 - resumable upload sessions and confirmed byte counts;
 - import job status, phase, checkpoint progress, and error counts;

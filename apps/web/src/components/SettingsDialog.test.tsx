@@ -17,6 +17,39 @@ import { SettingsDialog } from "./SettingsDialog.js";
 afterEach(cleanup);
 
 describe("SettingsDialog", () => {
+  it("opens the guide and diagnostics from Admin tools", async () => {
+    const onOpenGuide = vi.fn();
+    const onOpenDiagnostics = vi.fn();
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS)
+    } as unknown as ApiClient;
+
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={SESSION}
+        onClose={vi.fn()}
+        onSignedOut={vi.fn()}
+        onOpenGuide={onOpenGuide}
+        onOpenDiagnostics={onOpenDiagnostics}
+        pendingDiagnosticCount={7}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }));
+    expect(screen.getByRole("heading", { name: "Tools" })).toBeTruthy();
+    const guideButton = screen.getByRole("button", { name: /^Guide/ });
+    const diagnosticsButton = screen.getByRole("button", { name: /^Diagnostics/ });
+    expect(screen.getByText("7")).toBeTruthy();
+
+    fireEvent.click(guideButton);
+    fireEvent.click(diagnosticsButton);
+    expect(onOpenGuide).toHaveBeenCalledOnce();
+    expect(onOpenDiagnostics).toHaveBeenCalledOnce();
+  });
+
   it("configures the default draft sender and placeholder name", async () => {
     const updatedSettings: AdminSettings = {
       ...SETTINGS,
@@ -879,12 +912,39 @@ describe("SettingsDialog", () => {
         updatedAt: "2026-07-15T12:00:00.000Z"
       }]
     };
+    const folders: Folder[] = [{
+      id: "folder-1",
+      archiveId: archive.id,
+      parentId: null,
+      name: "Vendor Co",
+      path: "Top Senders/Vendor Co",
+      messageCount: 42,
+      unreadCount: 0
+    }, {
+      id: "folder-2",
+      archiveId: archive.id,
+      parentId: null,
+      name: "Vendors",
+      path: "Vendors",
+      messageCount: 0,
+      unreadCount: 0
+    }];
+    const updatedStatus: SenderFilingStatus = {
+      ...organizedStatus,
+      rules: [{
+        ...organizedStatus.rules[0]!,
+        folderId: "folder-2",
+        folderPath: "Vendors"
+      }]
+    };
     const api = {
       adminSettings: vi.fn().mockResolvedValue(SETTINGS),
       listUsers: vi.fn().mockResolvedValue(USERS),
       listArchives: vi.fn().mockResolvedValue([archive]),
+      listFolders: vi.fn().mockResolvedValue(folders),
       senderFilingStatus: vi.fn().mockResolvedValue(initialStatus),
-      organizeTopSenders: vi.fn().mockResolvedValue(organizedStatus)
+      organizeTopSenders: vi.fn().mockResolvedValue(organizedStatus),
+      updateSenderFilingRuleFolder: vi.fn().mockResolvedValue(updatedStatus)
     } as unknown as ApiClient;
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -898,8 +958,14 @@ describe("SettingsDialog", () => {
 
     await waitFor(() => expect(api.organizeTopSenders).toHaveBeenCalledWith(archive.id));
     expect(await screen.findByText("Vendor Co")).toBeTruthy();
-    expect(screen.getByText("Top Senders/Vendor Co")).toBeTruthy();
+    const folderSelect = screen.getByRole("combobox", { name: "Folder for Vendor Co" });
+    expect((folderSelect as HTMLSelectElement).value).toBe("folder-1");
     expect(screen.getByText(/Moved 42 messages/)).toBeTruthy();
+
+    fireEvent.change(folderSelect, { target: { value: "folder-2" } });
+    await waitFor(() => expect(api.updateSenderFilingRuleFolder).toHaveBeenCalledWith("rule-1", "folder-2"));
+    expect((screen.getByRole("combobox", { name: "Folder for Vendor Co" }) as HTMLSelectElement).value).toBe("folder-2");
+    expect(await screen.findByText(/Sender rule updated/)).toBeTruthy();
     confirm.mockRestore();
   });
 
@@ -953,6 +1019,25 @@ describe("SettingsDialog", () => {
     expect(screen.getByText("Owner")).toBeTruthy();
     expect(screen.getByText(/urgent: 1/)).toBeTruthy();
     expect(screen.getByText("Finance")).toBeTruthy();
+  });
+
+  it("uses screen-level section navigation for mobile settings", async () => {
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS)
+    } as unknown as ApiClient;
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
+
+    const dialog = screen.getByRole("dialog", { name: "Admin settings" });
+    expect(dialog.className).toContain("mobile-settings-menu-open");
+    fireEvent.click(screen.getByRole("button", { name: "Drafts" }));
+    expect(dialog.className).not.toContain("mobile-settings-menu-open");
+    expect(screen.getByRole("heading", { name: "Drafts" })).toBeTruthy();
+
+    fireEvent.click(dialog.querySelector(".settings-mobile-section-trigger")!);
+    expect(dialog.className).toContain("mobile-settings-menu-open");
   });
 });
 

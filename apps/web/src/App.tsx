@@ -7,13 +7,13 @@ import {
 } from "react";
 import {
   Archive,
-  Activity,
-  BookOpen,
   BrainCircuit,
   CalendarDays,
   FileEdit,
   Filter,
   FolderOpen,
+  Eye,
+  EyeOff,
   Import,
   List,
   LoaderCircle,
@@ -21,6 +21,9 @@ import {
   Mail,
   MailPlus,
   MonitorSmartphone,
+  MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   Settings as SettingsIcon,
@@ -42,6 +45,7 @@ import type {
   ImportJob,
   InboxCategory,
   InboxCategoryCounts,
+  InboxTabSettings,
   LocalMessageStatePatch,
   MessageActionSuggestion,
   MessageDetail,
@@ -53,6 +57,7 @@ import type {
   SharingState,
   StockQuote
 } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { Sidebar } from "./components/Sidebar.js";
 import {
   MessageList,
@@ -61,6 +66,7 @@ import {
 import { MessageReader } from "./components/MessageReader.js";
 import { CalendarView } from "./components/CalendarView.js";
 import {
+  ALL_MAIL_SEARCH_SCOPE,
   EMPTY_FILTERS,
   CombineArchiveDialog,
   CombineMailboxDialog,
@@ -69,6 +75,7 @@ import {
   FilterPanel,
   ImportDialog,
   GmailDialog,
+  MailboxDropDialog,
   RenameDialog,
   ShareDialog,
   type UiSearchFilters
@@ -98,6 +105,8 @@ const EMPTY_SHARING: SharingState = {
 };
 
 const SESSION_STORAGE_KEY = "archive-mail-session-token";
+const SHOW_READ_STORAGE_KEY = "archive-mail-show-read-messages";
+const FOLDER_PANEL_STORAGE_KEY = "archive-mail-folder-panel-visible";
 const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   primary: 0,
   promotions: 0,
@@ -108,11 +117,23 @@ const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   mail_tracking: 0
 };
 
+function defaultInboxTabSettings(archiveId = ""): InboxTabSettings {
+  return {
+    archiveId,
+    tabs: DEFAULT_INBOX_TABS.map((tab) => ({ ...tab, keywords: [], senderDomains: [] })),
+    aiEnabled: false,
+    aiConfidenceThreshold: 0.8,
+    updatedAt: null
+  };
+}
+
 const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string }> = {
   trash: { verb: "delete", noun: "Trash" },
   archived: { verb: "archive", noun: "Archive" },
   spam: { verb: "mark as spam", noun: "Spam" }
 };
+
+const MAX_BULK_SELECTION = 500;
 
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
@@ -137,14 +158,31 @@ export function App() {
   const [selectedSmartMailbox, setSelectedSmartMailbox] = useState<SmartMailbox | null>(null);
   const [inboxCategory, setInboxCategory] = useState<InboxCategory>("primary");
   const [inboxCategoryCounts, setInboxCategoryCounts] = useState<InboxCategoryCounts>(EMPTY_INBOX_CATEGORY_COUNTS);
+  const [inboxTabSettings, setInboxTabSettings] = useState<InboxTabSettings>(() => defaultInboxTabSettings());
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
+  const [selectionBusy, setSelectionBusy] = useState(false);
   const [bulkActionBusy, setBulkActionBusy] = useState(false);
+  const [aiFilingBusy, setAiFilingBusy] = useState(false);
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [filters, setFilters] = useState<UiSearchFilters>(EMPTY_FILTERS);
+  const [showReadMessages, setShowReadMessages] = useState(() => {
+    try {
+      return window.localStorage.getItem(SHOW_READ_STORAGE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [folderPanelVisible, setFolderPanelVisible] = useState(() => {
+    try {
+      return window.localStorage.getItem(FOLDER_PANEL_STORAGE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
   const [sort, setSort] = useState<"relevance" | "newest">("relevance");
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState(false);
@@ -152,6 +190,7 @@ export function App() {
   const [startupError, setStartupError] = useState("");
   const [notice, setNotice] = useState("");
   const [mobileView, setMobileView] = useState<MobileView>("folders");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [viewMode, setViewMode] = useState<"mail" | "calendar">("mail");
   const [importOpen, setImportOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -161,10 +200,13 @@ export function App() {
   const [renameBusy, setRenameBusy] = useState(false);
   const [createMailboxOpen, setCreateMailboxOpen] = useState(false);
   const [createMailboxBusy, setCreateMailboxBusy] = useState(false);
+  const [createMailboxParentId, setCreateMailboxParentId] = useState<string | null>(null);
   const [combineSource, setCombineSource] = useState<ArchiveModel | null>(null);
   const [combineBusy, setCombineBusy] = useState(false);
   const [combineMailboxSource, setCombineMailboxSource] = useState<Folder | null>(null);
   const [combineMailboxBusy, setCombineMailboxBusy] = useState(false);
+  const [mailboxDrop, setMailboxDrop] = useState<{ source: Folder; target: Folder } | null>(null);
+  const [mailboxDropBusy, setMailboxDropBusy] = useState(false);
   const [gmailOpen, setGmailOpen] = useState(false);
   const [gmailConnections, setGmailConnections] = useState<GmailConnection[]>([]);
   const [gmailLoading, setGmailLoading] = useState(false);
@@ -194,6 +236,8 @@ export function App() {
   const [moveBusy, setMoveBusy] = useState(false);
   const [spamBusy, setSpamBusy] = useState(false);
   const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
+  const [draggedMessageIds, setDraggedMessageIds] = useState<string[]>([]);
+  const [messageListRevision, setMessageListRevision] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -209,13 +253,24 @@ export function App() {
   const importAbortRef = useRef<AbortController | null>(null);
   const gmailStatusRef = useRef(new Map<string, GmailConnection["status"]>());
   const messageRequestRef = useRef(0);
+  const messageListRequestRef = useRef(0);
 
   const readOnly = !session || session.role === "viewer";
   const isAdmin = session?.role === "admin";
   const electron = Boolean(window.emailClient);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
-  const showInboxCategories = selectedFolder?.name.trim().toLowerCase() === "inbox"
+  const searchFolderId = filters.folderId === ALL_MAIL_SEARCH_SCOPE
+    ? null
+    : filters.folderId || selectedFolderId;
+  const visibleFolderId = searchTerm ? searchFolderId : selectedFolderId;
+  const visibleFolder = folders.find((folder) => folder.id === visibleFolderId) ?? null;
+  const searchScopeLabel = filters.folderId === ALL_MAIL_SEARCH_SCOPE
+    ? "Entire archive"
+    : filters.folderId
+      ? folders.find((folder) => folder.id === filters.folderId)?.path ?? "Selected mailbox"
+      : selectedFolder?.path ?? "All mail";
+  const showInboxCategories = visibleFolder?.name.trim().toLowerCase() === "inbox"
     && selectedSmartMailbox === null;
   const activeFilterCount = Object.values(filters).filter((value) => value !== "" && value !== undefined).length;
 
@@ -384,6 +439,24 @@ export function App() {
   }, [query]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(SHOW_READ_STORAGE_KEY, String(showReadMessages));
+    } catch {}
+  }, [showReadMessages]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FOLDER_PANEL_STORAGE_KEY, String(folderPanelVisible));
+    } catch {}
+  }, [folderPanelVisible]);
+
+  useEffect(() => {
+    setFilters((current) => current.folderId && current.folderId !== ALL_MAIL_SEARCH_SCOPE
+      ? { ...current, folderId: "" }
+      : current);
+  }, [selectedArchiveId]);
+
+  useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -469,7 +542,27 @@ export function App() {
     return () => { active = false; };
   }, [api, selectedArchiveId, showError]);
 
+  useEffect(() => {
+    if (!api || !selectedArchiveId) {
+      setInboxTabSettings(defaultInboxTabSettings());
+      return;
+    }
+    let active = true;
+    setInboxTabSettings(defaultInboxTabSettings(selectedArchiveId));
+    void api.inboxTabSettings(selectedArchiveId)
+      .then((settings) => {
+        if (!active) return;
+        setInboxTabSettings(settings);
+        setInboxCategory((current) => settings.tabs.some((tab) => tab.id === current && tab.enabled)
+          ? current
+          : "primary");
+      })
+      .catch((error) => showError(error instanceof Error ? error.message : "Inbox tabs could not be loaded"));
+    return () => { active = false; };
+  }, [api, selectedArchiveId, showError]);
+
   const loadMessages = useCallback(async (append = false) => {
+    const requestId = ++messageListRequestRef.current;
     if (!api || !selectedArchiveId) {
       setItems([]);
       setNextCursor(null);
@@ -478,12 +571,17 @@ export function App() {
     setLoadingMessages(true);
     try {
       const countsPromise = !append && showInboxCategories
-        ? api.inboxCategoryCounts({ archiveId: selectedArchiveId, folderId: selectedFolderId ?? undefined })
+        ? api.inboxCategoryCounts({
+            archiveId: selectedArchiveId,
+            folderId: visibleFolderId ?? undefined,
+            isRead: showReadMessages ? undefined : false
+          })
         : Promise.resolve(null);
       if (searchTerm) {
         const searchFilters: SearchFilters = {
           archiveId: selectedArchiveId,
-          folderId: selectedFolderId ?? undefined,
+          folderId: searchFolderId ?? undefined,
+          isRead: showReadMessages ? undefined : false,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
           inboxCategory: showInboxCategories ? inboxCategory : undefined,
           from: filters.from || undefined,
@@ -496,6 +594,7 @@ export function App() {
           limit: 50
         };
         const [page, counts] = await Promise.all([api.search(searchTerm, searchFilters), countsPromise]);
+        if (requestId !== messageListRequestRef.current) return;
         setItems((current) => append
           ? [...current, ...page.items.map(hitToItem)]
           : page.items.map(hitToItem));
@@ -505,11 +604,13 @@ export function App() {
         const [page, counts] = await Promise.all([api.listMessages({
           archiveId: selectedArchiveId,
           folderId: selectedFolderId ?? undefined,
+          isRead: showReadMessages ? undefined : false,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
           inboxCategory: showInboxCategories ? inboxCategory : undefined,
           cursor: append ? nextCursor ?? undefined : undefined,
           limit: 50
         }), countsPromise]);
+        if (requestId !== messageListRequestRef.current) return;
         setItems((current) => append
           ? [...current, ...page.items.map(messageToItem)]
           : page.items.map(messageToItem));
@@ -518,20 +619,24 @@ export function App() {
       }
       if (!showInboxCategories) setInboxCategoryCounts(EMPTY_INBOX_CATEGORY_COUNTS);
     } catch (error) {
+      if (requestId !== messageListRequestRef.current) return;
       showError(error instanceof Error ? error.message : "Messages could not be loaded");
     } finally {
-      setLoadingMessages(false);
+      if (requestId === messageListRequestRef.current) setLoadingMessages(false);
     }
   }, [
     api,
     selectedArchiveId,
     selectedFolderId,
+    searchFolderId,
+    visibleFolderId,
     selectedSmartMailbox,
     showInboxCategories,
     inboxCategory,
     searchTerm,
     filters,
     sort,
+    showReadMessages,
     nextCursor,
     showError
   ]);
@@ -544,7 +649,7 @@ export function App() {
     setMessage(null);
     setBulkSelectedIds(new Set());
     void loadMessages(false);
-  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory]);
+  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory, showReadMessages, messageListRevision]);
 
   const loadFoldersForGmail = useCallback(async (archiveId: string): Promise<Folder[]> => {
     if (!api) return [];
@@ -645,15 +750,15 @@ export function App() {
     state: MessageDetail["state"]
   ) => {
     setMessage((current) => current?.id === messageId ? { ...current, state } : current);
-    setItems((current) => current.map((item) => (
-      item.message.id === messageId
-        ? {
-            ...item,
-            message: { ...item.message, state },
-            hit: item.hit ? { ...item.hit, message: { ...item.hit.message, state } } : undefined
-          }
-        : item
-    )));
+    setItems((current) => current.flatMap((item) => {
+      if (item.message.id !== messageId) return [item];
+      if (!showReadMessages && state.isRead) return [];
+      return [{
+        ...item,
+        message: { ...item.message, state },
+        hit: item.hit ? { ...item.hit, message: { ...item.hit.message, state } } : undefined
+      }];
+    }));
   };
 
   const updateState = async (patch: LocalMessageStatePatch) => {
@@ -677,6 +782,7 @@ export function App() {
     setSelectedArchiveId(id);
     setSelectedFolderId(null);
     setSelectedSmartMailbox(null);
+    setInboxCategory("primary");
     closeMessage();
   };
 
@@ -876,6 +982,7 @@ export function App() {
       setFolders(await api.listFolders(selectedArchiveId));
       setSelectedFolderId(folder.id);
       setCreateMailboxOpen(false);
+      setCreateMailboxParentId(null);
       await refreshArchives();
     } catch (error) {
       showError(error instanceof Error ? error.message : "Mailbox could not be created");
@@ -919,6 +1026,7 @@ export function App() {
       setMessage(null);
       setFolders(await api.listFolders(result.mailbox.archiveId));
       await refreshArchives();
+      setMessageListRevision((current) => current + 1);
       showError(
         `${result.movedMessages.toLocaleString()} messages and ${result.movedAttachments.toLocaleString()} attachments combined into ${result.mailbox.path}`
       );
@@ -926,6 +1034,39 @@ export function App() {
       showError(error instanceof Error ? error.message : "Mailboxes could not be combined");
     } finally {
       setCombineMailboxBusy(false);
+    }
+  };
+
+  const organizeDroppedMailbox = async (action: "merge" | "child") => {
+    if (!api || !mailboxDrop || readOnly) return;
+    setMailboxDropBusy(true);
+    try {
+      if (action === "merge") {
+        const result = await api.combineMailboxes(mailboxDrop.source.id, mailboxDrop.target.id);
+        setSelectedArchiveId(result.mailbox.archiveId);
+        setSelectedFolderId(result.mailbox.id);
+        showError(
+          `${result.movedMessages.toLocaleString()} messages combined into ${result.mailbox.path}`
+        );
+      } else {
+        const result = await api.moveMailbox(mailboxDrop.source.id, mailboxDrop.target.id);
+        setSelectedArchiveId(result.mailbox.archiveId);
+        setSelectedFolderId(result.mailbox.id);
+        showError(
+          `${result.mailbox.path} moved with ${result.movedMailboxes.toLocaleString()} mailbox${result.movedMailboxes === 1 ? "" : "es"}`
+        );
+      }
+      setSelectedMessageId(null);
+      setMessage(null);
+      const archiveId = mailboxDrop.source.archiveId;
+      setMailboxDrop(null);
+      setFolders(await api.listFolders(archiveId));
+      await refreshArchives();
+      setMessageListRevision((current) => current + 1);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Mailbox could not be organized");
+    } finally {
+      setMailboxDropBusy(false);
     }
   };
 
@@ -1192,7 +1333,7 @@ export function App() {
     }
   };
 
-  const archiveMessage = async (target: MessageDetail) => {
+  const archiveMessage = async (target: MessageSummary) => {
     if (!api || readOnly) return;
     setMoveBusy(true);
     try {
@@ -1226,7 +1367,7 @@ export function App() {
     }
   };
 
-  const spamSender = async (target: MessageDetail) => {
+  const spamSender = async (target: MessageSummary) => {
     if (!api || readOnly) return;
     const senderAddress = target.sender.address.trim();
     if (!senderAddress) {
@@ -1258,6 +1399,20 @@ export function App() {
     }
   };
 
+  const toggleListMessageRead = async (target: MessageSummary) => {
+    if (!api || readOnly) return;
+    try {
+      const state = await api.updateMessageState(target.id, { isRead: !target.state.isRead });
+      setItems((current) => current.map((entry) => entry.message.id === target.id
+        ? { ...entry, message: { ...entry.message, state } }
+        : entry));
+      setMessage((current) => current?.id === target.id ? { ...current, state } : current);
+      await refreshMailboxCounts();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Message state could not be updated");
+    }
+  };
+
   const toggleBulkSelect = (messageId: string) => {
     setBulkSelectedIds((current) => {
       const next = new Set(current);
@@ -1271,6 +1426,72 @@ export function App() {
       const allVisibleSelected = items.length > 0 && items.every((item) => current.has(item.message.id));
       return allVisibleSelected ? new Set() : new Set(items.map((item) => item.message.id));
     });
+  };
+
+  const selectFirstLoadedMessages = (count: number) => {
+    setBulkSelectedIds(new Set(items.slice(0, count).map((item) => item.message.id)));
+  };
+
+  const selectAllLoadedMessages = () => {
+    setBulkSelectedIds(new Set(items.map((item) => item.message.id)));
+  };
+
+  const selectEntireMessageView = async () => {
+    if (!api || !selectedArchiveId || readOnly) return;
+    if (!nextCursor) {
+      selectAllLoadedMessages();
+      showError(`Selected all ${items.length.toLocaleString()} messages in this view`);
+      return;
+    }
+
+    setSelectionBusy(true);
+    try {
+      const selected = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const limit = Math.min(100, MAX_BULK_SELECTION - selected.size);
+        if (searchTerm) {
+          const page = await api.search(searchTerm, {
+            archiveId: selectedArchiveId,
+            folderId: searchFolderId ?? undefined,
+            isRead: showReadMessages ? undefined : false,
+            starred: selectedSmartMailbox === "starred" ? true : undefined,
+            inboxCategory: showInboxCategories ? inboxCategory : undefined,
+            from: filters.from || undefined,
+            to: filters.to || undefined,
+            after: filters.after || undefined,
+            before: filters.before || undefined,
+            hasAttachment: filters.hasAttachment,
+            sort,
+            cursor,
+            limit
+          });
+          page.items.forEach((hit) => selected.add(hit.message.id));
+          cursor = page.nextCursor ?? undefined;
+        } else {
+          const page = await api.listMessages({
+            archiveId: selectedArchiveId,
+            folderId: selectedFolderId ?? undefined,
+            isRead: showReadMessages ? undefined : false,
+            starred: selectedSmartMailbox === "starred" ? true : undefined,
+            inboxCategory: showInboxCategories ? inboxCategory : undefined,
+            cursor,
+            limit
+          });
+          page.items.forEach((entry) => selected.add(entry.id));
+          cursor = page.nextCursor ?? undefined;
+        }
+      } while (cursor && selected.size < MAX_BULK_SELECTION);
+
+      setBulkSelectedIds(selected);
+      showError(cursor
+        ? `Selected the first ${selected.size.toLocaleString()} messages. Bulk actions are limited to ${MAX_BULK_SELECTION.toLocaleString()} at a time.`
+        : `Selected all ${selected.size.toLocaleString()} messages in this view`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Messages could not be selected");
+    } finally {
+      setSelectionBusy(false);
+    }
   };
 
   const clearBulkSelection = () => setBulkSelectedIds(new Set());
@@ -1306,9 +1527,91 @@ export function App() {
     }
   };
 
-  const dropMessageIntoFolder = (messageId: string, folderId: string) => {
+  const bulkAiFile = async () => {
+    if (!api || readOnly || bulkSelectedIds.size === 0) return;
+    const messageIds = [...bulkSelectedIds];
+    setBulkActionBusy(true);
+    setAiFilingBusy(true);
+    try {
+      const suggestion = await api.suggestBulkFilingFolder(messageIds);
+      if (!suggestion.folderId || !suggestion.folderPath) {
+        showError(`AI did not find one folder for this selection: ${suggestion.reason}`);
+        return;
+      }
+      const confidence = Math.round(suggestion.confidence * 100);
+      const accepted = window.confirm(
+        `AI recommends moving ${messageIds.length.toLocaleString()} selected message${messageIds.length === 1 ? "" : "s"} to "${suggestion.folderPath}".\n\n`
+        + `Confidence: ${confidence}%\n${suggestion.reason}\n\nMove all selected messages to this folder?`
+      );
+      if (!accepted) return;
+      const result = await api.bulkMoveMessagesToFolder(messageIds, suggestion.folderId);
+      if (message && messageIds.includes(message.id)) {
+        setSelectedMessageId(null);
+        setMessage(null);
+      }
+      setBulkSelectedIds(new Set());
+      await Promise.all([
+        refreshArchives(),
+        loadMessages(false),
+        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+      ]);
+      showError(
+        `AI filed ${result.moved.toLocaleString()} message${result.moved === 1 ? "" : "s"} in ${result.folderPath}`
+        + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
+        + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : "")
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "AI could not recommend a mailbox");
+    } finally {
+      setAiFilingBusy(false);
+      setBulkActionBusy(false);
+    }
+  };
+
+  const moveSelectedMessagesToFolder = async (messageIds: string[], folderId: string) => {
+    if (!api || readOnly || messageIds.length === 0) return;
+    const destination = folders.find((folder) => folder.id === folderId);
+    if (!destination) {
+      showError("Destination mailbox could not be found");
+      return;
+    }
+    if (!window.confirm(
+      `Move ${messageIds.length.toLocaleString()} selected messages to ${destination.path}? If Gmail mailbox sync is enabled, the Gmail messages move too.`
+    )) return;
+
+    setMoveBusy(true);
+    try {
+      const result = await api.bulkMoveMessagesToFolder(messageIds, folderId);
+      if (message && messageIds.includes(message.id)) {
+        setSelectedMessageId(null);
+        setMessage(null);
+      }
+      setBulkSelectedIds(new Set());
+      await Promise.all([
+        refreshArchives(),
+        loadMessages(false),
+        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+      ]);
+      showError(
+        `Moved ${result.moved.toLocaleString()} selected message${result.moved === 1 ? "" : "s"} to ${result.folderPath}`
+        + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
+        + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : "")
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Selected messages could not be moved");
+    } finally {
+      setMoveBusy(false);
+    }
+  };
+
+  const dropMessagesIntoFolder = (messageIds: string[], folderId: string) => {
     setDraggedMessage(null);
-    void moveMessage(messageId, folderId);
+    setDraggedMessageIds([]);
+    if (messageIds.length === 1) {
+      void moveMessage(messageIds[0]!, folderId);
+      return;
+    }
+    void moveSelectedMessagesToFolder(messageIds, folderId);
   };
 
   const connectGmail = async (request: GmailAuthRequest) => {
@@ -1510,7 +1813,7 @@ export function App() {
   };
 
   const listTitle = searchTerm
-    ? `Search: ${searchTerm}`
+    ? `Search in ${searchScopeLabel}: ${searchTerm}`
     : selectedSmartMailbox === "starred"
       ? "Starred"
       : selectedFolder?.name ?? (selectedArchive ? "All mail" : "Messages");
@@ -1554,7 +1857,17 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark"><Archive size={20} /></span>
-          <span>Archive Mail</span>
+          <span className="brand-name">Archive Mail</span>
+          <button
+            className="icon-button subtle folder-panel-toggle"
+            onClick={() => setFolderPanelVisible((visible) => !visible)}
+            title={folderPanelVisible ? "Hide folders" : "Show folders"}
+            aria-label={folderPanelVisible ? "Hide folders" : "Show folders"}
+            aria-controls="folder-sidebar"
+            aria-expanded={folderPanelVisible}
+          >
+            {folderPanelVisible ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+          </button>
         </div>
 
         <div className="search-wrap">
@@ -1563,7 +1876,7 @@ export function App() {
             ref={searchInputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search mail and attachments"
+            placeholder={`Search in ${searchScopeLabel}`}
             aria-label="Search mail and attachments"
           />
           {query && (
@@ -1593,10 +1906,21 @@ export function App() {
             <FilterPanel
               open={filterOpen}
               value={filters}
+              folders={folders}
+              currentFolderLabel={selectedFolder?.path ?? "All mail"}
               onChange={setFilters}
               onClose={() => setFilterOpen(false)}
             />
           </div>
+          <button
+            className={`icon-button read-visibility-toggle ${showReadMessages ? "" : "active"}`}
+            onClick={() => setShowReadMessages((current) => !current)}
+            title={showReadMessages ? "Hide read emails in every folder" : "Show read emails in every folder"}
+            aria-label={showReadMessages ? "Hide read emails in every folder" : "Show read emails in every folder"}
+            aria-pressed={!showReadMessages}
+          >
+            {showReadMessages ? <EyeOff size={18} /> : <Eye size={18} />}
+          </button>
           <button
             className={`icon-button calendar-trigger ${viewMode === "calendar" ? "active" : ""}`}
             onClick={() => setViewMode((current) => (current === "calendar" ? "mail" : "calendar"))}
@@ -1624,17 +1948,9 @@ export function App() {
               <MailPlus size={18} />
             </button>
           )}
-          <button className="icon-button guide-trigger" onClick={() => setGuideOpen(true)} title="Open guide" aria-label="Open guide">
-            <BookOpen size={18} />
-          </button>
           {isAdmin && (
             <button className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)} title="Open admin settings" aria-label="Open admin settings">
               <SettingsIcon size={18} />
-            </button>
-          )}
-          {!readOnly && (
-            <button className="icon-button diagnostics-trigger" onClick={openDiagnostics} title="Open diagnostics" aria-label="Open diagnostics">
-              <Activity size={18} />
               {pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
             </button>
           )}
@@ -1651,7 +1967,7 @@ export function App() {
         </div>
       </header>
 
-      <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""}`}>
+      <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""} ${folderPanelVisible ? "" : "folders-collapsed"}`}>
         {viewMode === "calendar" ? (
           api && <CalendarView api={api} connections={gmailConnections} onReauthorize={reauthorizeGmail} onError={showError} />
         ) : (
@@ -1665,15 +1981,21 @@ export function App() {
               selectedSmartMailbox={selectedSmartMailbox}
               readOnly={readOnly}
               draggedMessage={draggedMessage}
+              draggedMessageIds={draggedMessageIds}
               moveBusy={moveBusy}
+              folderBusy={combineMailboxBusy || mailboxDropBusy}
               onSelectArchive={selectArchive}
               onSelectFolder={selectFolder}
               onSelectSmartMailbox={selectSmartMailbox}
               onImport={openImport}
               onOpenGmail={openGmail}
-              onCreateFolder={() => setCreateMailboxOpen(true)}
+              onCreateFolder={() => {
+                setCreateMailboxParentId(selectedFolderId);
+                setCreateMailboxOpen(true);
+              }}
               onCombineArchive={setCombineSource}
               onCombineFolder={setCombineMailboxSource}
+              onOrganizeFolder={(source, target) => setMailboxDrop({ source, target })}
               onCancelJob={(id) => void cancelJob(id)}
               onResumeJob={(id) => void resumeJob(id)}
               onClearJob={(id) => void clearJob(id)}
@@ -1681,7 +2003,7 @@ export function App() {
               onRemoveFolder={(folder) => void removeFolder(folder)}
               onRenameArchive={(archive) => setRenameTarget({ kind: "archive", id: archive.id, name: archive.name })}
               onRenameFolder={(folder) => setRenameTarget({ kind: "mailbox", id: folder.id, archiveId: folder.archiveId, name: folder.name })}
-              onMoveMessage={dropMessageIntoFolder}
+              onMoveMessages={dropMessagesIntoFolder}
               onOpenDiagnostics={openDiagnostics}
             />
             <MessageList
@@ -1693,23 +2015,40 @@ export function App() {
               hasMore={Boolean(nextCursor)}
               readOnly={readOnly}
               onSelect={(selected) => void openMessage(selected)}
-              onDragStart={setDraggedMessage}
-              onDragEnd={() => setDraggedMessage(null)}
+              onDragStart={(target, messageIds) => {
+                setDraggedMessage(target);
+                setDraggedMessageIds(messageIds);
+              }}
+              onDragEnd={() => {
+                setDraggedMessage(null);
+                setDraggedMessageIds([]);
+              }}
               onLoadMore={() => void loadMessages(true)}
               onMobileBack={() => setMobileView("folders")}
               inboxCategories={showInboxCategories ? {
                 active: inboxCategory,
                 counts: inboxCategoryCounts,
+                tabs: inboxTabSettings.tabs,
                 onSelect: selectInboxCategory
               } : null}
               selectedIds={bulkSelectedIds}
               onToggleSelect={toggleBulkSelect}
               onToggleSelectAll={toggleBulkSelectAll}
+              onSelectFirst={selectFirstLoadedMessages}
+              onSelectLoaded={selectAllLoadedMessages}
+              onSelectEntireView={() => void selectEntireMessageView()}
               onClearSelection={clearBulkSelection}
+              selectionBusy={selectionBusy}
               bulkBusy={bulkActionBusy}
               onBulkDelete={() => void bulkMove("trash")}
               onBulkArchive={() => void bulkMove("archived")}
               onBulkSpam={() => void bulkMove("spam")}
+              onBulkAiFile={() => void bulkAiFile()}
+              aiFilingBusy={aiFilingBusy}
+              actionBusy={moveBusy || spamBusy}
+              onArchive={(target) => void archiveMessage(target)}
+              onSpam={(target) => void spamSender(target)}
+              onToggleRead={(target) => void toggleListMessageRead(target)}
             />
             <MessageReader
               key={message?.id ?? "empty-reader"}
@@ -1752,16 +2091,57 @@ export function App() {
       />
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
-        <button className={mobileView === "folders" ? "selected" : ""} onClick={() => setMobileView("folders")}>
+        <button className={viewMode === "mail" && mobileView === "folders" ? "selected" : ""} onClick={() => {
+          setMobileMenuOpen(false);
+          setViewMode("mail");
+          setMobileView("folders");
+        }}>
           <FolderOpen size={19} /><span>Folders</span>
         </button>
-        <button className={mobileView === "messages" ? "selected" : ""} onClick={closeMessage}>
-          <List size={19} /><span>Messages</span>
+        <button className={viewMode === "mail" && mobileView !== "folders" ? "selected" : ""} onClick={() => {
+          setMobileMenuOpen(false);
+          setViewMode("mail");
+          if (selectedMessageId) closeMessage(); else setMobileView("messages");
+        }}>
+          <List size={19} /><span>Mail</span>
         </button>
-        <button className={mobileView === "reader" ? "selected" : ""} onClick={() => setMobileView("reader")} disabled={!message}>
-          <Mail size={19} /><span>Reader</span>
+        <button className="mobile-compose-nav" onClick={() => openCompose()} disabled={readOnly}>
+          <span className="mobile-compose-icon"><MailPlus size={21} /></span><span>Compose</span>
+        </button>
+        <button className={viewMode === "calendar" ? "selected" : ""} onClick={() => {
+          setMobileMenuOpen(false);
+          setViewMode("calendar");
+        }}>
+          <CalendarDays size={19} /><span>Calendar</span>
+        </button>
+        <button className={mobileMenuOpen ? "selected" : ""} onClick={() => setMobileMenuOpen((open) => !open)} aria-expanded={mobileMenuOpen}>
+          <MoreHorizontal size={20} /><span>More</span>
+          {(reviewQueue?.totalItems ?? 0) > 0 && <span className="mobile-nav-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
         </button>
       </nav>
+
+      {mobileMenuOpen && (
+        <div className="mobile-action-backdrop" role="presentation" onMouseDown={() => setMobileMenuOpen(false)}>
+          <section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="More actions" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <strong>{session.user.displayName}</strong>
+                <span>{session.user.username} · {session.role}</span>
+              </div>
+              <button className="icon-button" onClick={() => setMobileMenuOpen(false)} aria-label="Close more actions"><X size={19} /></button>
+            </header>
+            <div className="mobile-action-grid">
+              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openDrafts(); }}><FileEdit size={20} /><span>Drafts</span></button>}
+              <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>
+              <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>
+              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
+              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>Admin</span>{pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
+              {electron && isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
+            </div>
+            <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>
+          </section>
+        </div>
+      )}
 
       <ImportDialog
         open={importOpen}
@@ -1791,8 +2171,12 @@ export function App() {
         open={createMailboxOpen}
         archive={selectedArchive}
         folders={folders}
+        initialParentId={createMailboxParentId}
         busy={createMailboxBusy}
-        onClose={() => setCreateMailboxOpen(false)}
+        onClose={() => {
+          setCreateMailboxOpen(false);
+          setCreateMailboxParentId(null);
+        }}
         onCreate={(name, parentId) => void createMailbox(name, parentId)}
       />
       <CombineArchiveDialog
@@ -1808,6 +2192,14 @@ export function App() {
         busy={combineMailboxBusy}
         onClose={() => setCombineMailboxSource(null)}
         onCombine={(targetFolderId) => void combineMailboxes(targetFolderId)}
+      />
+      <MailboxDropDialog
+        source={mailboxDrop?.source ?? null}
+        target={mailboxDrop?.target ?? null}
+        busy={mailboxDropBusy}
+        onClose={() => setMailboxDrop(null)}
+        onMerge={() => void organizeDroppedMailbox("merge")}
+        onMoveAsChild={() => void organizeDroppedMailbox("child")}
       />
       <GmailDialog
         open={gmailOpen}
@@ -1923,10 +2315,28 @@ export function App() {
           session={session}
           onClose={() => setSettingsOpen(false)}
           onSignedOut={signOutLocally}
+          onOpenGuide={() => {
+            setSettingsOpen(false);
+            setGuideOpen(true);
+          }}
+          onOpenDiagnostics={() => {
+            setSettingsOpen(false);
+            openDiagnostics();
+          }}
+          pendingDiagnosticCount={pendingDiagnosticCount}
           onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
           onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
           onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
           onNewsSettingsChanged={() => { if (api) void refreshNewsHeadlines(api); }}
+          onInboxTabSettingsChanged={(settings) => {
+            if (settings.archiveId !== selectedArchiveId) return;
+            setInboxTabSettings(settings);
+            const nextCategory = settings.tabs.some((tab) => tab.id === inboxCategory && tab.enabled)
+              ? inboxCategory
+              : "primary";
+            setInboxCategory(nextCategory);
+            if (nextCategory === inboxCategory) void loadMessages(false);
+          }}
         />
       )}
       <DiagnosticsDialog

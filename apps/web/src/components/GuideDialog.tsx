@@ -110,9 +110,9 @@ function GuideContent({ section }: { section: GuideSection }) {
         <p>The same Desktop OAuth configuration can authorize multiple Gmail accounts. For each account, choose a new archive, create a mailbox in an existing archive, or merge incoming mail into an existing mailbox. Accounts that share a mailbox retain separate sync and send identities.</p>
         <p>A connection created by an older read-only version must be authorized again before it can send or mirror mailbox actions.</p>
         <h4>Why Gmail API instead of POP or IMAP?</h4>
-        <p>Google requires a broad full-mail permission for POP, IMAP, and SMTP. The Gmail API provides narrower permissions that enforce pull-only synchronization and sending without remote deletion access.</p>
+        <p>Google requires a broad full-mail permission for POP, IMAP, and SMTP. The Gmail API provides narrower read, send, and optional mailbox-modify permissions without granting permanent deletion access.</p>
         <h4>Unread state</h4>
-        <p>New Gmail messages initially use Gmail's unread label. After import, read and unread changes are local to Archive Mail and are not pushed back to Gmail.</p>
+        <p>New Gmail messages initially use Gmail's unread label. When mailbox action sync is enabled, later read and unread changes are applied to Gmail first; otherwise they remain local.</p>
         <h4>Disconnect</h4>
         <p>Disconnecting revokes the Google token. Messages and attachments already imported into local storage remain available.</p>
       </>
@@ -125,8 +125,11 @@ function GuideContent({ section }: { section: GuideSection }) {
         <p>Rename changes only the local display name. Archive Mail never rewrites an original PST or MBOX.</p>
         <ul>
           <li>Starred is a smart mailbox. Starring a message keeps it in its original mailbox while also showing it in Starred.</li>
+          <li>Check multiple messages, then drag any checked row onto a mailbox to move the entire selection together.</li>
           <li>Combine archives to move folders, messages, state, search rows, and attachment references into another completed archive.</li>
           <li>Combine mailboxes within one archive to move a mailbox tree into another mailbox.</li>
+          <li>Drag one mailbox onto another to choose Merge or Move as child. Moving as a child preserves the mailbox tree and messages.</li>
+          <li>The Folders plus button defaults to the selected mailbox as the parent, making child mailbox creation quicker.</li>
           <li>Delete removes local mail and unreferenced attachment blobs. It does not delete anything from Gmail.</li>
         </ul>
       </>
@@ -193,7 +196,7 @@ function GuideContent({ section }: { section: GuideSection }) {
         <span>Source archive or Gmail</span><b>1</b><span>Parse and normalize</span><b>2</b><span>SQLite and attachment blobs</span><b>3</b><span>Browse, search, and organize</span>
       </div>
       <h4>What remains remote?</h4>
-      <p>Gmail sync only pulls copies. Local reads, tags, notes, mailbox changes, archive deletion, and merging do not modify the Gmail mailbox.</p>
+      <p>Gmail content is stored locally. Tags, notes, archive deletion, and merging remain local. If mailbox action sync is enabled, read, star, Archive, folder, Spam, and Trash changes are also applied to connected Gmail messages.</p>
     </>
   );
 }

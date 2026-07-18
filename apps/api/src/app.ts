@@ -20,6 +20,8 @@ import {
   archiveMergeSchema,
   authLoginSchema,
   bulkMoveMessagesSchema,
+  bulkFilingSuggestionRequestSchema,
+  bulkFolderMoveSchema,
   calendarEventInputSchema,
   clientDiagnosticSchema,
   databaseSettingsPatchSchema,
@@ -32,9 +34,11 @@ import {
   gmailSendRequestSchema,
   gmailSyncRequestSchema,
   importOptionsSchema,
+  inboxTabSettingsUpdateSchema,
   localMessageStatePatchSchema,
   mailboxCreateSchema,
   mailboxMergeSchema,
+  mailboxMoveSchema,
   messageActionSuggestionRequestSchema,
   messageCalendarEventCreateSchema,
   messageDraftReplyRequestSchema,
@@ -59,6 +63,7 @@ import {
   type AiJob,
   type AiProviderId,
   type BulkMoveDestination,
+  type BulkFolderMoveResult,
   type BulkMoveResult,
   type DiagnosticCategory,
   type DiagnosticLevel,
@@ -635,6 +640,39 @@ export class EmailApiRuntime {
       }
     );
 
+    this.app.post<{ Params: { folderId: string }; Body: unknown }>(
+      "/api/folders/:folderId/move",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = mailboxMoveSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: "Choose a valid parent mailbox" });
+        try {
+          const source = this.database.getFolder(request.params.folderId);
+          const destination = parsed.data.targetParentId
+            ? this.database.getFolder(parsed.data.targetParentId)
+            : null;
+          const result = this.database.moveFolder(request.params.folderId, parsed.data.targetParentId);
+          this.imports.invalidateFolderCache(result.mailbox.archiveId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: `Mailbox moved: ${source?.path ?? request.params.folderId}`,
+            archiveId: result.mailbox.archiveId,
+            sourceName: source?.name ?? null,
+            context: {
+              destinationPath: destination?.path ?? null,
+              path: result.mailbox.path,
+              movedMailboxes: result.movedMailboxes
+            }
+          });
+          return result;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Mailbox could not be moved";
+          return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
+        }
+      }
+    );
+
     this.app.delete<{ Params: { folderId: string } }>(
       "/api/folders/:folderId",
       async (request, reply) => {
@@ -653,6 +691,7 @@ export class EmailApiRuntime {
       Querystring: {
         archiveId?: string;
         folderId?: string;
+        isRead?: string;
         starred?: string;
         inboxCategory?: string;
         cursor?: string;
@@ -667,6 +706,7 @@ export class EmailApiRuntime {
       return this.database.listMessages({
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
+        isRead: optionalBoolean(request.query.isRead),
         starred: optionalBoolean(request.query.starred),
         inboxCategory,
         cursor: request.query.cursor,
@@ -675,20 +715,84 @@ export class EmailApiRuntime {
     });
 
     this.app.get<{
-      Querystring: { archiveId?: string; folderId?: string };
+      Querystring: { archiveId?: string; folderId?: string; isRead?: string };
     }>("/api/messages/category-counts", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
       return this.database.countInboxCategories({
         archiveId: request.query.archiveId,
-        folderId: request.query.folderId
+        folderId: request.query.folderId,
+        isRead: optionalBoolean(request.query.isRead)
       });
     });
+
+    this.app.get<{ Querystring: { archiveId?: string } }>("/api/inbox-tabs", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      const archiveId = request.query.archiveId?.trim();
+      if (!archiveId) return reply.code(400).send({ error: "archiveId is required" });
+      try {
+        return this.database.getInboxTabSettings(archiveId);
+      } catch (error) {
+        return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+      }
+    });
+
+    this.app.patch<{ Params: { archiveId: string }; Body: unknown }>(
+      "/api/admin/inbox-tabs/:archiveId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = inboxTabSettingsUpdateSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid Inbox tab settings" });
+        }
+        try {
+          const settings = this.database.updateInboxTabSettings(request.params.archiveId, parsed.data);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: "Inbox tab configuration saved",
+            archiveId: request.params.archiveId,
+            context: {
+              enabledTabs: settings.tabs.filter((tab) => tab.enabled).map((tab) => tab.id),
+              aiEnabled: settings.aiEnabled,
+              aiConfidenceThreshold: settings.aiConfidenceThreshold
+            }
+          });
+          return settings;
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+        }
+      }
+    );
+
+    this.app.post<{ Params: { archiveId: string } }>(
+      "/api/admin/inbox-tabs/:archiveId/reclassify",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        try {
+          const result = this.database.reclassifyInboxMessages(request.params.archiveId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: "Inbox messages reclassified",
+            archiveId: request.params.archiveId,
+            context: {
+              scannedMessages: result.scannedMessages,
+              changedMessages: result.changedMessages
+            }
+          });
+          return result;
+        } catch (error) {
+          return reply.code(404).send({ error: error instanceof Error ? error.message : "Archive not found" });
+        }
+      }
+    );
 
     this.app.get<{
       Querystring: {
         q?: string;
         archiveId?: string;
         folderId?: string;
+        isRead?: string;
         starred?: string;
         inboxCategory?: string;
         from?: string;
@@ -715,6 +819,7 @@ export class EmailApiRuntime {
         q: query,
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
+        isRead: optionalBoolean(request.query.isRead),
         starred: optionalBoolean(request.query.starred),
         inboxCategory,
         from: request.query.from,
@@ -905,6 +1010,66 @@ export class EmailApiRuntime {
       return result;
     });
 
+    this.app.post<{ Body: unknown }>("/api/messages/bulk-move-to-folder", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = bulkFolderMoveSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose messages and a destination mailbox" });
+      }
+      const folder = this.database.getFolder(parsed.data.folderId);
+      if (!folder) return reply.code(404).send({ error: "Destination mailbox not found" });
+      const pendingMessageIds: string[] = [];
+      let alreadyThere = 0;
+      let failed = 0;
+      for (const messageId of parsed.data.messageIds) {
+        const message = this.database.getMessage(messageId);
+        if (!message || message.archiveId !== folder.archiveId) {
+          failed += 1;
+        } else if (message.folderId === folder.id) {
+          alreadyThere += 1;
+        } else {
+          pendingMessageIds.push(messageId);
+        }
+      }
+      try {
+        await this.gmail.syncMessagesMove(pendingMessageIds, folder.id);
+      } catch (error) {
+        return this.mailboxActionErrorReply(reply, error, "Selected messages could not be moved");
+      }
+      let moved = 0;
+      for (const messageId of pendingMessageIds) {
+        try {
+          this.database.moveMessage(messageId, folder.id);
+          moved += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const result: BulkFolderMoveResult = {
+        folderId: folder.id,
+        folderPath: folder.path,
+        moved,
+        alreadyThere,
+        failed
+      };
+      this.database.recordDiagnostic({
+        level: failed > 0 ? "warning" : "info",
+        category: "system",
+        message: `Bulk move filed ${moved} message${moved === 1 ? "" : "s"} in ${folder.path}`,
+        archiveId: folder.archiveId,
+        context: {
+          operation: "bulk_move_to_folder",
+          folderId: folder.id,
+          folderPath: folder.path,
+          requested: parsed.data.messageIds.length,
+          moved,
+          alreadyThere,
+          failed
+        }
+      });
+      return result;
+    });
+
     this.app.post<{ Params: { messageId: string } }>(
       "/api/messages/:messageId/sender-folder",
       async (request, reply) => {
@@ -1020,6 +1185,22 @@ export class EmailApiRuntime {
         }
       }
     );
+
+    this.app.post<{ Body: unknown }>("/api/messages/ai/filing-suggestion", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = bulkFilingSuggestionRequestSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose messages to file" });
+      }
+      try {
+        return await this.ai.suggestFilingFolder(parsed.data.messageIds);
+      } catch (error) {
+        if (error instanceof AiMessageNotFoundError) return reply.code(404).send({ error: error.message });
+        if (error instanceof AiConfigurationError) return reply.code(503).send({ error: error.message });
+        if (error instanceof AiBudgetError) return reply.code(429).send({ error: error.message });
+        return reply.code(502).send({ error: error instanceof Error ? error.message : "AI mailbox suggestion failed" });
+      }
+    });
 
     this.app.post<{ Params: { messageId: string }; Body: unknown }>(
       "/api/messages/:messageId/ai/draft-reply",
@@ -2307,6 +2488,35 @@ export class EmailApiRuntime {
         return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
       }
     });
+
+    this.app.patch<{ Params: { ruleId: string }; Body: unknown }>(
+      "/api/admin/sender-filing/rules/:ruleId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = messageMoveSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: "Choose a valid destination mailbox" });
+        try {
+          const result = this.database.updateSenderFilingRuleFolder(request.params.ruleId, parsed.data.folderId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: `Sender rule moved to ${result.folderPath}: ${result.senderAddress}`,
+            archiveId: result.status.archiveId,
+            context: {
+              operation: "sender_filing_destination_updated",
+              ruleId: request.params.ruleId,
+              folderId: parsed.data.folderId,
+              folderPath: result.folderPath,
+              movedMessages: result.movedMessages
+            }
+          });
+          return result.status;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Sender rule could not be updated";
+          return reply.code(message.includes("not found") ? 404 : 400).send({ error: message });
+        }
+      }
+    );
 
     this.app.delete<{ Querystring: { archiveId?: string } }>("/api/admin/sender-filing", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;

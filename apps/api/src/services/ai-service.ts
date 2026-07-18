@@ -12,6 +12,7 @@ import type {
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
   MessageDetail,
+  MessageFilingSuggestion,
   SmartMailRuleSuggestion
 } from "@email-client/shared";
 import { AI_AGENT_SKILL_IDS } from "@email-client/shared";
@@ -76,6 +77,13 @@ export class AiService {
     this.requireConfiguredFor(agent.provider, true);
     const message = this.database.getMessage(messageId);
     if (!message) throw new AiMessageNotFoundError("Message not found");
+    const inboxTabPrompt = (agent.skills.length === 0 || agent.skills.includes("categorize"))
+      ? this.database.inboxTabAiPrompt(message.archiveId)
+      : null;
+    const effectiveAgent: AiAgentConfig = {
+      ...agent,
+      prompt: [agent.prompt, inboxTabPrompt].filter(Boolean).join("\n\n")
+    };
     const conversation = this.database.listConversationMessages(messageId);
     const contentHash = conversationContentHash(conversation);
     const relatedAnalyses = this.database.listRelatedMessageAnalyses(messageId);
@@ -83,12 +91,14 @@ export class AiService {
     const analysis = this.database.getMessageAnalysis(messageId);
     const latest = this.database.getLatestAiJob(messageId);
 
-    const promptVersion = requestedAgent ? configuredPromptVersion(agent) : AI_PROMPT_VERSION;
+    const promptVersion = requestedAgent || inboxTabPrompt
+      ? configuredPromptVersion(effectiveAgent)
+      : AI_PROMPT_VERSION;
     if (analysis
       && latest?.status === "completed"
       && analysis.contentHash === contentHash
       && analysis.contextHash === contextHash
-      && analysis.model === agent.model
+      && analysis.model === effectiveAgent.model
       && analysis.promptVersion === promptVersion) {
       return { job: latest, analysis };
     }
@@ -102,10 +112,10 @@ export class AiService {
         messageId,
         scheduleId: schedule?.scheduleId ?? null,
         scheduleRunId: schedule?.scheduleRunId ?? null,
-        provider: agent.provider,
-        model: agent.model,
-        skills: agent.skills,
-        prompt: agent.prompt,
+        provider: effectiveAgent.provider,
+        model: effectiveAgent.model,
+        skills: effectiveAgent.skills,
+        prompt: effectiveAgent.prompt,
         promptVersion,
         contentHash
       });
@@ -124,9 +134,9 @@ export class AiService {
         messageId,
         scheduleId: schedule?.scheduleId ?? null,
         scheduleRunId: schedule?.scheduleRunId ?? null,
-        provider: agent.provider,
-        model: agent.model,
-        skills: agent.skills
+        provider: effectiveAgent.provider,
+        model: effectiveAgent.model,
+        skills: effectiveAgent.skills
       }
     });
     this.kick();
@@ -355,6 +365,96 @@ export class AiService {
     }
   }
 
+  async suggestFilingFolder(messageIds: string[]): Promise<MessageFilingSuggestion> {
+    const target = this.requireConfiguredFor(this.settings.current().provider, true);
+    const messages = messageIds.map((messageId) => this.database.getMessage(messageId));
+    if (messages.some((message) => !message)) throw new AiMessageNotFoundError("One or more selected messages no longer exist");
+    const selectedMessages = messages as MessageDetail[];
+    const archiveId = selectedMessages[0]!.archiveId;
+    if (selectedMessages.some((message) => message.archiveId !== archiveId)) {
+      throw new AiConfigurationError("AI filing can only group messages from one archive");
+    }
+    const folders = this.database.listFolders(archiveId);
+    if (folders.length === 0) throw new AiConfigurationError("The selected archive has no mailboxes");
+    if (!this.database.consumeAiRequest(target.dailyRequestLimit, target.monthlyRequestLimit)) {
+      throw new AiBudgetError(
+        `AI request limit reached (${target.dailyRequestLimit}/day or ${target.monthlyRequestLimit}/month)`
+      );
+    }
+    const provider = this.providerFactory(target.provider, target.apiKey!, target.model);
+    if (!provider.suggestFilingFolder) {
+      throw new AiConfigurationError("The selected AI provider does not support mailbox suggestions");
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45_000);
+    try {
+      const result = await provider.suggestFilingFolder(
+        selectedMessages.map((message) => {
+          const analysis = this.database.getMessageAnalysis(message.id);
+          return {
+            id: message.id,
+            currentFolderPath: message.folderPath,
+            sender: message.sender,
+            subject: message.subject,
+            receivedAt: message.receivedAt,
+            preview: message.preview.slice(0, 500),
+            analysis: analysis ? {
+              summary: analysis.summary,
+              categories: analysis.categories,
+              priority: analysis.priority,
+              spamProbability: analysis.spamProbability,
+              phishingProbability: analysis.phishingProbability
+            } : null
+          };
+        }),
+        folders.map((folder) => folder.path),
+        controller.signal
+      );
+      this.database.recordAiTokenUsage(result.usage.inputTokens, result.usage.outputTokens);
+      const requestedPath = result.suggestion.targetFolderPath?.trim().toLowerCase() ?? null;
+      const folder = requestedPath
+        ? folders.find((candidate) => candidate.path.trim().toLowerCase() === requestedPath) ?? null
+        : null;
+      const alreadyFiled = folder
+        ? selectedMessages.every((message) => message.folderId === folder.id)
+        : false;
+      const suggestion: MessageFilingSuggestion = {
+        folderId: alreadyFiled ? null : folder?.id ?? null,
+        folderPath: alreadyFiled ? null : folder?.path ?? null,
+        reason: alreadyFiled
+          ? `All selected messages are already in ${folder!.path}.`
+          : folder
+            ? result.suggestion.reason
+            : requestedPath
+              ? "AI did not return an available mailbox. Try again or move the messages manually."
+              : result.suggestion.reason,
+        confidence: folder && !alreadyFiled ? result.suggestion.confidence : 0,
+        messageCount: selectedMessages.length,
+        provider: target.provider,
+        model: target.model
+      };
+      this.database.recordDiagnostic({
+        level: "info",
+        category: "ai",
+        message: suggestion.folderPath ? "AI mailbox suggestion created for review" : "AI found no single mailbox for the selection",
+        archiveId,
+        context: {
+          operation: "filing_suggestion",
+          messageCount: selectedMessages.length,
+          folderPath: suggestion.folderPath,
+          confidence: suggestion.confidence,
+          provider: target.provider,
+          model: target.model,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens
+        }
+      });
+      return suggestion;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async suggestSmartMailRule(archiveId: string, instruction: string): Promise<SmartMailRuleSuggestion> {
     const target = this.requireConfiguredFor(this.settings.current().provider, true);
     const folders = this.database.listFolders(archiveId);
@@ -573,6 +673,9 @@ export class AiService {
         });
         return;
       }
+      const inboxTabPrompt = (job.skills.length === 0 || job.skills.includes("categorize"))
+        ? this.database.inboxTabAiPrompt(message.archiveId)
+        : null;
       const result = await provider.analyze(
         message,
         controller.signal,
@@ -590,6 +693,13 @@ export class AiService {
         threadMessageCount: conversation.length,
         ...result.analysis
       });
+      const assignedInboxTab = inboxTabPrompt
+        ? this.database.applyAiInboxCategory(
+            job.messageId,
+            result.analysis.categories,
+            result.analysis.confidence
+          )
+        : null;
       this.database.completeAiJob(job.id);
       this.database.recordDiagnostic({
         level: "info",
@@ -604,6 +714,7 @@ export class AiService {
           threadMessages: conversation.length,
           priorThreadAnalyses: relatedAnalyses.sameThread.length,
           priorSenderAnalyses: relatedAnalyses.sameSender.length,
+          assignedInboxTab,
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens
         }

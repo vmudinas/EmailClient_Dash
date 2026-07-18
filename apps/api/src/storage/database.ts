@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import BetterSqlite3, { type Database as SqliteDatabase } from "better-sqlite3";
-import { classifyInboxCategory } from "../lib/message-category.js";
+import { classifyInboxCategory, classifyInboxCategoryWithTabs } from "../lib/message-category.js";
 import type {
   AccountRole,
   AdminInsights,
@@ -51,9 +51,14 @@ import type {
   ImportSourceType,
   InboxCategory,
   InboxCategoryCounts,
+  InboxTabDefinition,
+  InboxTabReclassifyResult,
+  InboxTabSettings,
+  InboxTabSettingsUpdate,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
+  MailboxMoveResult,
   MessageDetail,
   MessageAnalysis,
   MessageAnalysisOutput,
@@ -84,6 +89,7 @@ import type {
   UploadStatus,
   UserSummary
 } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import type { StoredBlob } from "./blob-store.js";
 
 const EMPTY_STATE: LocalMessageState = {
@@ -182,6 +188,12 @@ export interface GmailMessageMutationTarget {
   currentFolderId: string;
   currentFolderPath: string;
   labelIds: string[];
+}
+
+export interface GmailMessageFolderState {
+  messageId: string;
+  folderId: string;
+  folderPath: string;
 }
 
 export interface CalendarAccountCreateInput {
@@ -381,6 +393,7 @@ type Row = Record<string, unknown>;
 export class EmailDatabase {
   readonly path: string;
   private readonly db: SqliteDatabase;
+  private readonly inboxTabSettingsCache = new Map<string, InboxTabSettings>();
 
   constructor(dataDir: string, filename = "archive-mail.sqlite") {
     this.path = resolve(dataDir, filename);
@@ -1482,6 +1495,63 @@ export class EmailDatabase {
       } finally {
         this.db.pragma("foreign_keys = ON");
       }
+    }
+
+    const messageListPerformanceVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (messageListPerformanceVersion < 29) {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS messages_folder_sort_idx
+          ON messages(
+            folder_id,
+            CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+            COALESCE(received_at, sent_at) DESC,
+            created_at DESC,
+            id DESC
+          );
+        CREATE INDEX IF NOT EXISTS messages_folder_category_sort_idx
+          ON messages(
+            folder_id,
+            inbox_category,
+            CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+            COALESCE(received_at, sent_at) DESC,
+            created_at DESC,
+            id DESC
+          );
+        CREATE INDEX IF NOT EXISTS messages_archive_sort_idx
+          ON messages(
+            archive_id,
+            CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+            COALESCE(received_at, sent_at) DESC,
+            created_at DESC,
+            id DESC
+          );
+        PRAGMA user_version = 29;
+      `);
+    }
+
+    const configurableInboxTabsVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (configurableInboxTabsVersion < 30) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS inbox_tab_settings (
+          archive_id TEXT PRIMARY KEY,
+          tabs_json TEXT NOT NULL,
+          ai_enabled INTEGER NOT NULL DEFAULT 0,
+          ai_confidence_threshold REAL NOT NULL DEFAULT 0.8
+            CHECK(ai_confidence_threshold >= 0 AND ai_confidence_threshold <= 1),
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(archive_id) REFERENCES archives(id) ON DELETE CASCADE
+        );
+        PRAGMA user_version = 30;
+      `);
+    }
+
+    const readFilterVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (readFilterVersion < 31) {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS message_state_read_idx
+          ON message_state(is_read, message_id);
+        PRAGMA user_version = 31;
+      `);
     }
   }
 
@@ -3561,6 +3631,79 @@ export class EmailDatabase {
     };
   }
 
+  updateSenderFilingRuleFolder(ruleId: string, targetFolderId: string): {
+    status: SenderFilingStatus;
+    movedMessages: number;
+    senderAddress: string;
+    folderPath: string;
+  } {
+    const update = this.db.transaction(() => {
+      const rule = this.db.prepare(`
+        SELECT id, archive_id, sender_address, folder_id
+        FROM sender_filing_rules WHERE id = ?
+      `).get(ruleId) as Row | undefined;
+      if (!rule) throw new Error("Sender rule not found");
+
+      const archiveId = String(rule.archive_id);
+      const senderAddress = String(rule.sender_address);
+      const previousFolderId = String(rule.folder_id);
+      const target = this.db.prepare(`
+        SELECT id, name, path FROM folders WHERE id = ? AND archive_id = ?
+      `).get(targetFolderId, archiveId) as Row | undefined;
+      if (!target) throw new Error("Destination mailbox must belong to the sender rule archive");
+
+      const folderPath = String(target.path);
+      const ruleType = String(target.name).trim().toLowerCase() === "spam" ? "spam" : "folder";
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE sender_filing_rules
+        SET folder_id = ?, rule_type = ?, updated_at = ?
+        WHERE id = ?
+      `).run(targetFolderId, ruleType, now, ruleId);
+
+      this.db.prepare(`
+        UPDATE message_fts SET folder = ?
+        WHERE message_id IN (
+          SELECT m.id FROM messages m
+          JOIN folders source_folder ON source_folder.id = m.folder_id
+          WHERE m.archive_id = ?
+            AND lower(trim(m.sender_address)) = ?
+            AND m.folder_id != ?
+            AND (m.folder_id = ? OR lower(trim(source_folder.name)) = 'inbox')
+        )
+      `).run(folderPath, archiveId, senderAddress, targetFolderId, previousFolderId);
+      const movedMessages = this.db.prepare(`
+        UPDATE messages SET folder_id = ?
+        WHERE archive_id = ?
+          AND lower(trim(sender_address)) = ?
+          AND folder_id != ?
+          AND (
+            folder_id = ? OR folder_id IN (
+              SELECT id FROM folders WHERE archive_id = ? AND lower(trim(name)) = 'inbox'
+            )
+          )
+      `).run(
+        targetFolderId,
+        archiveId,
+        senderAddress,
+        targetFolderId,
+        previousFolderId,
+        archiveId
+      ).changes;
+
+      this.db.prepare(`
+        UPDATE folders SET message_count = (
+          SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
+        ) WHERE archive_id = ?
+      `).run(archiveId);
+
+      return { archiveId, movedMessages, senderAddress, folderPath };
+    });
+
+    const result = update();
+    return { ...result, status: this.getSenderFilingStatus(result.archiveId) };
+  }
+
   organizeTopSenderFolders(archiveId: string, limit = 20): SenderFilingStatus {
     const ruleLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
     const organize = this.db.transaction(() => {
@@ -4151,6 +4294,21 @@ export class EmailDatabase {
     return targets;
   }
 
+  getGmailMessageFolderStateBySourceKey(archiveId: string, sourceKey: string): GmailMessageFolderState | null {
+    const row = this.db.prepare(`
+      SELECT m.id, m.folder_id, f.path AS folder_path
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.archive_id = ? AND m.source_key = ?
+    `).get(archiveId, sourceKey) as Row | undefined;
+    if (!row) return null;
+    return {
+      messageId: String(row.id),
+      folderId: String(row.folder_id),
+      folderPath: String(row.folder_path)
+    };
+  }
+
   listSenderMessageIds(messageId: string, inboxAndSelectedOnly = false): string[] {
     const source = this.db.prepare(`
       SELECT archive_id, lower(trim(sender_address)) AS sender_address
@@ -4442,6 +4600,91 @@ export class EmailDatabase {
     return rename();
   }
 
+  moveFolder(id: string, targetParentId: string | null): MailboxMoveResult {
+    const move = this.db.transaction(() => {
+      const folderRow = this.db.prepare("SELECT * FROM folders WHERE id = ?").get(id) as Row | undefined;
+      if (!folderRow) throw new Error("Mailbox not found");
+      const archiveId = String(folderRow.archive_id);
+      const archiveRow = this.db.prepare("SELECT status FROM archives WHERE id = ?")
+        .get(archiveId) as Row | undefined;
+      if (!archiveRow || !["ready", "ready_with_errors"].includes(String(archiveRow.status))) {
+        throw new Error("Wait for the archive import to finish before moving this mailbox");
+      }
+      if (this.hasActiveGmailSync([archiveId])) {
+        throw new Error("Wait for Gmail sync to finish before moving this mailbox");
+      }
+      if (targetParentId === id) {
+        throw new Error("A mailbox cannot be moved into itself");
+      }
+
+      let parentPath = "";
+      if (targetParentId) {
+        const parent = this.db.prepare("SELECT archive_id, path FROM folders WHERE id = ?")
+          .get(targetParentId) as Row | undefined;
+        if (!parent || String(parent.archive_id) !== archiveId) {
+          throw new Error("Parent mailbox not found in this archive");
+        }
+        parentPath = String(parent.path);
+      }
+
+      const oldPath = String(folderRow.path);
+      if (parentPath.startsWith(`${oldPath}/`)) {
+        throw new Error("A mailbox cannot be moved into one of its child mailboxes");
+      }
+      const newPath = parentPath ? `${parentPath}/${String(folderRow.name)}` : String(folderRow.name);
+      if (newPath === oldPath) {
+        return { mailbox: this.getFolder(id)!, movedMailboxes: 0 };
+      }
+
+      const affected = this.db.prepare(`
+        SELECT id, path FROM folders
+        WHERE archive_id = ?
+          AND (path = ? OR substr(path, 1, length(?) + 1) = ? || '/')
+        ORDER BY length(path), path
+      `).all(archiveId, oldPath, oldPath, oldPath) as Row[];
+      const affectedIds = new Set(affected.map((row) => String(row.id)));
+      const replacements = affected.map((row) => ({
+        id: String(row.id),
+        path: `${newPath}${String(row.path).slice(oldPath.length)}`
+      }));
+
+      for (const replacement of replacements) {
+        const collision = this.db.prepare(`
+          SELECT id FROM folders WHERE archive_id = ? AND path = ?
+        `).get(archiveId, replacement.path) as Row | undefined;
+        if (collision && !affectedIds.has(String(collision.id))) {
+          throw new Error(`A mailbox named "${String(folderRow.name)}" already exists there`);
+        }
+      }
+
+      const temporaryPrefix = `__move_${randomUUID()}`;
+      affected.forEach((row, index) => {
+        this.db.prepare("UPDATE folders SET path = ? WHERE id = ?")
+          .run(`${temporaryPrefix}_${index}`, row.id);
+      });
+      this.db.prepare("UPDATE folders SET parent_id = ? WHERE id = ?").run(targetParentId, id);
+      for (const replacement of replacements) {
+        this.db.prepare("UPDATE folders SET path = ? WHERE id = ?")
+          .run(replacement.path, replacement.id);
+      }
+
+      const placeholders = replacements.map(() => "?").join(", ");
+      this.db.prepare(`
+        UPDATE message_fts
+        SET folder = (
+          SELECT f.path FROM messages m
+          JOIN folders f ON f.id = m.folder_id
+          WHERE m.id = message_fts.message_id
+        )
+        WHERE message_id IN (
+          SELECT id FROM messages WHERE folder_id IN (${placeholders})
+        )
+      `).run(...replacements.map((replacement) => replacement.id));
+      return { mailbox: this.getFolder(id)!, movedMailboxes: replacements.length };
+    });
+    return move();
+  }
+
   deleteFolder(id: string): string[] {
     const orphanedPaths: string[] = [];
     const remove = this.db.transaction(() => {
@@ -4560,12 +4803,17 @@ export class EmailDatabase {
       headers: input.headers,
       referencedKey
     });
-    const inboxCategory = input.inboxCategory ?? classifyInboxCategory({
+    const categoryInput = {
       senderAddress: input.sender.address,
       subject: input.subject,
       bodyText: input.bodyText,
       headers: input.headers
-    });
+    };
+    const inboxCategory = classifyInboxCategoryWithTabs(
+      categoryInput,
+      this.getInboxTabSettings(input.archiveId).tabs,
+      input.inboxCategory ?? classifyInboxCategory(categoryInput)
+    );
 
     const insert = this.db.transaction(() => {
       const result = this.db.prepare(`
@@ -4693,6 +4941,7 @@ export class EmailDatabase {
   listMessages(options: {
     archiveId?: string;
     folderId?: string;
+    isRead?: boolean;
     starred?: boolean;
     inboxCategory?: InboxCategory;
     cursor?: string;
@@ -4709,6 +4958,10 @@ export class EmailDatabase {
     if (options.folderId) {
       conditions.push("m.folder_id = ?");
       params.push(options.folderId);
+    }
+    if (options.isRead !== undefined) {
+      conditions.push("COALESCE(s.is_read, 0) = ?");
+      params.push(options.isRead ? 1 : 0);
     }
     if (options.starred !== undefined) {
       conditions.push("COALESCE(s.is_starred, 0) = ?");
@@ -4735,22 +4988,28 @@ export class EmailDatabase {
     return { items, nextCursor: hasMore ? encodeOffset(offset + limit) : null };
   }
 
-  countInboxCategories(options: { archiveId?: string; folderId?: string }): InboxCategoryCounts {
+  countInboxCategories(options: { archiveId?: string; folderId?: string; isRead?: boolean }): InboxCategoryCounts {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (options.archiveId) {
-      conditions.push("archive_id = ?");
+      conditions.push("m.archive_id = ?");
       params.push(options.archiveId);
     }
     if (options.folderId) {
-      conditions.push("folder_id = ?");
+      conditions.push("m.folder_id = ?");
       params.push(options.folderId);
+    }
+    if (options.isRead !== undefined) {
+      conditions.push("COALESCE(s.is_read, 0) = ?");
+      params.push(options.isRead ? 1 : 0);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.db.prepare(`
-      SELECT inbox_category, COUNT(*) AS count FROM messages
+      SELECT m.inbox_category, COUNT(*) AS count
+      FROM messages m
+      LEFT JOIN message_state s ON s.message_id = m.id
       ${where}
-      GROUP BY inbox_category
+      GROUP BY m.inbox_category
     `).all(...params) as Row[];
     const counts: InboxCategoryCounts = {
       primary: 0,
@@ -4768,10 +5027,116 @@ export class EmailDatabase {
     return counts;
   }
 
+  getInboxTabSettings(archiveId: string): InboxTabSettings {
+    const cached = this.inboxTabSettingsCache.get(archiveId);
+    if (cached) return cloneInboxTabSettings(cached);
+    const archiveExists = this.db.prepare("SELECT 1 FROM archives WHERE id = ?").get(archiveId);
+    if (!archiveExists) throw new Error("Archive not found");
+    const row = this.db.prepare("SELECT * FROM inbox_tab_settings WHERE archive_id = ?").get(archiveId) as Row | undefined;
+    const settings: InboxTabSettings = {
+      archiveId,
+      tabs: normalizeInboxTabs(row ? parseJson<InboxTabDefinition[]>(row.tabs_json, []) : []),
+      aiEnabled: Boolean(row?.ai_enabled),
+      aiConfidenceThreshold: row ? Number(row.ai_confidence_threshold) : 0.8,
+      updatedAt: row ? String(row.updated_at) : null
+    };
+    this.inboxTabSettingsCache.set(archiveId, settings);
+    return cloneInboxTabSettings(settings);
+  }
+
+  updateInboxTabSettings(archiveId: string, input: InboxTabSettingsUpdate): InboxTabSettings {
+    if (!this.getArchive(archiveId)) throw new Error("Archive not found");
+    const now = new Date().toISOString();
+    const tabs = [...input.tabs].sort((left, right) => left.position - right.position);
+    this.db.prepare(`
+      INSERT INTO inbox_tab_settings (
+        archive_id, tabs_json, ai_enabled, ai_confidence_threshold, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(archive_id) DO UPDATE SET
+        tabs_json = excluded.tabs_json,
+        ai_enabled = excluded.ai_enabled,
+        ai_confidence_threshold = excluded.ai_confidence_threshold,
+        updated_at = excluded.updated_at
+    `).run(archiveId, JSON.stringify(tabs), input.aiEnabled ? 1 : 0, input.aiConfidenceThreshold, now);
+    this.inboxTabSettingsCache.delete(archiveId);
+    return this.getInboxTabSettings(archiveId);
+  }
+
+  reclassifyInboxMessages(archiveId: string): InboxTabReclassifyResult {
+    const settings = this.getInboxTabSettings(archiveId);
+    const categoryBatch = this.db.prepare(`
+      SELECT m.id, m.inbox_category, m.sender_address, m.subject,
+        substr(m.body_text, 1, 2000) AS body_text, m.headers_json
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.archive_id = ? AND lower(trim(f.name)) = 'inbox' AND m.id > ?
+      ORDER BY m.id
+      LIMIT 500
+    `);
+    const update = this.db.prepare("UPDATE messages SET inbox_category = ? WHERE id = ?");
+    let scannedMessages = 0;
+    let changedMessages = 0;
+    const reclassifyBatch = this.db.transaction((rows: Row[]) => {
+      for (const row of rows) {
+        const category = classifyInboxCategoryWithTabs({
+          senderAddress: String(row.sender_address ?? ""),
+          subject: String(row.subject ?? ""),
+          bodyText: String(row.body_text ?? ""),
+          headers: parseJson<Record<string, string>>(row.headers_json, {})
+        }, settings.tabs);
+        if (category !== String(row.inbox_category)) {
+          update.run(category, String(row.id));
+          changedMessages += 1;
+        }
+      }
+    });
+    let lastMessageId = "";
+    while (true) {
+      const rows = categoryBatch.all(archiveId, lastMessageId) as Row[];
+      if (rows.length === 0) break;
+      reclassifyBatch(rows);
+      scannedMessages += rows.length;
+      lastMessageId = String(rows.at(-1)?.id ?? lastMessageId);
+    }
+    return { settings, scannedMessages, changedMessages };
+  }
+
+  inboxTabAiPrompt(archiveId: string): string | null {
+    const settings = this.getInboxTabSettings(archiveId);
+    if (!settings.aiEnabled) return null;
+    const choices = settings.tabs
+      .filter((tab) => tab.enabled)
+      .sort((left, right) => left.position - right.position)
+      .map((tab) => `${tab.id} (${tab.label}): ${tab.description}`)
+      .join("; ");
+    return [
+      "Inbox tab assignment is enabled for this mailbox.",
+      `Classify the email into exactly one enabled Inbox tab: ${choices}.`,
+      "Return that tab's exact ID as the only value in categories.",
+      `Only a confidence of ${settings.aiConfidenceThreshold} or higher will change the saved Inbox tab.`
+    ].join(" ");
+  }
+
+  applyAiInboxCategory(messageId: string, categories: readonly string[], confidence: number): InboxCategory | null {
+    const row = this.db.prepare(`
+      SELECT m.archive_id, m.inbox_category, f.name AS folder_name
+      FROM messages m JOIN folders f ON f.id = m.folder_id
+      WHERE m.id = ?
+    `).get(messageId) as Row | undefined;
+    if (!row || String(row.folder_name).trim().toLowerCase() !== "inbox") return null;
+    const settings = this.getInboxTabSettings(String(row.archive_id));
+    if (!settings.aiEnabled || confidence < settings.aiConfidenceThreshold) return null;
+    const normalizedCategories = categories.map(normalizeInboxTabName);
+    const tab = settings.tabs.find((candidate) => candidate.enabled && normalizedCategories.some((category) => (
+      category === normalizeInboxTabName(candidate.id) || category === normalizeInboxTabName(candidate.label)
+    )));
+    if (!tab) return null;
+    this.db.prepare("UPDATE messages SET inbox_category = ? WHERE id = ?").run(tab.id, messageId);
+    return tab.id;
+  }
+
   updateMessageInboxCategoryBySourceKey(archiveId: string, sourceKey: string, category: InboxCategory): boolean {
-    return this.db.prepare(`
-      UPDATE messages SET inbox_category = ? WHERE archive_id = ? AND source_key = ?
-    `).run(category, archiveId, sourceKey).changes > 0;
+    return this.updateConfiguredInboxCategoryBySourceKey(archiveId, sourceKey, category, false);
   }
 
   updateMessageGmailInboxCategoryBySourceKey(
@@ -4779,17 +5144,38 @@ export class EmailDatabase {
     sourceKey: string,
     category: InboxCategory
   ): boolean {
+    return this.updateConfiguredInboxCategoryBySourceKey(archiveId, sourceKey, category, true);
+  }
+
+  private updateConfiguredInboxCategoryBySourceKey(
+    archiveId: string,
+    sourceKey: string,
+    preferredCategory: InboxCategory,
+    gmailBaseCategoriesOnly: boolean
+  ): boolean {
+    const row = this.db.prepare(`
+      SELECT inbox_category, sender_address, subject, substr(body_text, 1, 2000) AS body_text, headers_json
+      FROM messages WHERE archive_id = ? AND source_key = ?
+    `).get(archiveId, sourceKey) as Row | undefined;
+    if (!row) return false;
+    if (gmailBaseCategoriesOnly && !["primary", "promotions", "social", "updates"].includes(String(row.inbox_category))) {
+      return false;
+    }
+    const category = classifyInboxCategoryWithTabs({
+      senderAddress: String(row.sender_address ?? ""),
+      subject: String(row.subject ?? ""),
+      bodyText: String(row.body_text ?? ""),
+      headers: parseJson<Record<string, string>>(row.headers_json, {})
+    }, this.getInboxTabSettings(archiveId).tabs, preferredCategory);
     return this.db.prepare(`
-      UPDATE messages SET inbox_category = ?
-      WHERE archive_id = ? AND source_key = ?
-        AND inbox_category IN ('primary', 'promotions', 'social', 'updates')
+      UPDATE messages SET inbox_category = ? WHERE archive_id = ? AND source_key = ?
     `).run(category, archiveId, sourceKey).changes > 0;
   }
 
   getMessage(id: string): MessageDetail | null {
     const row = this.db.prepare(`
       SELECT ${MESSAGE_SUMMARY_COLUMNS},
-        m.cc_json, m.bcc_json, m.body_html, m.headers_json
+        m.cc_json, m.bcc_json, m.body_text AS detail_body_text, m.body_html, m.headers_json
       ${MESSAGE_SUMMARY_JOINS}
       WHERE m.id = ?
     `).get(id) as Row | undefined;
@@ -4800,7 +5186,7 @@ export class EmailDatabase {
       to: parseJson<EmailAddress[]>(row.to_json, []),
       cc: parseJson<EmailAddress[]>(row.cc_json, []),
       bcc: parseJson<EmailAddress[]>(row.bcc_json, []),
-      bodyText: String(row.body_text ?? ""),
+      bodyText: String(row.detail_body_text ?? ""),
       bodyHtml: row.body_html ? String(row.body_html) : null,
       headers: parseJson<Record<string, string>>(row.headers_json, {}),
       attachments: this.listAttachments(id)
@@ -5102,6 +5488,10 @@ export class EmailDatabase {
       filters.push("m.folder_id = ?");
       filterParams.push(options.folderId);
     }
+    if (options.isRead !== undefined) {
+      filters.push("COALESCE(s.is_read, 0) = ?");
+      filterParams.push(options.isRead ? 1 : 0);
+    }
     if (options.starred !== undefined) {
       filters.push("COALESCE(s.is_starred, 0) = ?");
       filterParams.push(options.starred ? 1 : 0);
@@ -5356,6 +5746,8 @@ export class EmailDatabase {
     });
 
     const result = merge();
+    this.inboxTabSettingsCache.delete(sourceArchiveId);
+    this.inboxTabSettingsCache.delete(targetArchiveId);
     return {
       archive: this.getArchive(targetArchiveId)!,
       ...result
@@ -5611,6 +6003,7 @@ export class EmailDatabase {
       }
     });
     remove();
+    this.inboxTabSettingsCache.delete(id);
     return orphanedPaths;
   }
 
@@ -6177,6 +6570,36 @@ export class EmailDatabase {
 // Adapter contract: private SQLite implementation details are intentionally excluded.
 export type EmailStore = Pick<EmailDatabase, keyof EmailDatabase>;
 
+function normalizeInboxTabs(storedTabs: readonly InboxTabDefinition[]): InboxTabDefinition[] {
+  const storedById = new Map(storedTabs.map((tab) => [tab.id, tab]));
+  return DEFAULT_INBOX_TABS.map((defaultTab) => {
+    const stored = storedById.get(defaultTab.id);
+    return {
+      ...defaultTab,
+      ...stored,
+      id: defaultTab.id,
+      enabled: defaultTab.id === "primary" ? true : stored?.enabled ?? defaultTab.enabled,
+      keywords: [...(stored?.keywords ?? defaultTab.keywords)],
+      senderDomains: [...(stored?.senderDomains ?? defaultTab.senderDomains)]
+    };
+  }).sort((left, right) => left.position - right.position);
+}
+
+function cloneInboxTabSettings(settings: InboxTabSettings): InboxTabSettings {
+  return {
+    ...settings,
+    tabs: settings.tabs.map((tab) => ({
+      ...tab,
+      keywords: [...tab.keywords],
+      senderDomains: [...tab.senderDomains]
+    }))
+  };
+}
+
+function normalizeInboxTabName(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
 const MESSAGE_SUMMARY_COLUMNS = `
   m.id,
   m.archive_id,
@@ -6188,7 +6611,7 @@ const MESSAGE_SUMMARY_COLUMNS = `
   m.to_json,
   m.sent_at,
   m.received_at,
-  m.body_text,
+  substr(m.body_text, 1, 2000) AS body_text,
   m.has_attachments,
   m.attachment_count,
   m.inbox_category,
@@ -6208,7 +6631,8 @@ const MESSAGE_SUMMARY_COLUMNS = `
       OR EXISTS(
         SELECT 1 FROM messages sent_reply
         JOIN folders sent_folder ON sent_folder.id = sent_reply.folder_id
-        WHERE sent_reply.conversation_key = m.conversation_key
+        WHERE sent_reply.archive_id = m.archive_id
+          AND sent_reply.conversation_key = m.conversation_key
           AND lower(trim(sent_folder.name)) = 'sent'
       )
     )

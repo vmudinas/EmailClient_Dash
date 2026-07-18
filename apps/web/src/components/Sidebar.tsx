@@ -43,7 +43,9 @@ interface SidebarProps {
   selectedSmartMailbox: "starred" | null;
   readOnly: boolean;
   draggedMessage: MessageSummary | null;
+  draggedMessageIds: string[];
   moveBusy: boolean;
+  folderBusy: boolean;
   onSelectArchive(id: string): void;
   onSelectFolder(id: string | null): void;
   onSelectSmartMailbox(mailbox: "starred"): void;
@@ -52,6 +54,7 @@ interface SidebarProps {
   onCreateFolder(): void;
   onCombineArchive(archive: Archive): void;
   onCombineFolder(folder: Folder): void;
+  onOrganizeFolder(source: Folder, target: Folder): void;
   onCancelJob(id: string): void;
   onResumeJob(id: string): void;
   onClearJob(id: string): void;
@@ -59,7 +62,7 @@ interface SidebarProps {
   onRemoveFolder(folder: Folder): void;
   onRenameArchive(archive: Archive): void;
   onRenameFolder(folder: Folder): void;
-  onMoveMessage(messageId: string, folderId: string): void;
+  onMoveMessages(messageIds: string[], folderId: string): void;
   onOpenDiagnostics(): void;
 }
 
@@ -72,7 +75,9 @@ export function Sidebar({
   selectedSmartMailbox,
   readOnly,
   draggedMessage,
+  draggedMessageIds,
   moveBusy,
+  folderBusy,
   onSelectArchive,
   onSelectFolder,
   onSelectSmartMailbox,
@@ -81,6 +86,7 @@ export function Sidebar({
   onCreateFolder,
   onCombineArchive,
   onCombineFolder,
+  onOrganizeFolder,
   onCancelJob,
   onResumeJob,
   onClearJob,
@@ -88,12 +94,13 @@ export function Sidebar({
   onRemoveFolder,
   onRenameArchive,
   onRenameFolder,
-  onMoveMessage,
+  onMoveMessages,
   onOpenDiagnostics
 }: SidebarProps) {
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId);
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => loadCollapsedFolders());
   const [dropFolderId, setDropFolderId] = useState<string | null>(null);
+  const [draggedFolderId, setDraggedFolderId] = useState<string | null>(null);
   useEffect(() => { saveCollapsedFolders(collapsedFolderIds); }, [collapsedFolderIds]);
   const toggleFolderCollapsed = (folderId: string) => {
     setCollapsedFolderIds((current) => {
@@ -119,16 +126,40 @@ export function Sidebar({
       const canCombine = folders.some((candidate) => (
         candidate.id !== folder.id && !candidate.path.startsWith(`${folder.path}/`)
       ));
-      const canDrop = !readOnly
+      const draggedFolder = draggedFolderId
+        ? folders.find((candidate) => candidate.id === draggedFolderId) ?? null
+        : null;
+      const canDragFolder = !readOnly
+        && !folderBusy
+        && Boolean(selectedArchive && ["ready", "ready_with_errors"].includes(selectedArchive.status));
+      const canDropFolder = canDragFolder
+        && draggedFolder !== null
+        && draggedFolder.id !== folder.id
+        && draggedFolder.archiveId === folder.archiveId
+        && !folder.path.startsWith(`${draggedFolder.path}/`);
+      const canDropMessage = !readOnly
         && !moveBusy
+        && draggedMessageIds.length > 0
         && draggedMessage?.archiveId === folder.archiveId
-        && draggedMessage.folderId !== folder.id;
+        && (draggedMessageIds.length > 1 || draggedMessage.folderId !== folder.id);
+      const canDrop = canDropFolder || canDropMessage;
       const row = (
         <div className="folder-entry" key={folder.id}>
           <button
             className={`folder-row ${selectedFolderId === folder.id ? "selected" : ""} ${canDrop && dropFolderId === folder.id ? "drop-target" : ""}`}
             style={{ "--folder-depth": depth } as React.CSSProperties}
+            draggable={canDragFolder}
             onClick={() => onSelectFolder(folder.id)}
+            onDragStart={(event) => {
+              if (!canDragFolder) return;
+              setDraggedFolderId(folder.id);
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("application/x-archive-mail-folder", folder.id);
+            }}
+            onDragEnd={() => {
+              setDraggedFolderId(null);
+              setDropFolderId(null);
+            }}
             onDragEnter={(event) => {
               if (!canDrop) return;
               event.preventDefault();
@@ -145,10 +176,15 @@ export function Sidebar({
               }
             }}
             onDrop={(event) => {
-              if (!canDrop || !draggedMessage) return;
+              if (!canDrop) return;
               event.preventDefault();
               setDropFolderId(null);
-              onMoveMessage(draggedMessage.id, folder.id);
+              if (canDropFolder && draggedFolder) {
+                setDraggedFolderId(null);
+                onOrganizeFolder(draggedFolder, folder);
+                return;
+              }
+              if (canDropMessage && draggedMessage) onMoveMessages(draggedMessageIds, folder.id);
             }}
           >
             {hasChildren ? (
@@ -206,7 +242,7 @@ export function Sidebar({
   const etaByJob = useImportEtas(jobs);
 
   return (
-    <aside className="sidebar" aria-label="Archives and folders">
+    <aside id="folder-sidebar" className="sidebar" aria-label="Archives and folders">
       <div className="sidebar-scroll">
         <div className="section-heading">
           <span>Archives</span>

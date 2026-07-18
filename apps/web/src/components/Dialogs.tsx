@@ -37,6 +37,7 @@ import type { UploadProgress } from "../lib/api.js";
 import { importEmailCountLabel, importProgressPercent } from "../lib/import-progress.js";
 
 export interface UiSearchFilters {
+  folderId: string;
   from: string;
   to: string;
   after: string;
@@ -45,12 +46,15 @@ export interface UiSearchFilters {
 }
 
 export const EMPTY_FILTERS: UiSearchFilters = {
+  folderId: "",
   from: "",
   to: "",
   after: "",
   before: "",
   hasAttachment: undefined
 };
+
+export const ALL_MAIL_SEARCH_SCOPE = "__all_mail__";
 
 interface ImportDialogProps {
   open: boolean;
@@ -212,6 +216,7 @@ interface CreateMailboxDialogProps {
   open: boolean;
   archive: ArchiveModel | null;
   folders: Folder[];
+  initialParentId?: string | null;
   busy: boolean;
   onClose(): void;
   onCreate(name: string, parentId: string | null): void;
@@ -221,6 +226,7 @@ export function CreateMailboxDialog({
   open,
   archive,
   folders,
+  initialParentId = null,
   busy,
   onClose,
   onCreate
@@ -230,9 +236,9 @@ export function CreateMailboxDialog({
   useEffect(() => {
     if (open) {
       setName("");
-      setParentId("");
+      setParentId(initialParentId ?? "");
     }
-  }, [open]);
+  }, [initialParentId, open]);
   if (!open || !archive) return null;
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onClose(); }}>
@@ -373,6 +379,58 @@ export function CombineMailboxDialog({
   );
 }
 
+interface MailboxDropDialogProps {
+  source: Folder | null;
+  target: Folder | null;
+  busy: boolean;
+  onClose(): void;
+  onMerge(): void;
+  onMoveAsChild(): void;
+}
+
+export function MailboxDropDialog({
+  source,
+  target,
+  busy,
+  onClose,
+  onMerge,
+  onMoveAsChild
+}: MailboxDropDialogProps) {
+  if (!source || !target) return null;
+  const alreadyChild = source.parentId === target.id;
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onClose(); }}>
+      <section className="dialog combine-dialog" role="dialog" aria-modal="true" aria-labelledby="organize-mailbox-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="dialog-header">
+          <div><FolderTree size={20} /><h2 id="organize-mailbox-title">Organize mailbox</h2></div>
+          <button className="icon-button" disabled={busy} onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
+        </header>
+        <div className="dialog-body">
+          <div className="combine-source">
+            <span>Dragged mailbox</span>
+            <strong>{source.path}</strong>
+            <small>Dropped onto {target.path}</small>
+          </div>
+          <div className="mailbox-drop-options">
+            <div><CombineIcon size={18} /><span><strong>Merge mailboxes</strong><small>Move every message into {target.path}, then remove {source.path} and its child mailboxes.</small></span></div>
+            <div><FolderPlus size={18} /><span><strong>Move as child</strong><small>Keep the mailbox tree and place it under {target.path} without duplicating messages.</small></span></div>
+          </div>
+          {alreadyChild && <small className="combine-result">{source.name} is already a child of {target.path}. You can merge it or cancel.</small>}
+        </div>
+        <footer className="dialog-footer">
+          <button className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>
+          <button className="danger-button" disabled={busy} onClick={onMerge}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <CombineIcon size={17} />} Merge
+          </button>
+          <button className="primary-button" disabled={busy || alreadyChild} onClick={onMoveAsChild}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderPlus size={17} />} Move as child
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 interface GmailDialogProps {
   open: boolean;
   archives: ArchiveModel[];
@@ -487,7 +545,10 @@ export function GmailDialog({
                       <div className="gmail-connection-copy">
                         <strong>{connection.email}</strong>
                         <span>{connection.archiveName} / {connection.folderPath}</span>
-                        <small className="gmail-permission">{connection.canSend ? "Pull-only sync · sending enabled" : "Pull-only sync · authorize again to send"}</small>
+                        <small className="gmail-permission">
+                          {connection.canModifyMailbox ? "Gmail mailbox permission granted" : "Mailbox changes stay local until reauthorized"}
+                          {connection.canSend ? " · sending enabled" : " · authorize again to send"}
+                        </small>
                         {connection.status === "syncing" ? (
                           <><progress max={100} value={percent} /><small>{connection.processedItems.toLocaleString()} of {(connection.totalItems ?? 0).toLocaleString()} · {connection.importedItems.toLocaleString()} new</small></>
                         ) : (
@@ -604,7 +665,7 @@ export function GmailDialog({
               <input type="checkbox" checked={ocrEnabled} onChange={(event) => setOcrEnabled(event.target.checked)} />
             </label>
             <p className="gmail-destination-note">Gmail labels are mirrored underneath this local folder: Inbox, Sent, Drafts, Spam, Trash, and custom labels each become their own sub-folder. Mail with no matching label is filed under Archived.</p>
-            <div className="gmail-safety"><ShieldCheck size={18} /><span>Synchronization is pull-only. Authorization grants separate read-only and send permissions, with no permission to modify or delete Gmail messages.</span></div>
+            <div className="gmail-safety"><ShieldCheck size={18} /><span>Gmail starts with read access. If mailbox mirroring is enabled in Admin settings, authorization also grants permission to archive, move, mark Spam, move to Trash, change read state, and star messages. Permanent deletion is never performed.</span></div>
           </section>
           {error && <div className="import-error" role="alert"><CircleAlert size={18} /><div><strong>Gmail action failed</strong><span>{error}</span></div></div>}
         </div>
@@ -764,11 +825,20 @@ export function DiagnosticsDialog({
 interface FilterPanelProps {
   open: boolean;
   value: UiSearchFilters;
+  folders: Folder[];
+  currentFolderLabel: string;
   onChange(value: UiSearchFilters): void;
   onClose(): void;
 }
 
-export function FilterPanel({ open, value, onChange, onClose }: FilterPanelProps) {
+export function FilterPanel({
+  open,
+  value,
+  folders,
+  currentFolderLabel,
+  onChange,
+  onClose
+}: FilterPanelProps) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value, open]);
   if (!open) return null;
@@ -778,6 +848,20 @@ export function FilterPanel({ open, value, onChange, onClose }: FilterPanelProps
         <div><Filter size={17} /><strong>Search filters</strong></div>
         <button className="icon-button subtle" onClick={onClose} title="Close filters" aria-label="Close filters"><X size={16} /></button>
       </header>
+      <label>
+        <span>Search in</span>
+        <select
+          value={draft.folderId}
+          onChange={(event) => setDraft({ ...draft, folderId: event.target.value })}
+          aria-label="Search in mailbox"
+        >
+          <option value="">Current view — {currentFolderLabel}</option>
+          <option value={ALL_MAIL_SEARCH_SCOPE}>Entire archive</option>
+          <optgroup label="Specific mailbox">
+            {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}
+          </optgroup>
+        </select>
+      </label>
       <label><span>From</span><input value={draft.from} onChange={(event) => setDraft({ ...draft, from: event.target.value })} placeholder="name or address" /></label>
       <label><span>To or CC</span><input value={draft.to} onChange={(event) => setDraft({ ...draft, to: event.target.value })} placeholder="name or address" /></label>
       <div className="filter-date-grid">

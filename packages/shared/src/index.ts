@@ -104,6 +104,41 @@ export interface InboxCategoryCounts {
   mail_tracking: number;
 }
 
+export interface InboxTabDefinition {
+  id: InboxCategory;
+  label: string;
+  description: string;
+  enabled: boolean;
+  position: number;
+  color: string;
+  keywords: string[];
+  senderDomains: string[];
+}
+
+export interface InboxTabSettings {
+  archiveId: string;
+  tabs: InboxTabDefinition[];
+  aiEnabled: boolean;
+  aiConfidenceThreshold: number;
+  updatedAt: string | null;
+}
+
+export interface InboxTabReclassifyResult {
+  settings: InboxTabSettings;
+  scannedMessages: number;
+  changedMessages: number;
+}
+
+export const DEFAULT_INBOX_TABS: ReadonlyArray<InboxTabDefinition> = [
+  { id: "primary", label: "Primary", description: "Personal and important conversations.", enabled: true, position: 0, color: "#1a73e8", keywords: [], senderDomains: [] },
+  { id: "promotions", label: "Promotions", description: "Deals, offers, newsletters, and marketing.", enabled: true, position: 1, color: "#188038", keywords: [], senderDomains: [] },
+  { id: "social", label: "Social", description: "Social network activity and community updates.", enabled: true, position: 2, color: "#9334e6", keywords: [], senderDomains: [] },
+  { id: "updates", label: "Updates", description: "Automated confirmations, alerts, and account updates.", enabled: true, position: 3, color: "#b06000", keywords: [], senderDomains: [] },
+  { id: "bills", label: "Bills", description: "Invoices, statements, balances, and payment notices.", enabled: true, position: 4, color: "#137333", keywords: [], senderDomains: [] },
+  { id: "medical", label: "Medical", description: "Health care, pharmacy, and appointment messages.", enabled: true, position: 5, color: "#c5221f", keywords: [], senderDomains: [] },
+  { id: "mail_tracking", label: "Mail/Tracking", description: "Shipping, delivery, and package tracking.", enabled: true, position: 6, color: "#1967d2", keywords: [], senderDomains: [] }
+];
+
 export interface MessageSummary {
   id: string;
   archiveId: string;
@@ -917,6 +952,11 @@ export interface MailboxMergeResult {
   movedAttachments: number;
 }
 
+export interface MailboxMoveResult {
+  mailbox: Folder;
+  movedMailboxes: number;
+}
+
 export interface CursorPage<T> {
   items: T[];
   nextCursor: string | null;
@@ -925,6 +965,7 @@ export interface CursorPage<T> {
 export interface SearchFilters {
   archiveId?: string;
   folderId?: string;
+  isRead?: boolean;
   starred?: boolean;
   inboxCategory?: InboxCategory;
   from?: string;
@@ -1139,6 +1180,38 @@ export interface BulkMoveResult {
   failed: number;
 }
 
+export const bulkFolderMoveSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(500),
+  folderId: z.string().uuid()
+}).strict();
+
+export type BulkFolderMoveRequest = z.infer<typeof bulkFolderMoveSchema>;
+
+export interface BulkFolderMoveResult {
+  folderId: string;
+  folderPath: string;
+  moved: number;
+  alreadyThere: number;
+  failed: number;
+}
+
+export const bulkFilingSuggestionRequestSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(500)
+    .transform((messageIds) => [...new Set(messageIds)])
+}).strict();
+
+export type BulkFilingSuggestionRequest = z.infer<typeof bulkFilingSuggestionRequestSchema>;
+
+export interface MessageFilingSuggestion {
+  folderId: string | null;
+  folderPath: string | null;
+  reason: string;
+  confidence: number;
+  messageCount: number;
+  provider: AiProviderId;
+  model: string;
+}
+
 export const senderFilingArchiveSchema = z.object({
   archiveId: z.string().uuid()
 }).strict();
@@ -1181,6 +1254,12 @@ export const mailboxMergeSchema = z.object({
 }).strict();
 
 export type MailboxMerge = z.infer<typeof mailboxMergeSchema>;
+
+export const mailboxMoveSchema = z.object({
+  targetParentId: z.string().uuid().nullable()
+}).strict();
+
+export type MailboxMove = z.infer<typeof mailboxMoveSchema>;
 
 export const gmailAuthRequestSchema = z.object({
   archiveId: z.string().uuid().nullable().optional(),
@@ -1267,6 +1346,41 @@ export const stockSettingsPatchSchema = z.object({
 }).strict();
 
 export type StockSettingsPatch = z.infer<typeof stockSettingsPatchSchema>;
+
+const inboxTabDefinitionSchema = z.object({
+  id: z.enum(INBOX_CATEGORIES),
+  label: z.string().trim().min(1).max(40),
+  description: z.string().trim().max(240),
+  enabled: z.boolean(),
+  position: z.number().int().min(0).max(INBOX_CATEGORIES.length - 1),
+  color: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/, "Use a six-digit hex color"),
+  keywords: z.array(z.string().trim().min(1).max(80)).max(40)
+    .transform((values) => [...new Set(values.map((value) => value.toLowerCase()))]),
+  senderDomains: z.array(z.string().trim().toLowerCase().min(1).max(253)
+    .regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/, "Use a domain such as example.com"))
+    .max(40)
+    .transform((values) => [...new Set(values)])
+}).strict();
+
+export const inboxTabSettingsUpdateSchema = z.object({
+  tabs: z.array(inboxTabDefinitionSchema).length(INBOX_CATEGORIES.length),
+  aiEnabled: z.boolean(),
+  aiConfidenceThreshold: z.number().min(0).max(1)
+}).strict().superRefine((value, context) => {
+  const ids = new Set(value.tabs.map((tab) => tab.id));
+  const positions = new Set(value.tabs.map((tab) => tab.position));
+  if (ids.size !== INBOX_CATEGORIES.length || INBOX_CATEGORIES.some((id) => !ids.has(id))) {
+    context.addIssue({ code: "custom", path: ["tabs"], message: "Configure every built-in Inbox tab exactly once" });
+  }
+  if (positions.size !== INBOX_CATEGORIES.length) {
+    context.addIssue({ code: "custom", path: ["tabs"], message: "Each Inbox tab needs a unique position" });
+  }
+  if (!value.tabs.find((tab) => tab.id === "primary")?.enabled) {
+    context.addIssue({ code: "custom", path: ["tabs"], message: "Primary must remain enabled" });
+  }
+});
+
+export type InboxTabSettingsUpdate = z.infer<typeof inboxTabSettingsUpdateSchema>;
 
 export const newsSettingsPatchSchema = z.object({
   enabledSources: z.array(z.enum(NEWS_SOURCE_IDS)).max(NEWS_SOURCE_IDS.length).transform((sources) => [...new Set(sources)]),
@@ -1397,6 +1511,14 @@ export const messageAnalysisOutputSchema = z.object({
 }).strict();
 
 export type MessageAnalysisOutput = z.infer<typeof messageAnalysisOutputSchema>;
+
+export const messageFilingSuggestionOutputSchema = z.object({
+  targetFolderPath: z.string().trim().min(1).max(500).nullable(),
+  reason: z.string().trim().min(1).max(800),
+  confidence: z.number().min(0).max(1)
+}).strict();
+
+export type MessageFilingSuggestionOutput = z.infer<typeof messageFilingSuggestionOutputSchema>;
 
 export const aiDraftReplyOutputSchema = z.object({
   workRelated: z.boolean(),

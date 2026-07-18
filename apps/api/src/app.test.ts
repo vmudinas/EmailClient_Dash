@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { EmailApiRuntime } from "./app.js";
 import { loadConfig } from "./config.js";
 
@@ -842,6 +843,26 @@ describe("Email API sender filing routes", () => {
       rules: [{ senderAddress: "vendor@example.test", ruleType: "spam", folderPath: "Spam" }]
     });
 
+    const spamRuleId = (spamStatus.json() as { rules: Array<{ id: string }> }).rules[0]!.id;
+    const changedDestination = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/sender-filing/rules/${spamRuleId}`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { folderId: vendors.id }
+    });
+    expect(changedDestination.statusCode).toBe(200);
+    expect(changedDestination.json()).toMatchObject({
+      rules: [{
+        id: spamRuleId,
+        senderAddress: "vendor@example.test",
+        ruleType: "folder",
+        folderId: vendors.id,
+        folderPath: "Vendors"
+      }]
+    });
+    expect(runtime.database.getMessage(messageId)?.folderPath).toBe("Vendors");
+
     const disabled = await runtime.app.inject({
       method: "DELETE",
       url: `/api/admin/sender-filing?archiveId=${archive.id}`,
@@ -895,7 +916,7 @@ describe("Email API bulk message actions", () => {
     }));
     runtimes.push(runtime);
     await runtime.initialize();
-    const { messageIds } = await setUpInboxMessages(runtime, 3);
+    const { archive, messageIds } = await setUpInboxMessages(runtime, 4);
 
     const unauthorized = await runtime.app.inject({
       method: "POST",
@@ -953,6 +974,18 @@ describe("Email API bulk message actions", () => {
     expect(spammed.statusCode).toBe(200);
     expect(spammed.json()).toMatchObject({ destination: "spam", folderPaths: ["Spam"], moved: 1, alreadyThere: 0, failed: 1 });
 
+    const jobsFolder = runtime.database.createFolder(archive.id, "Jobs");
+    const filed = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move-to-folder",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [messageIds[3]], folderId: jobsFolder.id }
+    });
+    expect(filed.statusCode).toBe(200);
+    expect(filed.json()).toMatchObject({ folderId: jobsFolder.id, folderPath: "Jobs", moved: 1, alreadyThere: 0, failed: 0 });
+    expect(runtime.database.getMessage(messageIds[3]!)?.folderId).toBe(jobsFolder.id);
+
     const invalid = await runtime.app.inject({
       method: "POST",
       url: "/api/messages/bulk-move",
@@ -961,6 +994,7 @@ describe("Email API bulk message actions", () => {
       payload: { messageIds: [], destination: "trash" }
     });
     expect(invalid.statusCode).toBe(400);
+
   });
 });
 
@@ -1861,6 +1895,28 @@ describe("Email API authorization", () => {
     });
     expect(runtime.database.getArchive(source.id)).toBeNull();
 
+    const projectsFolderResponse = await runtime.app.inject({
+      method: "POST",
+      url: `/api/archives/${target.id}/folders`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { name: "Projects" }
+    });
+    expect(projectsFolderResponse.statusCode).toBe(201);
+    const projectsFolder = projectsFolderResponse.json() as { id: string };
+    const mailboxMoved = await runtime.app.inject({
+      method: "POST",
+      url: `/api/folders/${projectsFolder.id}/move`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { targetParentId: targetFolder.id }
+    });
+    expect(mailboxMoved.statusCode).toBe(200);
+    expect(mailboxMoved.json()).toMatchObject({
+      movedMailboxes: 1,
+      mailbox: { id: projectsFolder.id, parentId: targetFolder.id, path: "Inbox/Projects" }
+    });
+
     const gmailStart = await runtime.app.inject({
       method: "POST",
       url: "/api/gmail/oauth/start",
@@ -2027,8 +2083,9 @@ describe("Email API Inbox category routes", () => {
     });
     runtime.database.completeArchive(archive.id, 0);
     const inbox = runtime.database.createFolder(archive.id, "Inbox");
+    let primaryMessageId = "";
     for (const category of ["primary", "social"] as const) {
-      runtime.database.insertMessage({
+      const messageId = runtime.database.insertMessage({
         archiveId: archive.id,
         folderId: inbox.id,
         inboxCategory: category,
@@ -2047,7 +2104,9 @@ describe("Email API Inbox category routes", () => {
         sizeBytes: 1,
         attachments: []
       });
+      if (category === "primary") primaryMessageId = messageId;
     }
+    runtime.database.updateMessageState(primaryMessageId, { isRead: true });
 
     const filtered = await runtime.app.inject({
       method: "GET",
@@ -2058,6 +2117,18 @@ describe("Email API Inbox category routes", () => {
     const counts = await runtime.app.inject({
       method: "GET",
       url: `/api/messages/category-counts?folderId=${inbox.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    const unreadCounts = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages/category-counts?folderId=${inbox.id}&isRead=false`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    const unreadSearch = await runtime.app.inject({
+      method: "GET",
+      url: `/api/search?q=category%20route%20marker&folderId=${inbox.id}&isRead=false`,
       headers,
       remoteAddress: "127.0.0.1"
     });
@@ -2078,7 +2149,55 @@ describe("Email API Inbox category routes", () => {
       medical: 0,
       mail_tracking: 0
     });
+    expect(unreadCounts.json()).toMatchObject({ primary: 0, social: 1 });
+    expect(unreadSearch.json()).toMatchObject({ items: [{ message: { subject: "social" } }] });
     expect(invalid.statusCode).toBe(400);
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const adminHeaders = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const updatedTabs = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/inbox-tabs/${archive.id}`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        tabs: DEFAULT_INBOX_TABS.map((tab) => ({
+          ...tab,
+          label: tab.id === "social" ? "Community" : tab.label,
+          enabled: tab.id === "social" ? false : tab.enabled,
+          keywords: [],
+          senderDomains: []
+        })),
+        aiEnabled: true,
+        aiConfidenceThreshold: 0.9
+      }
+    });
+    expect(updatedTabs.statusCode).toBe(200);
+    expect(updatedTabs.json()).toMatchObject({ aiEnabled: true, aiConfidenceThreshold: 0.9 });
+
+    const loadedTabs = await runtime.app.inject({
+      method: "GET",
+      url: `/api/inbox-tabs?archiveId=${archive.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(loadedTabs.json()).toMatchObject({
+      archiveId: archive.id,
+      tabs: expect.arrayContaining([expect.objectContaining({ id: "social", label: "Community", enabled: false })])
+    });
+
+    const reclassified = await runtime.app.inject({
+      method: "POST",
+      url: `/api/admin/inbox-tabs/${archive.id}/reclassify`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(reclassified.json()).toMatchObject({ scannedMessages: 2, changedMessages: 1 });
   });
 });
 

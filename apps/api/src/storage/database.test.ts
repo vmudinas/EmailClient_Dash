@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import BetterSqlite3 from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { EmailDatabase, toFtsQuery } from "./database.js";
 
 const directories: string[] = [];
@@ -15,6 +16,7 @@ describe("EmailDatabase", () => {
   it("indexes message and attachment text and updates local state", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
+    const fullBodyText = `The desktop rollout is ready for review. ${"x".repeat(2_500)} full-body-tail`;
     const archive = database.createArchive({
       name: "mail.mbox",
       sourceType: "mbox",
@@ -34,7 +36,7 @@ describe("EmailDatabase", () => {
       bcc: [],
       sentAt: "2026-07-01T12:00:00.000Z",
       receivedAt: "2026-07-01T12:00:00.000Z",
-      bodyText: "The desktop rollout is ready for review.",
+      bodyText: fullBodyText,
       bodyHtml: "<p>The desktop rollout is ready for review.</p>",
       headers: { "message-id": "<one@example.test>" },
       sizeBytes: 100,
@@ -63,8 +65,13 @@ describe("EmailDatabase", () => {
     expect(database.search({ q: "launch", from: "nobody" }).items).toHaveLength(0);
 
     const message = database.listMessages({ archiveId: archive.id }).items[0]!;
+    expect(database.getMessage(message.id)?.bodyText).toBe(fullBodyText);
     expect(database.getArchive(archive.id)?.unreadCount).toBe(1);
     expect(database.listFolders(archive.id)[0]?.unreadCount).toBe(1);
+    expect(database.listMessages({ archiveId: archive.id, isRead: false }).items)
+      .toEqual([expect.objectContaining({ id: message.id })]);
+    expect(database.search({ q: "rollout", archiveId: archive.id, isRead: false }).items)
+      .toHaveLength(1);
     const state = database.updateMessageState(message.id, {
       isRead: true,
       isStarred: true,
@@ -79,6 +86,13 @@ describe("EmailDatabase", () => {
     });
     expect(database.getArchive(archive.id)?.unreadCount).toBe(0);
     expect(database.getFolder(folder.id)?.unreadCount).toBe(0);
+    expect(database.listMessages({ archiveId: archive.id, isRead: false }).items).toHaveLength(0);
+    expect(database.listMessages({ archiveId: archive.id, isRead: true }).items)
+      .toEqual([expect.objectContaining({ id: message.id })]);
+    expect(database.search({ q: "rollout", archiveId: archive.id, isRead: false }).items)
+      .toHaveLength(0);
+    expect(database.countInboxCategories({ archiveId: archive.id, isRead: false }).primary).toBe(0);
+    expect(database.countInboxCategories({ archiveId: archive.id, isRead: true }).primary).toBe(1);
     expect(database.listMessages({ archiveId: archive.id, starred: true }).items).toEqual([
       expect.objectContaining({ id: message.id, folderId: folder.id, folderPath: folder.path })
     ]);
@@ -124,6 +138,80 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("uses covering sort indexes and indexed conversation reply lookups for message lists", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "query-plan.mbox",
+      sourceType: "mbox",
+      fingerprint: "query-plan-fixture",
+      sizeBytes: 100
+    });
+    const folder = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    insertDatedMessage(database, archive.id, folder.id, "indexed", "2026-07-03T12:00:00.000Z");
+    database.completeArchive(archive.id, 0);
+
+    const sqlite = new BetterSqlite3(database.path, { readonly: true });
+    const folderPlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM messages
+      WHERE folder_id = ?
+      ORDER BY
+        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(received_at, sent_at) DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 51
+    `).all(folder.id) as Array<{ detail: string }>;
+    const categoryPlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM messages
+      WHERE folder_id = ? AND inbox_category = 'primary'
+      ORDER BY
+        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(received_at, sent_at) DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 51
+    `).all(folder.id) as Array<{ detail: string }>;
+    const archivePlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM messages
+      WHERE archive_id = ?
+      ORDER BY
+        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
+        COALESCE(received_at, sent_at) DESC,
+        created_at DESC,
+        id DESC
+      LIMIT 51
+    `).all(archive.id) as Array<{ detail: string }>;
+    const replyPlan = sqlite.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT EXISTS(
+        SELECT 1 FROM messages sent_reply
+        JOIN folders sent_folder ON sent_folder.id = sent_reply.folder_id
+        WHERE sent_reply.archive_id = m.archive_id
+          AND sent_reply.conversation_key = m.conversation_key
+          AND lower(trim(sent_folder.name)) = 'sent'
+      )
+      FROM messages m
+      WHERE m.folder_id = ?
+      LIMIT 51
+    `).all(folder.id) as Array<{ detail: string }>;
+
+    expect(folderPlan.some((row) => row.detail.includes("messages_folder_sort_idx"))).toBe(true);
+    expect(categoryPlan.some((row) => row.detail.includes("messages_folder_category_sort_idx"))).toBe(true);
+    expect(archivePlan.some((row) => row.detail.includes("messages_archive_sort_idx"))).toBe(true);
+    expect(replyPlan.some((row) => row.detail.includes("messages_conversation_idx"))).toBe(true);
+    expect(replyPlan.some((row) => row.detail.includes("SCAN sent_reply"))).toBe(false);
+    expect(sqlite.pragma("user_version", { simple: true })).toBe(31);
+    expect((sqlite.pragma("index_list(message_state)") as Array<{ name: string }>)
+      .some((index) => index.name === "message_state_read_idx")).toBe(true);
+
+    sqlite.close();
+    database.close();
+  });
+
   it("filters and counts Inbox categories", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
@@ -134,7 +222,7 @@ describe("EmailDatabase", () => {
       sizeBytes: 0
     });
     database.completeArchive(archive.id, 0);
-    const inbox = database.createFolder(archive.id, "Inbox");
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
     insertDatedMessage(database, archive.id, inbox.id, "primary", "2026-07-04T12:00:00.000Z", undefined, "primary");
     insertDatedMessage(database, archive.id, inbox.id, "promotion", "2026-07-03T12:00:00.000Z", undefined, "promotions");
     insertDatedMessage(database, archive.id, inbox.id, "social", "2026-07-02T12:00:00.000Z", undefined, "social");
@@ -645,6 +733,56 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("moves a mailbox tree under a new parent without changing messages or Gmail destinations", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Mailbox move",
+      sourceType: "mbox",
+      fingerprint: "mailbox-move",
+      sizeBytes: 200
+    });
+    const destination = database.ensureFolder(archive.id, "Saved", "Saved", null);
+    const source = database.ensureFolder(archive.id, "Projects", "Projects", null);
+    const child = database.ensureFolder(archive.id, "Projects/Active", "Active", source.id);
+    const messageId = insertDatedMessage(database, archive.id, child.id, "moved-child", null);
+    database.completeArchive(archive.id, 0);
+    const gmail = database.createGmailConnection({
+      email: "move@example.test",
+      archiveId: archive.id,
+      folderId: child.id,
+      query: "newer_than:30d",
+      ocrEnabled: false,
+      canSend: true,
+      canManageCalendar: false,
+      refreshToken: "move-refresh-token"
+    });
+
+    expect(() => database.moveFolder(source.id, child.id)).toThrow("child mailboxes");
+    const result = database.moveFolder(source.id, destination.id);
+
+    expect(result).toMatchObject({
+      mailbox: { id: source.id, parentId: destination.id, path: "Saved/Projects" },
+      movedMailboxes: 2
+    });
+    expect(database.getFolder(child.id)).toMatchObject({
+      parentId: source.id,
+      path: "Saved/Projects/Active"
+    });
+    expect(database.getMessage(messageId)).toMatchObject({
+      id: messageId,
+      folderId: child.id,
+      folderPath: "Saved/Projects/Active"
+    });
+    expect(database.search({ q: "ordering-marker" }).items[0]?.message.folderPath)
+      .toBe("Saved/Projects/Active");
+    expect(database.getGmailConnection(gmail.id)).toMatchObject({
+      folderId: child.id,
+      folderPath: "Saved/Projects/Active"
+    });
+    database.close();
+  });
+
   it("keeps multiple Gmail accounts separate when they share one local mailbox", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
@@ -1143,6 +1281,34 @@ describe("EmailDatabase", () => {
       "spammer@example.test"
     );
     expect(database.getMessage(futureMessageId)?.folderPath).toBe("Spam");
+
+    const spamRule = database.getSenderFilingStatus(archive.id).rules[0]!;
+    const updatedRule = database.updateSenderFilingRuleFolder(spamRule.id, archived.id);
+    expect(updatedRule).toMatchObject({
+      movedMessages: 126,
+      folderPath: "Archived",
+      status: {
+        rules: [{
+          id: spamRule.id,
+          ruleType: "folder",
+          folderId: archived.id,
+          folderPath: "Archived",
+          messageCount: 127
+        }]
+      }
+    });
+    expect(database.getMessage(firstMessageId)?.folderPath).toBe("Archived");
+    expect(database.getMessage(futureMessageId)?.folderPath).toBe("Archived");
+
+    const nextFutureMessageId = insertSenderMessage(
+      database,
+      archive.id,
+      inbox.id,
+      "spam-sender-next-future",
+      "Persistent Spammer",
+      "spammer@example.test"
+    );
+    expect(database.getMessage(nextFutureMessageId)?.folderPath).toBe("Archived");
     database.close();
   });
 
@@ -1908,6 +2074,61 @@ describe("EmailDatabase", () => {
     expect(database.getCalendarAccount(account.id)).toMatchObject({ status: "error", lastError: "Authorization expired" });
     expect(database.deleteCalendarAccount(account.id)).toMatchObject({ id: account.id, secret: "abcd-efgh-ijkl-mnop" });
     expect(database.getCalendarAccount(account.id)).toBeNull();
+    database.close();
+  });
+
+  it("stores configurable Inbox tabs, reclassifies rules, and applies confident AI assignments", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Configurable Inbox",
+      sourceType: "mbox",
+      fingerprint: "configurable-inbox-tabs",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "payroll-summary",
+      internetMessageId: null,
+      subject: "Your payroll summary is ready",
+      sender: { name: "Payroll", address: "notices@company.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: null,
+      receivedAt: null,
+      bodyText: "Open the employee portal for details.",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 1,
+      attachments: []
+    });
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("primary");
+
+    const settings = database.updateInboxTabSettings(archive.id, {
+      tabs: DEFAULT_INBOX_TABS.map((tab) => ({
+        ...tab,
+        label: tab.id === "bills" ? "Money" : tab.label,
+        keywords: tab.id === "bills" ? ["payroll"] : [],
+        senderDomains: [],
+        color: tab.color
+      })),
+      aiEnabled: true,
+      aiConfidenceThreshold: 0.85
+    });
+    expect(settings.tabs.find((tab) => tab.id === "bills")).toMatchObject({ label: "Money", keywords: ["payroll"] });
+    expect(database.getInboxTabSettings(archive.id)).toEqual(settings);
+
+    const reclassified = database.reclassifyInboxMessages(archive.id);
+    expect(reclassified).toMatchObject({ scannedMessages: 1, changedMessages: 1 });
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("bills");
+    expect(database.inboxTabAiPrompt(archive.id)).toContain("bills (Money)");
+
+    expect(database.applyAiInboxCategory(messageId, ["Medical"], 0.8)).toBeNull();
+    expect(database.applyAiInboxCategory(messageId, ["Medical"], 0.9)).toBe("medical");
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("medical");
     database.close();
   });
 });

@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { EmailDatabase } from "../storage/database.js";
 import { AiProviderError, type AiConversationContext, type AiProvider } from "./ai-provider.js";
 import { AiConfigurationError, AiService } from "./ai-service.js";
@@ -183,6 +184,61 @@ describe("AiService", () => {
     database.close();
   });
 
+  it("adds configured Inbox tabs to categorization prompts and applies confident assignments", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const messageId = insertMessage(database);
+    const message = database.getMessage(messageId)!;
+    database.updateInboxTabSettings(message.archiveId, {
+      tabs: DEFAULT_INBOX_TABS.map((tab) => ({ ...tab, keywords: [], senderDomains: [] })),
+      aiEnabled: true,
+      aiConfidenceThreshold: 0.9
+    });
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "tab-analysis-model",
+      dailyRequestLimit: 10,
+      monthlyRequestLimit: 100
+    });
+    const analyze = vi.fn().mockResolvedValue({
+      analysis: {
+        summary: "A billing notice needs attention.",
+        categories: ["bills"],
+        priority: "normal",
+        actionRequired: false,
+        actionSummary: null,
+        spamProbability: 0.01,
+        phishingProbability: 0.01,
+        draftRecommended: false,
+        confidence: 0.95,
+        signals: ["Billing language"]
+      },
+      usage: { inputTokens: 100, outputTokens: 30 }
+    });
+    const service = new AiService(database, settings, () => ({ analyze, testConnection: vi.fn() }));
+
+    const started = service.startAnalysis(messageId);
+    await waitForJob(database, started.job.id, "completed");
+    expect((analyze.mock.calls[0]?.[2] as { prompt: string }).prompt).toContain("Inbox tab assignment is enabled");
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("bills");
+
+    const currentTabs = database.getInboxTabSettings(message.archiveId);
+    database.updateInboxTabSettings(message.archiveId, {
+      tabs: currentTabs.tabs,
+      aiEnabled: true,
+      aiConfidenceThreshold: 0.96
+    });
+    const refreshed = service.startAnalysis(messageId);
+    expect(refreshed.job.id).not.toBe(started.job.id);
+    await waitForJob(database, refreshed.job.id, "completed");
+    expect(analyze).toHaveBeenCalledTimes(2);
+    await service.close();
+    database.close();
+  });
+
   it("refuses to queue analysis until AI is configured and enabled", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
@@ -255,6 +311,78 @@ describe("AiService", () => {
       expect.objectContaining({ message: "AI calendar/to-do suggestion created for review" })
     ]));
 
+    await service.close();
+    database.close();
+  });
+
+  it("suggests one existing folder for a selected message group using saved analyses", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const firstMessageId = insertMessage(database);
+    const firstMessage = database.getMessage(firstMessageId)!;
+    const jobsFolder = database.createFolder(firstMessage.archiveId, "Jobs");
+    const secondMessageId = database.insertMessage({
+      archiveId: firstMessage.archiveId,
+      folderId: firstMessage.folderId,
+      sourceKey: "message-2",
+      internetMessageId: "<ai-service-2@example.test>",
+      subject: "Java AWS role",
+      sender: { name: "Recruiter", address: "recruiter@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-14T13:00:00.000Z",
+      receivedAt: "2026-07-14T13:00:00.000Z",
+      bodyText: "A recruiter is sharing a software engineering opportunity.",
+      bodyHtml: null,
+      headers: { "message-id": "<ai-service-2@example.test>" },
+      sizeBytes: 80,
+      attachments: []
+    });
+    saveAnalysis(database, firstMessageId, "A recruiter requested a contract review.");
+    saveAnalysis(database, secondMessageId, "A recruiter shared a Java and AWS role.");
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "filing-model",
+      dailyRequestLimit: 10,
+      monthlyRequestLimit: 100
+    });
+    const suggestFilingFolder = vi.fn().mockResolvedValue({
+      suggestion: {
+        targetFolderPath: jobsFolder.path,
+        reason: "Both messages concern recruiting and software jobs.",
+        confidence: 0.94
+      },
+      usage: { inputTokens: 120, outputTokens: 25 }
+    });
+    const service = new AiService(database, settings, () => ({
+      analyze: vi.fn(),
+      suggestFilingFolder,
+      testConnection: vi.fn()
+    }));
+
+    const suggestion = await service.suggestFilingFolder([firstMessageId, secondMessageId]);
+
+    expect(suggestFilingFolder).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: firstMessageId, analysis: expect.objectContaining({ summary: expect.stringContaining("recruiter") }) }),
+        expect.objectContaining({ id: secondMessageId, analysis: expect.objectContaining({ summary: expect.stringContaining("Java") }) })
+      ]),
+      expect.arrayContaining([jobsFolder.path]),
+      expect.any(AbortSignal)
+    );
+    expect(suggestion).toMatchObject({
+      folderId: jobsFolder.id,
+      folderPath: jobsFolder.path,
+      messageCount: 2,
+      confidence: 0.94,
+      provider: "openai",
+      model: "filing-model"
+    });
+    expect(database.getAiUsageSummary()).toMatchObject({ todayRequests: 1, todayInputTokens: 120, todayOutputTokens: 25 });
     await service.close();
     database.close();
   });

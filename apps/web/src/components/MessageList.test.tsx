@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageSummary } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { MessageList } from "./MessageList.js";
 
 const MESSAGE: MessageSummary = {
@@ -23,11 +24,21 @@ const BULK_SELECTION_PROPS = {
   selectedIds: new Set<string>(),
   onToggleSelect: vi.fn(),
   onToggleSelectAll: vi.fn(),
+  onSelectFirst: vi.fn(),
+  onSelectLoaded: vi.fn(),
+  onSelectEntireView: vi.fn(),
   onClearSelection: vi.fn(),
+  selectionBusy: false,
   bulkBusy: false,
   onBulkDelete: vi.fn(),
   onBulkArchive: vi.fn(),
-  onBulkSpam: vi.fn()
+  onBulkSpam: vi.fn(),
+  onBulkAiFile: vi.fn(),
+  aiFilingBusy: false,
+  actionBusy: false,
+  onArchive: vi.fn(),
+  onSpam: vi.fn(),
+  onToggleRead: vi.fn()
 };
 
 afterEach(cleanup);
@@ -58,9 +69,43 @@ describe("MessageList drag and drop", () => {
 
     fireEvent.dragStart(row, { dataTransfer: { effectAllowed: "", setData } });
     expect(setData).toHaveBeenCalledWith("text/plain", MESSAGE.id);
-    expect(onDragStart).toHaveBeenCalledWith(MESSAGE);
+    expect(setData).toHaveBeenCalledWith("application/x-archive-mail-messages", JSON.stringify([MESSAGE.id]));
+    expect(onDragStart).toHaveBeenCalledWith(MESSAGE, [MESSAGE.id]);
     fireEvent.dragEnd(row);
     expect(onDragEnd).toHaveBeenCalledOnce();
+  });
+
+  it("drags the full selection when a checked message row starts the drag", () => {
+    const secondMessage = { ...MESSAGE, id: "message-2", subject: "Second selected message" };
+    const onDragStart = vi.fn();
+    const setData = vi.fn();
+    const selectedIds = new Set([MESSAGE.id, secondMessage.id]);
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }, { message: secondMessage }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={onDragStart}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+        selectedIds={selectedIds}
+      />
+    );
+
+    fireEvent.dragStart(screen.getAllByRole("option")[0]!, { dataTransfer: { effectAllowed: "", setData } });
+
+    expect(setData).toHaveBeenCalledWith("text/plain", `${MESSAGE.id}\n${secondMessage.id}`);
+    expect(setData).toHaveBeenCalledWith("application/x-archive-mail-messages", JSON.stringify([...selectedIds]));
+    expect(onDragStart).toHaveBeenCalledWith(MESSAGE, [...selectedIds]);
+    expect(screen.getAllByRole("option").every((row) => row.classList.contains("dragging"))).toBe(true);
+    expect(screen.getAllByTitle("Drag to move 2 selected messages")).toHaveLength(2);
   });
 
   it("prioritizes event-linked orange, analyzed purple, and read gray row states", () => {
@@ -131,6 +176,13 @@ describe("MessageList drag and drop", () => {
         onMobileBack={vi.fn()}
         inboxCategories={{
           active: "primary",
+          tabs: DEFAULT_INBOX_TABS.map((tab) => ({
+            ...tab,
+            label: tab.id === "social" ? "Community" : tab.label,
+            enabled: tab.id === "promotions" ? false : tab.enabled,
+            keywords: [],
+            senderDomains: []
+          })),
           counts: {
             primary: 12,
             promotions: 8,
@@ -147,11 +199,43 @@ describe("MessageList drag and drop", () => {
     );
 
     expect(screen.getByRole("button", { name: "Primary, 12 messages" }).getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Social, 4 messages" }));
+    expect(screen.queryByRole("button", { name: "Promotions, 8 messages" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Community, 4 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("social");
     fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 5 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("mail_tracking");
     expect(screen.getByText("No primary messages")).toBeTruthy();
+  });
+
+  it("reveals touch actions and archives from the message row", () => {
+    const onArchive = vi.fn();
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+        onArchive={onArchive}
+      />
+    );
+
+    const row = screen.getByRole("option");
+    fireEvent.touchStart(row, { touches: [{ clientX: 12, clientY: 20 }] });
+    fireEvent.touchMove(row, { touches: [{ clientX: 100, clientY: 22 }] });
+    fireEvent.touchEnd(row);
+    expect(row.getAttribute("style")).toContain("translateX(120px)");
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive Drag this message" }));
+    expect(onArchive).toHaveBeenCalledWith(MESSAGE);
   });
 });
 
@@ -180,7 +264,9 @@ describe("MessageList bulk selection", () => {
       />
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select Drag this message" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Select Drag this message" });
+    expect(checkbox.closest("label")?.classList.contains("message-row-select-hit")).toBe(true);
+    fireEvent.click(checkbox);
     expect(onToggleSelect).toHaveBeenCalledWith(MESSAGE.id);
     expect(onSelect).not.toHaveBeenCalled();
   });
@@ -206,14 +292,59 @@ describe("MessageList bulk selection", () => {
       />
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select all shown messages" }));
+    const checkbox = screen.getByRole("checkbox", { name: "Select all loaded messages" });
+    expect(checkbox.closest("label")?.classList.contains("message-select-hit")).toBe(true);
+    fireEvent.click(checkbox);
     expect(onToggleSelectAll).toHaveBeenCalledOnce();
+  });
+
+  it("offers first 20, first 50, loaded, and entire-view selection presets", () => {
+    const onSelectFirst = vi.fn();
+    const onSelectLoaded = vi.fn();
+    const onSelectEntireView = vi.fn();
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }, { message: OTHER_MESSAGE }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={true}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+        onSelectFirst={onSelectFirst}
+        onSelectLoaded={onSelectLoaded}
+        onSelectEntireView={onSelectEntireView}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select first 20/ }));
+    expect(onSelectFirst).toHaveBeenCalledWith(20);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select first 50/ }));
+    expect(onSelectFirst).toHaveBeenCalledWith(50);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select all loaded/ }));
+    expect(onSelectLoaded).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose messages to select" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Select entire view/ }));
+    expect(onSelectEntireView).toHaveBeenCalledOnce();
   });
 
   it("shows the bulk action toolbar with a selection count once messages are selected", () => {
     const onBulkArchive = vi.fn();
     const onBulkSpam = vi.fn();
     const onBulkDelete = vi.fn();
+    const onBulkAiFile = vi.fn();
     const onClearSelection = vi.fn();
     render(
       <MessageList
@@ -234,11 +365,14 @@ describe("MessageList bulk selection", () => {
         onBulkArchive={onBulkArchive}
         onBulkSpam={onBulkSpam}
         onBulkDelete={onBulkDelete}
+        onBulkAiFile={onBulkAiFile}
         onClearSelection={onClearSelection}
       />
     );
 
     expect(screen.getByText("1 selected")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "AI file selected messages" }));
+    expect(onBulkAiFile).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Move selected to Archive" }));
     expect(onBulkArchive).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Move selected to Spam" }));
@@ -271,6 +405,7 @@ describe("MessageList bulk selection", () => {
     );
 
     expect(screen.getByRole("button", { name: "Delete selected" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "AI file selected messages" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("hides selection checkboxes when the list is read-only", () => {

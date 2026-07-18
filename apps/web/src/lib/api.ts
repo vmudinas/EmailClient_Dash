@@ -21,6 +21,7 @@ import type {
   AppleCalendarAccountCreate,
   BulkMoveDestination,
   BulkMoveResult,
+  BulkFolderMoveResult,
   CalendarAccount,
   CalendarEvent,
   CalendarEventInput,
@@ -42,13 +43,18 @@ import type {
   ImportJob,
   InboxCategory,
   InboxCategoryCounts,
+  InboxTabReclassifyResult,
+  InboxTabSettings,
+  InboxTabSettingsUpdate,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
+  MailboxMoveResult,
   MessageDetail,
   MessageFollowUp,
   MessageFollowUpCreate,
   MessageFollowUpPatch,
+  MessageFilingSuggestion,
   MessageThread,
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
@@ -205,6 +211,13 @@ export class ApiClient {
     return this.request(`/api/folders/${encodeURIComponent(sourceFolderId)}/combine`, {
       method: "POST",
       body: JSON.stringify({ targetFolderId })
+    });
+  }
+
+  moveMailbox(folderId: string, targetParentId: string | null): Promise<MailboxMoveResult> {
+    return this.request(`/api/folders/${encodeURIComponent(folderId)}/move`, {
+      method: "POST",
+      body: JSON.stringify({ targetParentId })
     });
   }
 
@@ -371,6 +384,7 @@ export class ApiClient {
   listMessages(options: {
     archiveId?: string;
     folderId?: string;
+    isRead?: boolean;
     starred?: boolean;
     inboxCategory?: InboxCategory;
     cursor?: string;
@@ -379,8 +393,25 @@ export class ApiClient {
     return this.request(`/api/messages?${queryString(options)}`);
   }
 
-  inboxCategoryCounts(options: { archiveId?: string; folderId?: string }): Promise<InboxCategoryCounts> {
+  inboxCategoryCounts(options: { archiveId?: string; folderId?: string; isRead?: boolean }): Promise<InboxCategoryCounts> {
     return this.request(`/api/messages/category-counts?${queryString(options)}`);
+  }
+
+  inboxTabSettings(archiveId: string): Promise<InboxTabSettings> {
+    return this.request(`/api/inbox-tabs?${queryString({ archiveId })}`);
+  }
+
+  updateInboxTabSettings(archiveId: string, input: InboxTabSettingsUpdate): Promise<InboxTabSettings> {
+    return this.request(`/api/admin/inbox-tabs/${encodeURIComponent(archiveId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  reclassifyInboxTabs(archiveId: string): Promise<InboxTabReclassifyResult> {
+    return this.request(`/api/admin/inbox-tabs/${encodeURIComponent(archiveId)}/reclassify`, {
+      method: "POST"
+    });
   }
 
   search(
@@ -538,6 +569,20 @@ export class ApiClient {
     return this.request("/api/messages/bulk-move", {
       method: "POST",
       body: JSON.stringify({ messageIds, destination })
+    });
+  }
+
+  suggestBulkFilingFolder(messageIds: string[]): Promise<MessageFilingSuggestion> {
+    return this.request("/api/messages/ai/filing-suggestion", {
+      method: "POST",
+      body: JSON.stringify({ messageIds })
+    });
+  }
+
+  bulkMoveMessagesToFolder(messageIds: string[], folderId: string): Promise<BulkFolderMoveResult> {
+    return this.request("/api/messages/bulk-move-to-folder", {
+      method: "POST",
+      body: JSON.stringify({ messageIds, folderId })
     });
   }
 
@@ -963,6 +1008,13 @@ export class ApiClient {
     return this.request("/api/admin/sender-filing/organize", {
       method: "POST",
       body: JSON.stringify({ archiveId })
+    });
+  }
+
+  updateSenderFilingRuleFolder(ruleId: string, folderId: string): Promise<SenderFilingStatus> {
+    return this.request(`/api/admin/sender-filing/rules/${encodeURIComponent(ruleId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ folderId })
     });
   }
 

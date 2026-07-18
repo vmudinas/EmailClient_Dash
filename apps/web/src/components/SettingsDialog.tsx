@@ -7,13 +7,18 @@ import {
   type FormEvent
 } from "react";
 import {
+  Activity,
   AlertTriangle,
   Apple,
   BarChart3,
   BrainCircuit,
+  BookOpen,
   CalendarDays,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
   CloudDownload,
   Database,
   Download,
@@ -64,13 +69,15 @@ import type {
   SenderFilingStatus,
   SmartMailRule,
   SmartMailRuleSuggestion,
+  InboxTabDefinition,
+  InboxTabSettings,
   UserSummary
 } from "@email-client/shared";
 import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS, NEWS_SOURCE_IDS, NEWS_SOURCE_LABELS } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "tools" | "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "inbox-tabs" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -81,13 +88,18 @@ interface SettingsDialogProps {
   session: AuthSessionInfo;
   onClose(): void;
   onSignedOut(): void;
+  onOpenGuide?(): void;
+  onOpenDiagnostics?(): void;
+  pendingDiagnosticCount?: number;
   onAddGoogleCalendar?(): void;
   onReauthorizeGoogleCalendar?(connection: GmailConnection): void;
   onStockSettingsChanged?(): void;
   onNewsSettingsChanged?(): void;
+  onInboxTabSettingsChanged?(settings: InboxTabSettings): void;
 }
 
 const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
+  { id: "tools", label: "Tools", icon: Activity },
   { id: "database", label: "Database", icon: Database },
   { id: "gmail", label: "Gmail", icon: MailCheck },
   { id: "calendars", label: "Calendars", icon: CalendarDays },
@@ -97,6 +109,7 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "reply-styles", label: "Reply styles", icon: Sparkles },
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
   { id: "smart-rules", label: "Smart rules", icon: MailCheck },
+  { id: "inbox-tabs", label: "Inbox tabs", icon: ListFilter },
   { id: "ai", label: "AI", icon: BrainCircuit },
   { id: "resumes", label: "Resumes", icon: Paperclip },
   { id: "insights", label: "Insights", icon: BarChart3 },
@@ -111,10 +124,14 @@ export function SettingsDialog({
   session,
   onClose,
   onSignedOut,
+  onOpenGuide,
+  onOpenDiagnostics,
+  pendingDiagnosticCount = 0,
   onAddGoogleCalendar,
   onReauthorizeGoogleCalendar,
   onStockSettingsChanged,
-  onNewsSettingsChanged
+  onNewsSettingsChanged,
+  onInboxTabSettingsChanged
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
@@ -123,6 +140,7 @@ export function SettingsDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(true);
 
   const loadAdminData = useCallback(async () => {
     if (!api) return;
@@ -143,7 +161,10 @@ export function SettingsDialog({
   }, [api]);
 
   useEffect(() => {
-    if (open) void loadAdminData();
+    if (open) {
+      setMobileMenuOpen(true);
+      void loadAdminData();
+    }
   }, [open, loadAdminData]);
 
   if (!open) return null;
@@ -155,7 +176,7 @@ export function SettingsDialog({
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`dialog settings-dialog ${mobileMenuOpen ? "mobile-settings-menu-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
           <div><Settings size={20} /><h2 id="settings-title">Admin settings</h2></div>
           <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
@@ -165,15 +186,29 @@ export function SettingsDialog({
             {MENU.map((item) => {
               const Icon = item.icon;
               return (
-                <button key={item.id} className={section === item.id ? "selected" : ""} onClick={() => { setSection(item.id); setError(""); setNotice(""); }}>
-                  <Icon size={17} /><span>{item.label}</span>
+                <button key={item.id} className={section === item.id ? "selected" : ""} onClick={() => { setSection(item.id); setMobileMenuOpen(false); setError(""); setNotice(""); }}>
+                  <Icon size={17} /><span>{item.label}</span><ChevronRight className="settings-menu-chevron" size={16} />
                 </button>
               );
             })}
           </nav>
           <article className="settings-content">
-            {loading && !settings ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
+            <button className="settings-mobile-section-trigger mobile-only" onClick={() => setMobileMenuOpen(true)}>
+              {(() => {
+                const selectedItem = MENU.find((item) => item.id === section) ?? MENU[0]!;
+                const Icon = selectedItem.icon;
+                return <><Icon size={18} /><span>{selectedItem.label}</span><ChevronRight size={17} /></>;
+              })()}
+            </button>
+            {loading && !settings && section !== "tools" ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
               <>
+                {section === "tools" && (
+                  <AdminToolsPanel
+                    onOpenGuide={onOpenGuide}
+                    onOpenDiagnostics={onOpenDiagnostics}
+                    pendingDiagnosticCount={pendingDiagnosticCount}
+                  />
+                )}
                 {section === "database" && settings && (
                   <DatabasePanel
                     api={api!}
@@ -258,6 +293,16 @@ export function SettingsDialog({
                 {section === "smart-rules" && (
                   <SmartMailRulesPanel api={api!} busy={busy} onBusy={setBusy} onError={setError} onNotice={showNotice} />
                 )}
+                {section === "inbox-tabs" && (
+                  <InboxTabsPanel
+                    api={api!}
+                    busy={busy}
+                    onBusy={setBusy}
+                    onError={setError}
+                    onNotice={showNotice}
+                    onChanged={onInboxTabSettingsChanged}
+                  />
+                )}
                 {section === "ai" && settings && (
                   <AiPanel
                     api={api!}
@@ -305,6 +350,212 @@ export function SettingsDialog({
       </section>
     </div>
   );
+}
+
+function AdminToolsPanel({
+  onOpenGuide,
+  onOpenDiagnostics,
+  pendingDiagnosticCount
+}: {
+  onOpenGuide?(): void;
+  onOpenDiagnostics?(): void;
+  pendingDiagnosticCount: number;
+}) {
+  return (
+    <>
+      <h3>Tools</h3>
+      <p>Open product guidance or inspect imports, synchronization, AI jobs, and client failures.</p>
+      <div className="admin-tool-grid">
+        <button type="button" className="admin-tool-card" onClick={onOpenGuide} disabled={!onOpenGuide}>
+          <span className="admin-tool-icon"><BookOpen size={22} /></span>
+          <span><strong>Guide</strong><small>Learn how mail, Gmail sync, AI, security, and organization features work.</small></span>
+          <ChevronRight size={18} />
+        </button>
+        <button type="button" className="admin-tool-card" onClick={onOpenDiagnostics} disabled={!onOpenDiagnostics}>
+          <span className="admin-tool-icon diagnostics"><Activity size={22} /></span>
+          <span><strong>Diagnostics</strong><small>Review job progress, authorization issues, retries, and application failures.</small></span>
+          {pendingDiagnosticCount > 0 && <b className="admin-tool-count">{Math.min(99, pendingDiagnosticCount)}</b>}
+          <ChevronRight size={18} />
+        </button>
+      </div>
+    </>
+  );
+}
+
+function InboxTabsPanel({
+  api,
+  busy,
+  onBusy,
+  onError,
+  onNotice,
+  onChanged
+}: {
+  api: ApiClient;
+  busy: boolean;
+  onBusy(value: boolean): void;
+  onError(value: string): void;
+  onNotice(value: string): void;
+  onChanged?(settings: InboxTabSettings): void;
+}) {
+  const [archives, setArchives] = useState<ArchiveModel[]>([]);
+  const [archiveId, setArchiveId] = useState("");
+  const [settings, setSettings] = useState<InboxTabSettings | null>(null);
+  const [keywordText, setKeywordText] = useState<Record<string, string>>({});
+  const [domainText, setDomainText] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  const acceptSettings = useCallback((next: InboxTabSettings) => {
+    setSettings(next);
+    setKeywordText(Object.fromEntries(next.tabs.map((tab) => [tab.id, tab.keywords.join(", ")])));
+    setDomainText(Object.fromEntries(next.tabs.map((tab) => [tab.id, tab.senderDomains.join(", ")])));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void api.listArchives().then((items) => {
+      if (!active) return;
+      const configurable = items.filter((archive) => archive.status !== "failed");
+      setArchives(configurable);
+      setArchiveId((current) => configurable.some((archive) => archive.id === current)
+        ? current
+        : configurable[0]?.id ?? "");
+    }).catch((error) => { if (active) onError(errorText(error)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [api, onError]);
+
+  useEffect(() => {
+    if (!archiveId) {
+      setSettings(null);
+      return;
+    }
+    let active = true;
+    setLoading(true);
+    void api.inboxTabSettings(archiveId)
+      .then((next) => { if (active) acceptSettings(next); })
+      .catch((error) => { if (active) onError(errorText(error)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [acceptSettings, api, archiveId, onError]);
+
+  const updateTab = (id: InboxTabDefinition["id"], patch: Partial<InboxTabDefinition>) => {
+    setSettings((current) => current ? {
+      ...current,
+      tabs: current.tabs.map((tab) => tab.id === id ? { ...tab, ...patch } : tab)
+    } : current);
+  };
+
+  const moveTab = (id: InboxTabDefinition["id"], direction: -1 | 1) => {
+    setSettings((current) => {
+      if (!current) return current;
+      const ordered = [...current.tabs].sort((left, right) => left.position - right.position);
+      const index = ordered.findIndex((tab) => tab.id === id);
+      const targetIndex = index + direction;
+      if (index < 0 || targetIndex < 0 || targetIndex >= ordered.length) return current;
+      [ordered[index], ordered[targetIndex]] = [ordered[targetIndex]!, ordered[index]!];
+      return { ...current, tabs: ordered.map((tab, position) => ({ ...tab, position })) };
+    });
+  };
+
+  const persist = async (): Promise<InboxTabSettings> => {
+    if (!settings) throw new Error("Select an archive first");
+    const saved = await api.updateInboxTabSettings(settings.archiveId, {
+      tabs: settings.tabs.map((tab) => ({
+        ...tab,
+        keywords: splitTabRules(keywordText[tab.id]),
+        senderDomains: splitTabRules(domainText[tab.id])
+      })),
+      aiEnabled: settings.aiEnabled,
+      aiConfidenceThreshold: settings.aiConfidenceThreshold
+    });
+    acceptSettings(saved);
+    onChanged?.(saved);
+    return saved;
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    onBusy(true);
+    onError("");
+    try {
+      await persist();
+      onNotice("Inbox tab configuration saved.");
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const reclassify = async () => {
+    if (!settings) return;
+    onBusy(true);
+    onError("");
+    try {
+      const saved = await persist();
+      const result = await api.reclassifyInboxTabs(saved.archiveId);
+      acceptSettings(result.settings);
+      onChanged?.(result.settings);
+      onNotice(`Reclassified ${result.scannedMessages.toLocaleString()} Inbox messages; ${result.changedMessages.toLocaleString()} changed tabs.`);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3>Inbox tabs</h3>
+      <p>Configure the visible tab names, order, colors, and deterministic matching rules for each archive. Primary remains the safe fallback.</p>
+      <label className="settings-standalone-field">Archive
+        <select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={busy || loading}>
+          {archives.length === 0 && <option value="">No archives available</option>}
+          {archives.map((archive) => <option key={archive.id} value={archive.id}>{archive.name}</option>)}
+        </select>
+      </label>
+      {loading ? <div className="settings-loading"><LoaderCircle className="spin" size={18} /> Loading Inbox tabs</div> : settings && (
+        <form className="settings-form inbox-tab-settings" onSubmit={(event) => void save(event)}>
+          <div className="inbox-tab-editor-list">
+            {[...settings.tabs].sort((left, right) => left.position - right.position).map((tab, index) => (
+              <section className="inbox-tab-editor" key={tab.id} style={{ borderLeftColor: tab.color }}>
+                <div className="inbox-tab-editor-heading">
+                  <input className="inbox-tab-color" type="color" value={tab.color} onChange={(event) => updateTab(tab.id, { color: event.target.value })} aria-label={`${tab.label} color`} disabled={busy} />
+                  <label>Tab name<input value={tab.label} onChange={(event) => updateTab(tab.id, { label: event.target.value })} disabled={busy} /></label>
+                  <label className="settings-checkbox"><input type="checkbox" checked={tab.enabled} onChange={(event) => updateTab(tab.id, { enabled: event.target.checked })} disabled={busy || tab.id === "primary"} /><span>Visible</span></label>
+                  <div className="inbox-tab-order-actions">
+                    <button type="button" className="icon-button" onClick={() => moveTab(tab.id, -1)} disabled={busy || index === 0} title="Move tab up" aria-label={`Move ${tab.label} up`}><ChevronUp size={15} /></button>
+                    <button type="button" className="icon-button" onClick={() => moveTab(tab.id, 1)} disabled={busy || index === settings.tabs.length - 1} title="Move tab down" aria-label={`Move ${tab.label} down`}><ChevronDown size={15} /></button>
+                  </div>
+                </div>
+                <label>Description<input value={tab.description} onChange={(event) => updateTab(tab.id, { description: event.target.value })} disabled={busy} /></label>
+                <div className="settings-form-grid">
+                  <label>Keywords<input value={keywordText[tab.id] ?? ""} onChange={(event) => setKeywordText((current) => ({ ...current, [tab.id]: event.target.value }))} placeholder="invoice, payment due" disabled={busy} /></label>
+                  <label>Sender domains<input value={domainText[tab.id] ?? ""} onChange={(event) => setDomainText((current) => ({ ...current, [tab.id]: event.target.value }))} placeholder="example.com, alerts.example.org" disabled={busy} /></label>
+                </div>
+              </section>
+            ))}
+          </div>
+          <section className="inbox-tab-ai-settings">
+            <label className="settings-checkbox settings-toggle-row"><input type="checkbox" checked={settings.aiEnabled} onChange={(event) => setSettings({ ...settings, aiEnabled: event.target.checked })} disabled={busy} /><span><strong>Use AI tab assignment</strong><small>Analyze jobs with the Categorize skill receive these tab definitions and can update the tab when confidence is high enough.</small></span></label>
+            <label>Minimum AI confidence
+              <input type="number" min="0" max="1" step="0.05" value={settings.aiConfidenceThreshold} onChange={(event) => setSettings({ ...settings, aiConfidenceThreshold: Number(event.target.value) })} disabled={busy || !settings.aiEnabled} />
+            </label>
+          </section>
+          <div className="settings-warning neutral"><BrainCircuit size={17} /><span>Keyword and domain rules run immediately for new imported Inbox mail. AI assignment runs through your existing Analyze schedules, so queue status and progress stay in the AI panel.</span></div>
+          <div className="settings-button-row">
+            <button className="primary-button compact" disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save tabs</button>
+            <button type="button" className="secondary-button" disabled={busy} onClick={() => void reclassify()}><RefreshCw size={15} /> Save and reclassify Inbox</button>
+          </div>
+        </form>
+      )}
+    </>
+  );
+}
+
+function splitTabRules(value: string | undefined): string[] {
+  return [...new Set((value ?? "").split(/[,\n]/).map((part) => part.trim()).filter(Boolean))];
 }
 
 function ReplyStylesPanel({
@@ -619,8 +870,10 @@ function SenderFilingPanel({
 }) {
   const [archives, setArchives] = useState<ArchiveModel[]>([]);
   const [archiveId, setArchiveId] = useState("");
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [status, setStatus] = useState<SenderFilingStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ruleBusyId, setRuleBusyId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -641,12 +894,18 @@ function SenderFilingPanel({
   const loadStatus = useCallback(async (selectedArchiveId: string) => {
     if (!selectedArchiveId) {
       setStatus(null);
+      setFolders([]);
       return;
     }
     setLoading(true);
     onError("");
     try {
-      setStatus(await api.senderFilingStatus(selectedArchiveId));
+      const [nextStatus, nextFolders] = await Promise.all([
+        api.senderFilingStatus(selectedArchiveId),
+        api.listFolders(selectedArchiveId)
+      ]);
+      setStatus(nextStatus);
+      setFolders(nextFolders);
     } catch (loadError) {
       onError(errorText(loadError));
     } finally {
@@ -664,10 +923,33 @@ function SenderFilingPanel({
     try {
       const nextStatus = await api.organizeTopSenders(archiveId);
       setStatus(nextStatus);
+      setFolders(await api.listFolders(archiveId));
       onNotice(`Sender rules active for ${nextStatus.rules.length} sender${nextStatus.rules.length === 1 ? "" : "s"}. Moved ${nextStatus.lastRunMovedMessages} message${nextStatus.lastRunMovedMessages === 1 ? "" : "s"}.`);
     } catch (organizeError) {
       onError(errorText(organizeError));
     } finally {
+      onBusy(false);
+    }
+  };
+
+  const changeRuleFolder = async (rule: SenderFilingStatus["rules"][number], folderId: string) => {
+    if (folderId === rule.folderId) return;
+    const folder = folders.find((entry) => entry.id === folderId);
+    if (!folder) return;
+    if (!window.confirm(
+      `Move ${rule.senderName || rule.senderAddress} from ${rule.folderPath} to ${folder.path}? Existing matching messages in the old folder and Inbox will move, and future Inbox mail will use the new folder.`
+    )) return;
+
+    setRuleBusyId(rule.id);
+    onBusy(true);
+    onError("");
+    try {
+      setStatus(await api.updateSenderFilingRuleFolder(rule.id, folderId));
+      onNotice(`Sender rule updated: ${rule.senderAddress} → ${folder.path}`);
+    } catch (updateError) {
+      onError(errorText(updateError));
+    } finally {
+      setRuleBusyId(null);
       onBusy(false);
     }
   };
@@ -726,7 +1008,17 @@ function SenderFilingPanel({
                   <td><strong>{rule.senderName || rule.senderAddress}</strong>{rule.senderName && <small>{rule.senderAddress}</small>}</td>
                   <td>{rule.messageCount.toLocaleString()}</td>
                   <td>
-                    <strong>{rule.folderPath}</strong>
+                    <select
+                      className="sender-rule-folder-select"
+                      value={rule.folderId}
+                      onChange={(event) => void changeRuleFolder(rule, event.target.value)}
+                      disabled={busy || ruleBusyId === rule.id}
+                      aria-label={`Folder for ${rule.senderName || rule.senderAddress}`}
+                    >
+                      {folders.map((folder) => (
+                        <option key={folder.id} value={folder.id}>{folder.path}</option>
+                      ))}
+                    </select>
                     {rule.ruleType === "spam" && <small>Always spam</small>}
                   </td>
                 </tr>
@@ -935,7 +1227,10 @@ function GmailPanel({
   const pullAll = async (connection: GmailConnection) => {
     if (!window.confirm(
       `Pull the complete Gmail history for ${connection.email}, including Spam and Trash? `
-      + "This removes the original date filter for future syncs and can take a long time for large accounts."
+      + "This removes the original date filter for future syncs and can take a long time for large accounts. "
+      + (syncMailboxActions
+        ? "Local mailbox positions will also be reconciled to Gmail."
+        : "Gmail mailbox actions are not currently mirrored.")
     )) return;
     setPullingId(connection.id);
     onError("");
@@ -1060,7 +1355,7 @@ function GmailPanel({
         <div className="settings-title-row">
           <div>
             <h3>Connected account pulls</h3>
-            <p>Pull every message from Gmail, across the full account history. Progress continues if you close this window.</p>
+            <p>Pull every message from Gmail across the full account history. When mailbox mirroring is enabled, the pull also repairs local folder changes that have not reached Gmail.</p>
           </div>
           <button type="button" className="secondary-button" disabled={connectionsLoading} onClick={() => void refreshConnections(true)}>
             <RefreshCw size={16} className={connectionsLoading ? "spin" : ""} /> Refresh
