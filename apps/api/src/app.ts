@@ -20,6 +20,8 @@ import {
   archiveMergeSchema,
   authLoginSchema,
   bulkMoveMessagesSchema,
+  bulkFilingSuggestionRequestSchema,
+  bulkFolderMoveSchema,
   calendarEventInputSchema,
   clientDiagnosticSchema,
   databaseSettingsPatchSchema,
@@ -60,6 +62,7 @@ import {
   type AiJob,
   type AiProviderId,
   type BulkMoveDestination,
+  type BulkFolderMoveResult,
   type BulkMoveResult,
   type DiagnosticCategory,
   type DiagnosticLevel,
@@ -968,6 +971,66 @@ export class EmailApiRuntime {
       return result;
     });
 
+    this.app.post<{ Body: unknown }>("/api/messages/bulk-move-to-folder", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = bulkFolderMoveSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose messages and a destination mailbox" });
+      }
+      const folder = this.database.getFolder(parsed.data.folderId);
+      if (!folder) return reply.code(404).send({ error: "Destination mailbox not found" });
+      const pendingMessageIds: string[] = [];
+      let alreadyThere = 0;
+      let failed = 0;
+      for (const messageId of parsed.data.messageIds) {
+        const message = this.database.getMessage(messageId);
+        if (!message || message.archiveId !== folder.archiveId) {
+          failed += 1;
+        } else if (message.folderId === folder.id) {
+          alreadyThere += 1;
+        } else {
+          pendingMessageIds.push(messageId);
+        }
+      }
+      try {
+        await this.gmail.syncMessagesMove(pendingMessageIds, folder.id);
+      } catch (error) {
+        return this.mailboxActionErrorReply(reply, error, "Selected messages could not be moved");
+      }
+      let moved = 0;
+      for (const messageId of pendingMessageIds) {
+        try {
+          this.database.moveMessage(messageId, folder.id);
+          moved += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const result: BulkFolderMoveResult = {
+        folderId: folder.id,
+        folderPath: folder.path,
+        moved,
+        alreadyThere,
+        failed
+      };
+      this.database.recordDiagnostic({
+        level: failed > 0 ? "warning" : "info",
+        category: "system",
+        message: `Bulk move filed ${moved} message${moved === 1 ? "" : "s"} in ${folder.path}`,
+        archiveId: folder.archiveId,
+        context: {
+          operation: "bulk_move_to_folder",
+          folderId: folder.id,
+          folderPath: folder.path,
+          requested: parsed.data.messageIds.length,
+          moved,
+          alreadyThere,
+          failed
+        }
+      });
+      return result;
+    });
+
     this.app.post<{ Params: { messageId: string } }>(
       "/api/messages/:messageId/sender-folder",
       async (request, reply) => {
@@ -1083,6 +1146,22 @@ export class EmailApiRuntime {
         }
       }
     );
+
+    this.app.post<{ Body: unknown }>("/api/messages/ai/filing-suggestion", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = bulkFilingSuggestionRequestSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose messages to file" });
+      }
+      try {
+        return await this.ai.suggestFilingFolder(parsed.data.messageIds);
+      } catch (error) {
+        if (error instanceof AiMessageNotFoundError) return reply.code(404).send({ error: error.message });
+        if (error instanceof AiConfigurationError) return reply.code(503).send({ error: error.message });
+        if (error instanceof AiBudgetError) return reply.code(429).send({ error: error.message });
+        return reply.code(502).send({ error: error instanceof Error ? error.message : "AI mailbox suggestion failed" });
+      }
+    });
 
     this.app.post<{ Params: { messageId: string }; Body: unknown }>(
       "/api/messages/:messageId/ai/draft-reply",

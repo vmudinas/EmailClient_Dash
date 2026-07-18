@@ -21,6 +21,7 @@ import type {
   AppleCalendarAccountCreate,
   BulkMoveDestination,
   BulkMoveResult,
+  BulkFolderMoveResult,
   CalendarAccount,
   CalendarEvent,
   CalendarEventInput,
@@ -52,6 +53,7 @@ import type {
   MessageFollowUp,
   MessageFollowUpCreate,
   MessageFollowUpPatch,
+  MessageFilingSuggestion,
   MessageThread,
   MessageActionSuggestion,
   MessageActionSuggestionRequest,
@@ -558,6 +560,20 @@ export class ApiClient {
     return this.request("/api/messages/bulk-move", {
       method: "POST",
       body: JSON.stringify({ messageIds, destination })
+    });
+  }
+
+  suggestBulkFilingFolder(messageIds: string[]): Promise<MessageFilingSuggestion> {
+    return this.request("/api/messages/ai/filing-suggestion", {
+      method: "POST",
+      body: JSON.stringify({ messageIds })
+    });
+  }
+
+  bulkMoveMessagesToFolder(messageIds: string[], folderId: string): Promise<BulkFolderMoveResult> {
+    return this.request("/api/messages/bulk-move-to-folder", {
+      method: "POST",
+      body: JSON.stringify({ messageIds, folderId })
     });
   }
 

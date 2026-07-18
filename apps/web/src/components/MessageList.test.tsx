@@ -33,6 +33,8 @@ const BULK_SELECTION_PROPS = {
   onBulkDelete: vi.fn(),
   onBulkArchive: vi.fn(),
   onBulkSpam: vi.fn(),
+  onBulkAiFile: vi.fn(),
+  aiFilingBusy: false,
   actionBusy: false,
   onArchive: vi.fn(),
   onSpam: vi.fn(),
@@ -308,6 +310,7 @@ describe("MessageList bulk selection", () => {
     const onBulkArchive = vi.fn();
     const onBulkSpam = vi.fn();
     const onBulkDelete = vi.fn();
+    const onBulkAiFile = vi.fn();
     const onClearSelection = vi.fn();
     render(
       <MessageList
@@ -328,11 +331,14 @@ describe("MessageList bulk selection", () => {
         onBulkArchive={onBulkArchive}
         onBulkSpam={onBulkSpam}
         onBulkDelete={onBulkDelete}
+        onBulkAiFile={onBulkAiFile}
         onClearSelection={onClearSelection}
       />
     );
 
     expect(screen.getByText("1 selected")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "AI file selected messages" }));
+    expect(onBulkAiFile).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Move selected to Archive" }));
     expect(onBulkArchive).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Move selected to Spam" }));
@@ -365,6 +371,7 @@ describe("MessageList bulk selection", () => {
     );
 
     expect(screen.getByRole("button", { name: "Delete selected" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "AI file selected messages" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("hides selection checkboxes when the list is read-only", () => {

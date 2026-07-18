@@ -916,7 +916,7 @@ describe("Email API bulk message actions", () => {
     }));
     runtimes.push(runtime);
     await runtime.initialize();
-    const { messageIds } = await setUpInboxMessages(runtime, 3);
+    const { archive, messageIds } = await setUpInboxMessages(runtime, 4);
 
     const unauthorized = await runtime.app.inject({
       method: "POST",
@@ -973,6 +973,18 @@ describe("Email API bulk message actions", () => {
     });
     expect(spammed.statusCode).toBe(200);
     expect(spammed.json()).toMatchObject({ destination: "spam", folderPaths: ["Spam"], moved: 1, alreadyThere: 0, failed: 1 });
+
+    const jobsFolder = runtime.database.createFolder(archive.id, "Jobs");
+    const filed = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-move-to-folder",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { messageIds: [messageIds[3]], folderId: jobsFolder.id }
+    });
+    expect(filed.statusCode).toBe(200);
+    expect(filed.json()).toMatchObject({ folderId: jobsFolder.id, folderPath: "Jobs", moved: 1, alreadyThere: 0, failed: 0 });
+    expect(runtime.database.getMessage(messageIds[3]!)?.folderId).toBe(jobsFolder.id);
 
     const invalid = await runtime.app.inject({
       method: "POST",

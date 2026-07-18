@@ -1244,6 +1244,17 @@ textarea:focus-visible {
   margin-left: auto;
 }
 
+.message-bulk-actions .ai-bulk-file {
+  border-color: #cfc1da;
+  color: #684f78;
+  background: #f8f4fb;
+}
+
+.message-bulk-actions .ai-bulk-file:hover:not(:disabled) {
+  border-color: #a88fba;
+  background: #f1eaf6;
+}
+
 .inbox-category-tabs {
   display: grid;
   grid-template-columns: repeat(var(--inbox-tab-count, 7), minmax(108px, 1fr));

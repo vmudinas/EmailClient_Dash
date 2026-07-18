@@ -70,6 +70,8 @@ interface MessageListProps {
   onBulkDelete(): void;
   onBulkArchive(): void;
   onBulkSpam(): void;
+  onBulkAiFile(): void;
+  aiFilingBusy: boolean;
   actionBusy: boolean;
   onArchive(message: MessageSummary): void;
   onSpam(message: MessageSummary): void;
@@ -112,6 +114,8 @@ export function MessageList({
   onBulkDelete,
   onBulkArchive,
   onBulkSpam,
+  onBulkAiFile,
+  aiFilingBusy,
   actionBusy,
   onArchive,
   onSpam,
@@ -152,6 +156,9 @@ export function MessageList({
             {selectionMenu}
             <span>{selectedCount.toLocaleString()} selected</span>
             <div className="message-bulk-actions">
+              <button className="icon-button ai-bulk-file" onClick={onBulkAiFile} disabled={bulkBusy} title="Ask AI where to file selected messages" aria-label="AI file selected messages">
+                {aiFilingBusy ? <LoaderCircle className="spin" size={17} /> : <BrainCircuit size={17} />}
+              </button>
               <button className="icon-button" onClick={onBulkArchive} disabled={bulkBusy} title="Move to Archive" aria-label="Move selected to Archive">
                 <Archive size={17} />
               </button>

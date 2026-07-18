@@ -157,6 +157,7 @@ export function App() {
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
   const [selectionBusy, setSelectionBusy] = useState(false);
   const [bulkActionBusy, setBulkActionBusy] = useState(false);
+  const [aiFilingBusy, setAiFilingBusy] = useState(false);
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -1427,6 +1428,47 @@ export function App() {
     }
   };
 
+  const bulkAiFile = async () => {
+    if (!api || readOnly || bulkSelectedIds.size === 0) return;
+    const messageIds = [...bulkSelectedIds];
+    setBulkActionBusy(true);
+    setAiFilingBusy(true);
+    try {
+      const suggestion = await api.suggestBulkFilingFolder(messageIds);
+      if (!suggestion.folderId || !suggestion.folderPath) {
+        showError(`AI did not find one folder for this selection: ${suggestion.reason}`);
+        return;
+      }
+      const confidence = Math.round(suggestion.confidence * 100);
+      const accepted = window.confirm(
+        `AI recommends moving ${messageIds.length.toLocaleString()} selected message${messageIds.length === 1 ? "" : "s"} to "${suggestion.folderPath}".\n\n`
+        + `Confidence: ${confidence}%\n${suggestion.reason}\n\nMove all selected messages to this folder?`
+      );
+      if (!accepted) return;
+      const result = await api.bulkMoveMessagesToFolder(messageIds, suggestion.folderId);
+      if (message && messageIds.includes(message.id)) {
+        setSelectedMessageId(null);
+        setMessage(null);
+      }
+      setBulkSelectedIds(new Set());
+      await Promise.all([
+        refreshArchives(),
+        loadMessages(false),
+        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+      ]);
+      showError(
+        `AI filed ${result.moved.toLocaleString()} message${result.moved === 1 ? "" : "s"} in ${result.folderPath}`
+        + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
+        + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : "")
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "AI could not recommend a mailbox");
+    } finally {
+      setAiFilingBusy(false);
+      setBulkActionBusy(false);
+    }
+  };
+
   const dropMessageIntoFolder = (messageId: string, folderId: string) => {
     setDraggedMessage(null);
     void moveMessage(messageId, folderId);
@@ -1836,6 +1878,8 @@ export function App() {
               onBulkDelete={() => void bulkMove("trash")}
               onBulkArchive={() => void bulkMove("archived")}
               onBulkSpam={() => void bulkMove("spam")}
+              onBulkAiFile={() => void bulkAiFile()}
+              aiFilingBusy={aiFilingBusy}
               actionBusy={moveBusy || spamBusy}
               onArchive={(target) => void archiveMessage(target)}
               onSpam={(target) => void spamSender(target)}

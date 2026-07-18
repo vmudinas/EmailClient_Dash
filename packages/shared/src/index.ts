@@ -1174,6 +1174,38 @@ export interface BulkMoveResult {
   failed: number;
 }
 
+export const bulkFolderMoveSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(500),
+  folderId: z.string().uuid()
+}).strict();
+
+export type BulkFolderMoveRequest = z.infer<typeof bulkFolderMoveSchema>;
+
+export interface BulkFolderMoveResult {
+  folderId: string;
+  folderPath: string;
+  moved: number;
+  alreadyThere: number;
+  failed: number;
+}
+
+export const bulkFilingSuggestionRequestSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(500)
+    .transform((messageIds) => [...new Set(messageIds)])
+}).strict();
+
+export type BulkFilingSuggestionRequest = z.infer<typeof bulkFilingSuggestionRequestSchema>;
+
+export interface MessageFilingSuggestion {
+  folderId: string | null;
+  folderPath: string | null;
+  reason: string;
+  confidence: number;
+  messageCount: number;
+  provider: AiProviderId;
+  model: string;
+}
+
 export const senderFilingArchiveSchema = z.object({
   archiveId: z.string().uuid()
 }).strict();
@@ -1467,6 +1499,14 @@ export const messageAnalysisOutputSchema = z.object({
 }).strict();
 
 export type MessageAnalysisOutput = z.infer<typeof messageAnalysisOutputSchema>;
+
+export const messageFilingSuggestionOutputSchema = z.object({
+  targetFolderPath: z.string().trim().min(1).max(500).nullable(),
+  reason: z.string().trim().min(1).max(800),
+  confidence: z.number().min(0).max(1)
+}).strict();
+
+export type MessageFilingSuggestionOutput = z.infer<typeof messageFilingSuggestionOutputSchema>;
 
 export const aiDraftReplyOutputSchema = z.object({
   workRelated: z.boolean(),
