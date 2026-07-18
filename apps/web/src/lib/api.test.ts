@@ -123,7 +123,8 @@ describe("ApiClient request headers", () => {
       .mockResolvedValueOnce(jsonResponse({ authorizationUrl: "https://accounts.example/auth", expiresAt: "2026-07-13T01:00:00.000Z" }))
       .mockResolvedValueOnce(jsonResponse({ id: "sent-1", threadId: "thread-1", localCopyImported: true }))
       .mockResolvedValueOnce(jsonResponse({ archive: {}, movedMessages: 0, movedFolders: 0, movedAttachments: 0 }))
-      .mockResolvedValueOnce(jsonResponse({ mailbox: {}, movedMessages: 0, removedMailboxes: 0, movedAttachments: 0 }));
+      .mockResolvedValueOnce(jsonResponse({ mailbox: {}, movedMessages: 0, removedMailboxes: 0, movedAttachments: 0 }))
+      .mockResolvedValueOnce(jsonResponse({ mailbox: {}, movedMailboxes: 0 }));
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient({
       apiBaseUrl: "http://127.0.0.1:3001",
@@ -148,6 +149,7 @@ describe("ApiClient request headers", () => {
     });
     await client.combineArchives("source-id", "target-id");
     await client.combineMailboxes("source-folder", "target-folder");
+    await client.moveMailbox("move-folder", "parent-folder");
 
     expect(fetchMock.mock.calls[0]![0]).toBe("http://127.0.0.1:3001/api/gmail/oauth/start");
     expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toMatchObject({ archiveName: "Gmail", folderName: "Inbox" });
@@ -156,6 +158,8 @@ describe("ApiClient request headers", () => {
     expect(fetchMock.mock.calls[2]![0]).toBe("http://127.0.0.1:3001/api/archives/source-id/combine");
     expect(fetchMock.mock.calls[3]![0]).toBe("http://127.0.0.1:3001/api/folders/source-folder/combine");
     expect(JSON.parse(String((fetchMock.mock.calls[3]![1] as RequestInit).body))).toEqual({ targetFolderId: "target-folder" });
+    expect(fetchMock.mock.calls[4]![0]).toBe("http://127.0.0.1:3001/api/folders/move-folder/move");
+    expect(JSON.parse(String((fetchMock.mock.calls[4]![1] as RequestInit).body))).toEqual({ targetParentId: "parent-folder" });
   });
 
   it("sends mailbox and read-state filters for lists and search", async () => {

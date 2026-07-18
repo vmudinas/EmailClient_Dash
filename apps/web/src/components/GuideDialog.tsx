@@ -127,6 +127,8 @@ function GuideContent({ section }: { section: GuideSection }) {
           <li>Starred is a smart mailbox. Starring a message keeps it in its original mailbox while also showing it in Starred.</li>
           <li>Combine archives to move folders, messages, state, search rows, and attachment references into another completed archive.</li>
           <li>Combine mailboxes within one archive to move a mailbox tree into another mailbox.</li>
+          <li>Drag one mailbox onto another to choose Merge or Move as child. Moving as a child preserves the mailbox tree and messages.</li>
+          <li>The Folders plus button defaults to the selected mailbox as the parent, making child mailbox creation quicker.</li>
           <li>Delete removes local mail and unreferenced attachment blobs. It does not delete anything from Gmail.</li>
         </ul>
       </>

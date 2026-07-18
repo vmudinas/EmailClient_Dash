@@ -38,6 +38,7 @@ import {
   localMessageStatePatchSchema,
   mailboxCreateSchema,
   mailboxMergeSchema,
+  mailboxMoveSchema,
   messageActionSuggestionRequestSchema,
   messageCalendarEventCreateSchema,
   messageDraftReplyRequestSchema,
@@ -634,6 +635,39 @@ export class EmailApiRuntime {
           return result;
         } catch (error) {
           const message = error instanceof Error ? error.message : "Mailboxes could not be combined";
+          return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
+        }
+      }
+    );
+
+    this.app.post<{ Params: { folderId: string }; Body: unknown }>(
+      "/api/folders/:folderId/move",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = mailboxMoveSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: "Choose a valid parent mailbox" });
+        try {
+          const source = this.database.getFolder(request.params.folderId);
+          const destination = parsed.data.targetParentId
+            ? this.database.getFolder(parsed.data.targetParentId)
+            : null;
+          const result = this.database.moveFolder(request.params.folderId, parsed.data.targetParentId);
+          this.imports.invalidateFolderCache(result.mailbox.archiveId);
+          this.database.recordDiagnostic({
+            level: "info",
+            category: "system",
+            message: `Mailbox moved: ${source?.path ?? request.params.folderId}`,
+            archiveId: result.mailbox.archiveId,
+            sourceName: source?.name ?? null,
+            context: {
+              destinationPath: destination?.path ?? null,
+              path: result.mailbox.path,
+              movedMailboxes: result.movedMailboxes
+            }
+          });
+          return result;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Mailbox could not be moved";
           return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
         }
       }

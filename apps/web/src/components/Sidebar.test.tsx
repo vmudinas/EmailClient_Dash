@@ -86,6 +86,18 @@ describe("Sidebar archive and mailbox actions", () => {
     expect(onMoveMessage).toHaveBeenCalledWith(DRAGGED_MESSAGE.id, SAVED.id);
   });
 
+  it("opens the organize choice when one mailbox is dragged onto another", () => {
+    const onOrganizeFolder = vi.fn();
+    renderSidebar({ folders: [INBOX, SAVED], onOrganizeFolder });
+    const dataTransfer = { effectAllowed: "", setData: vi.fn() };
+
+    fireEvent.dragStart(screen.getByTitle("Inbox").closest("button")!, { dataTransfer });
+    fireEvent.drop(screen.getByTitle("Saved").closest("button")!, { dataTransfer });
+
+    expect(dataTransfer.setData).toHaveBeenCalledWith("application/x-archive-mail-folder", INBOX.id);
+    expect(onOrganizeFolder).toHaveBeenCalledWith(INBOX, SAVED);
+  });
+
   it("exposes working rename and delete controls for completed local archives", () => {
     const onRemoveArchive = vi.fn();
     const onRemoveFolder = vi.fn();
@@ -261,6 +273,7 @@ function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> 
       readOnly={false}
       draggedMessage={null}
       moveBusy={false}
+      folderBusy={false}
       onSelectArchive={vi.fn()}
       onSelectFolder={vi.fn()}
       onSelectSmartMailbox={vi.fn()}
@@ -269,6 +282,7 @@ function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> 
       onCreateFolder={vi.fn()}
       onCombineArchive={vi.fn()}
       onCombineFolder={vi.fn()}
+      onOrganizeFolder={vi.fn()}
       onCancelJob={vi.fn()}
       onResumeJob={vi.fn()}
       onClearJob={vi.fn()}

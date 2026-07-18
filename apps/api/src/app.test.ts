@@ -1895,6 +1895,28 @@ describe("Email API authorization", () => {
     });
     expect(runtime.database.getArchive(source.id)).toBeNull();
 
+    const projectsFolderResponse = await runtime.app.inject({
+      method: "POST",
+      url: `/api/archives/${target.id}/folders`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { name: "Projects" }
+    });
+    expect(projectsFolderResponse.statusCode).toBe(201);
+    const projectsFolder = projectsFolderResponse.json() as { id: string };
+    const mailboxMoved = await runtime.app.inject({
+      method: "POST",
+      url: `/api/folders/${projectsFolder.id}/move`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { targetParentId: targetFolder.id }
+    });
+    expect(mailboxMoved.statusCode).toBe(200);
+    expect(mailboxMoved.json()).toMatchObject({
+      movedMailboxes: 1,
+      mailbox: { id: projectsFolder.id, parentId: targetFolder.id, path: "Inbox/Projects" }
+    });
+
     const gmailStart = await runtime.app.inject({
       method: "POST",
       url: "/api/gmail/oauth/start",

@@ -216,6 +216,7 @@ interface CreateMailboxDialogProps {
   open: boolean;
   archive: ArchiveModel | null;
   folders: Folder[];
+  initialParentId?: string | null;
   busy: boolean;
   onClose(): void;
   onCreate(name: string, parentId: string | null): void;
@@ -225,6 +226,7 @@ export function CreateMailboxDialog({
   open,
   archive,
   folders,
+  initialParentId = null,
   busy,
   onClose,
   onCreate
@@ -234,9 +236,9 @@ export function CreateMailboxDialog({
   useEffect(() => {
     if (open) {
       setName("");
-      setParentId("");
+      setParentId(initialParentId ?? "");
     }
-  }, [open]);
+  }, [initialParentId, open]);
   if (!open || !archive) return null;
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onClose(); }}>
@@ -370,6 +372,58 @@ export function CombineMailboxDialog({
           <button className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>
           <button className="primary-button" disabled={busy || !targetId} onClick={() => onCombine(targetId)}>
             {busy ? <LoaderCircle className="spin" size={17} /> : <CombineIcon size={17} />} Combine
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+interface MailboxDropDialogProps {
+  source: Folder | null;
+  target: Folder | null;
+  busy: boolean;
+  onClose(): void;
+  onMerge(): void;
+  onMoveAsChild(): void;
+}
+
+export function MailboxDropDialog({
+  source,
+  target,
+  busy,
+  onClose,
+  onMerge,
+  onMoveAsChild
+}: MailboxDropDialogProps) {
+  if (!source || !target) return null;
+  const alreadyChild = source.parentId === target.id;
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onClose(); }}>
+      <section className="dialog combine-dialog" role="dialog" aria-modal="true" aria-labelledby="organize-mailbox-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="dialog-header">
+          <div><FolderTree size={20} /><h2 id="organize-mailbox-title">Organize mailbox</h2></div>
+          <button className="icon-button" disabled={busy} onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
+        </header>
+        <div className="dialog-body">
+          <div className="combine-source">
+            <span>Dragged mailbox</span>
+            <strong>{source.path}</strong>
+            <small>Dropped onto {target.path}</small>
+          </div>
+          <div className="mailbox-drop-options">
+            <div><CombineIcon size={18} /><span><strong>Merge mailboxes</strong><small>Move every message into {target.path}, then remove {source.path} and its child mailboxes.</small></span></div>
+            <div><FolderPlus size={18} /><span><strong>Move as child</strong><small>Keep the mailbox tree and place it under {target.path} without duplicating messages.</small></span></div>
+          </div>
+          {alreadyChild && <small className="combine-result">{source.name} is already a child of {target.path}. You can merge it or cancel.</small>}
+        </div>
+        <footer className="dialog-footer">
+          <button className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>
+          <button className="danger-button" disabled={busy} onClick={onMerge}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <CombineIcon size={17} />} Merge
+          </button>
+          <button className="primary-button" disabled={busy || alreadyChild} onClick={onMoveAsChild}>
+            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderPlus size={17} />} Move as child
           </button>
         </footer>
       </section>

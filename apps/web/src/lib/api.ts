@@ -49,6 +49,7 @@ import type {
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
+  MailboxMoveResult,
   MessageDetail,
   MessageFollowUp,
   MessageFollowUpCreate,
@@ -210,6 +211,13 @@ export class ApiClient {
     return this.request(`/api/folders/${encodeURIComponent(sourceFolderId)}/combine`, {
       method: "POST",
       body: JSON.stringify({ targetFolderId })
+    });
+  }
+
+  moveMailbox(folderId: string, targetParentId: string | null): Promise<MailboxMoveResult> {
+    return this.request(`/api/folders/${encodeURIComponent(folderId)}/move`, {
+      method: "POST",
+      body: JSON.stringify({ targetParentId })
     });
   }
 

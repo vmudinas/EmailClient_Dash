@@ -58,6 +58,7 @@ import type {
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
+  MailboxMoveResult,
   MessageDetail,
   MessageAnalysis,
   MessageAnalysisOutput,
@@ -4597,6 +4598,91 @@ export class EmailDatabase {
       return this.getFolder(id)!;
     });
     return rename();
+  }
+
+  moveFolder(id: string, targetParentId: string | null): MailboxMoveResult {
+    const move = this.db.transaction(() => {
+      const folderRow = this.db.prepare("SELECT * FROM folders WHERE id = ?").get(id) as Row | undefined;
+      if (!folderRow) throw new Error("Mailbox not found");
+      const archiveId = String(folderRow.archive_id);
+      const archiveRow = this.db.prepare("SELECT status FROM archives WHERE id = ?")
+        .get(archiveId) as Row | undefined;
+      if (!archiveRow || !["ready", "ready_with_errors"].includes(String(archiveRow.status))) {
+        throw new Error("Wait for the archive import to finish before moving this mailbox");
+      }
+      if (this.hasActiveGmailSync([archiveId])) {
+        throw new Error("Wait for Gmail sync to finish before moving this mailbox");
+      }
+      if (targetParentId === id) {
+        throw new Error("A mailbox cannot be moved into itself");
+      }
+
+      let parentPath = "";
+      if (targetParentId) {
+        const parent = this.db.prepare("SELECT archive_id, path FROM folders WHERE id = ?")
+          .get(targetParentId) as Row | undefined;
+        if (!parent || String(parent.archive_id) !== archiveId) {
+          throw new Error("Parent mailbox not found in this archive");
+        }
+        parentPath = String(parent.path);
+      }
+
+      const oldPath = String(folderRow.path);
+      if (parentPath.startsWith(`${oldPath}/`)) {
+        throw new Error("A mailbox cannot be moved into one of its child mailboxes");
+      }
+      const newPath = parentPath ? `${parentPath}/${String(folderRow.name)}` : String(folderRow.name);
+      if (newPath === oldPath) {
+        return { mailbox: this.getFolder(id)!, movedMailboxes: 0 };
+      }
+
+      const affected = this.db.prepare(`
+        SELECT id, path FROM folders
+        WHERE archive_id = ?
+          AND (path = ? OR substr(path, 1, length(?) + 1) = ? || '/')
+        ORDER BY length(path), path
+      `).all(archiveId, oldPath, oldPath, oldPath) as Row[];
+      const affectedIds = new Set(affected.map((row) => String(row.id)));
+      const replacements = affected.map((row) => ({
+        id: String(row.id),
+        path: `${newPath}${String(row.path).slice(oldPath.length)}`
+      }));
+
+      for (const replacement of replacements) {
+        const collision = this.db.prepare(`
+          SELECT id FROM folders WHERE archive_id = ? AND path = ?
+        `).get(archiveId, replacement.path) as Row | undefined;
+        if (collision && !affectedIds.has(String(collision.id))) {
+          throw new Error(`A mailbox named "${String(folderRow.name)}" already exists there`);
+        }
+      }
+
+      const temporaryPrefix = `__move_${randomUUID()}`;
+      affected.forEach((row, index) => {
+        this.db.prepare("UPDATE folders SET path = ? WHERE id = ?")
+          .run(`${temporaryPrefix}_${index}`, row.id);
+      });
+      this.db.prepare("UPDATE folders SET parent_id = ? WHERE id = ?").run(targetParentId, id);
+      for (const replacement of replacements) {
+        this.db.prepare("UPDATE folders SET path = ? WHERE id = ?")
+          .run(replacement.path, replacement.id);
+      }
+
+      const placeholders = replacements.map(() => "?").join(", ");
+      this.db.prepare(`
+        UPDATE message_fts
+        SET folder = (
+          SELECT f.path FROM messages m
+          JOIN folders f ON f.id = m.folder_id
+          WHERE m.id = message_fts.message_id
+        )
+        WHERE message_id IN (
+          SELECT id FROM messages WHERE folder_id IN (${placeholders})
+        )
+      `).run(...replacements.map((replacement) => replacement.id));
+      return { mailbox: this.getFolder(id)!, movedMailboxes: replacements.length };
+    });
+    return move();
   }
 
   deleteFolder(id: string): string[] {

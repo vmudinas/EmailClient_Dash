@@ -845,6 +845,14 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
+.folder-row[draggable="true"] {
+  cursor: grab;
+}
+
+.folder-row[draggable="true"]:active {
+  cursor: grabbing;
+}
+
 .folder-toggle,
 .folder-toggle-spacer {
   display: flex;
@@ -3055,6 +3063,41 @@ textarea:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+}
+
+.mailbox-drop-options {
+  display: grid;
+  gap: 8px;
+}
+
+.mailbox-drop-options > div {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.mailbox-drop-options > div > svg {
+  margin-top: 1px;
+  color: var(--green-dark);
+}
+
+.mailbox-drop-options span {
+  display: grid;
+  gap: 3px;
+}
+
+.mailbox-drop-options strong {
+  font-size: 12px;
+}
+
+.mailbox-drop-options small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .gmail-dialog {

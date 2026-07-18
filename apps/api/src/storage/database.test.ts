@@ -733,6 +733,56 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("moves a mailbox tree under a new parent without changing messages or Gmail destinations", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Mailbox move",
+      sourceType: "mbox",
+      fingerprint: "mailbox-move",
+      sizeBytes: 200
+    });
+    const destination = database.ensureFolder(archive.id, "Saved", "Saved", null);
+    const source = database.ensureFolder(archive.id, "Projects", "Projects", null);
+    const child = database.ensureFolder(archive.id, "Projects/Active", "Active", source.id);
+    const messageId = insertDatedMessage(database, archive.id, child.id, "moved-child", null);
+    database.completeArchive(archive.id, 0);
+    const gmail = database.createGmailConnection({
+      email: "move@example.test",
+      archiveId: archive.id,
+      folderId: child.id,
+      query: "newer_than:30d",
+      ocrEnabled: false,
+      canSend: true,
+      canManageCalendar: false,
+      refreshToken: "move-refresh-token"
+    });
+
+    expect(() => database.moveFolder(source.id, child.id)).toThrow("child mailboxes");
+    const result = database.moveFolder(source.id, destination.id);
+
+    expect(result).toMatchObject({
+      mailbox: { id: source.id, parentId: destination.id, path: "Saved/Projects" },
+      movedMailboxes: 2
+    });
+    expect(database.getFolder(child.id)).toMatchObject({
+      parentId: source.id,
+      path: "Saved/Projects/Active"
+    });
+    expect(database.getMessage(messageId)).toMatchObject({
+      id: messageId,
+      folderId: child.id,
+      folderPath: "Saved/Projects/Active"
+    });
+    expect(database.search({ q: "ordering-marker" }).items[0]?.message.folderPath)
+      .toBe("Saved/Projects/Active");
+    expect(database.getGmailConnection(gmail.id)).toMatchObject({
+      folderId: child.id,
+      folderPath: "Saved/Projects/Active"
+    });
+    database.close();
+  });
+
   it("keeps multiple Gmail accounts separate when they share one local mailbox", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);

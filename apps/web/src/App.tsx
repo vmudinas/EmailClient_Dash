@@ -75,6 +75,7 @@ import {
   FilterPanel,
   ImportDialog,
   GmailDialog,
+  MailboxDropDialog,
   RenameDialog,
   ShareDialog,
   type UiSearchFilters
@@ -191,10 +192,13 @@ export function App() {
   const [renameBusy, setRenameBusy] = useState(false);
   const [createMailboxOpen, setCreateMailboxOpen] = useState(false);
   const [createMailboxBusy, setCreateMailboxBusy] = useState(false);
+  const [createMailboxParentId, setCreateMailboxParentId] = useState<string | null>(null);
   const [combineSource, setCombineSource] = useState<ArchiveModel | null>(null);
   const [combineBusy, setCombineBusy] = useState(false);
   const [combineMailboxSource, setCombineMailboxSource] = useState<Folder | null>(null);
   const [combineMailboxBusy, setCombineMailboxBusy] = useState(false);
+  const [mailboxDrop, setMailboxDrop] = useState<{ source: Folder; target: Folder } | null>(null);
+  const [mailboxDropBusy, setMailboxDropBusy] = useState(false);
   const [gmailOpen, setGmailOpen] = useState(false);
   const [gmailConnections, setGmailConnections] = useState<GmailConnection[]>([]);
   const [gmailLoading, setGmailLoading] = useState(false);
@@ -224,6 +228,7 @@ export function App() {
   const [moveBusy, setMoveBusy] = useState(false);
   const [spamBusy, setSpamBusy] = useState(false);
   const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
+  const [messageListRevision, setMessageListRevision] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -629,7 +634,7 @@ export function App() {
     setMessage(null);
     setBulkSelectedIds(new Set());
     void loadMessages(false);
-  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory, showReadMessages]);
+  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory, showReadMessages, messageListRevision]);
 
   const loadFoldersForGmail = useCallback(async (archiveId: string): Promise<Folder[]> => {
     if (!api) return [];
@@ -962,6 +967,7 @@ export function App() {
       setFolders(await api.listFolders(selectedArchiveId));
       setSelectedFolderId(folder.id);
       setCreateMailboxOpen(false);
+      setCreateMailboxParentId(null);
       await refreshArchives();
     } catch (error) {
       showError(error instanceof Error ? error.message : "Mailbox could not be created");
@@ -1005,6 +1011,7 @@ export function App() {
       setMessage(null);
       setFolders(await api.listFolders(result.mailbox.archiveId));
       await refreshArchives();
+      setMessageListRevision((current) => current + 1);
       showError(
         `${result.movedMessages.toLocaleString()} messages and ${result.movedAttachments.toLocaleString()} attachments combined into ${result.mailbox.path}`
       );
@@ -1012,6 +1019,39 @@ export function App() {
       showError(error instanceof Error ? error.message : "Mailboxes could not be combined");
     } finally {
       setCombineMailboxBusy(false);
+    }
+  };
+
+  const organizeDroppedMailbox = async (action: "merge" | "child") => {
+    if (!api || !mailboxDrop || readOnly) return;
+    setMailboxDropBusy(true);
+    try {
+      if (action === "merge") {
+        const result = await api.combineMailboxes(mailboxDrop.source.id, mailboxDrop.target.id);
+        setSelectedArchiveId(result.mailbox.archiveId);
+        setSelectedFolderId(result.mailbox.id);
+        showError(
+          `${result.movedMessages.toLocaleString()} messages combined into ${result.mailbox.path}`
+        );
+      } else {
+        const result = await api.moveMailbox(mailboxDrop.source.id, mailboxDrop.target.id);
+        setSelectedArchiveId(result.mailbox.archiveId);
+        setSelectedFolderId(result.mailbox.id);
+        showError(
+          `${result.mailbox.path} moved with ${result.movedMailboxes.toLocaleString()} mailbox${result.movedMailboxes === 1 ? "" : "es"}`
+        );
+      }
+      setSelectedMessageId(null);
+      setMessage(null);
+      const archiveId = mailboxDrop.source.archiveId;
+      setMailboxDrop(null);
+      setFolders(await api.listFolders(archiveId));
+      await refreshArchives();
+      setMessageListRevision((current) => current + 1);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Mailbox could not be organized");
+    } finally {
+      setMailboxDropBusy(false);
     }
   };
 
@@ -1884,14 +1924,19 @@ export function App() {
               readOnly={readOnly}
               draggedMessage={draggedMessage}
               moveBusy={moveBusy}
+              folderBusy={combineMailboxBusy || mailboxDropBusy}
               onSelectArchive={selectArchive}
               onSelectFolder={selectFolder}
               onSelectSmartMailbox={selectSmartMailbox}
               onImport={openImport}
               onOpenGmail={openGmail}
-              onCreateFolder={() => setCreateMailboxOpen(true)}
+              onCreateFolder={() => {
+                setCreateMailboxParentId(selectedFolderId);
+                setCreateMailboxOpen(true);
+              }}
               onCombineArchive={setCombineSource}
               onCombineFolder={setCombineMailboxSource}
+              onOrganizeFolder={(source, target) => setMailboxDrop({ source, target })}
               onCancelJob={(id) => void cancelJob(id)}
               onResumeJob={(id) => void resumeJob(id)}
               onClearJob={(id) => void clearJob(id)}
@@ -2063,8 +2108,12 @@ export function App() {
         open={createMailboxOpen}
         archive={selectedArchive}
         folders={folders}
+        initialParentId={createMailboxParentId}
         busy={createMailboxBusy}
-        onClose={() => setCreateMailboxOpen(false)}
+        onClose={() => {
+          setCreateMailboxOpen(false);
+          setCreateMailboxParentId(null);
+        }}
         onCreate={(name, parentId) => void createMailbox(name, parentId)}
       />
       <CombineArchiveDialog
@@ -2080,6 +2129,14 @@ export function App() {
         busy={combineMailboxBusy}
         onClose={() => setCombineMailboxSource(null)}
         onCombine={(targetFolderId) => void combineMailboxes(targetFolderId)}
+      />
+      <MailboxDropDialog
+        source={mailboxDrop?.source ?? null}
+        target={mailboxDrop?.target ?? null}
+        busy={mailboxDropBusy}
+        onClose={() => setMailboxDrop(null)}
+        onMerge={() => void organizeDroppedMailbox("merge")}
+        onMoveAsChild={() => void organizeDroppedMailbox("child")}
       />
       <GmailDialog
         open={gmailOpen}

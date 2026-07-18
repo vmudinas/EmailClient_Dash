@@ -71,11 +71,12 @@ Electron passes the selected local path directly to the import service, so it do
 ## Local changes
 
 - Use the pencil buttons beside an archive or mailbox to rename it.
-- Use the plus button beside **Folders** to create a top-level or child mailbox.
+- Use the plus button beside **Folders** to create a mailbox. When a mailbox is selected, it is preselected as the parent so a child mailbox takes one step; choose the archive top level in the dialog when needed.
 - Use the combine button beside an archive to move it into another completed archive. Folder paths with the same name are combined; message IDs, read/star/tag/note state, attachment references, and search entries are retained. The source archive is removed only after the SQLite transaction commits.
 - Use the combine button beside a mailbox to move all messages from it and its child mailboxes into another mailbox in the same archive. Gmail destinations follow the messages, search paths are refreshed, and the source mailbox tree is removed only inside the committed SQLite transaction.
 - Open an email and click **Archive** to move it into a sibling **Archived** mailbox. If that mailbox does not exist, Archive Mail creates it automatically. The adjacent folder button can move the email to any other local mailbox.
 - On desktop, drag an email row from the message list onto any visible mailbox in the sidebar. The destination highlights before drop; read-only viewer sessions cannot drag messages.
+- Drag one mailbox onto another to choose between merging the source tree into the destination or moving the intact source tree underneath it as a child mailbox.
 - Open **Search filters** to search the current view, the entire archive, or one specific mailbox. The active mailbox scope appears in the search placeholder and results title.
 - Use the eye button beside **Search filters** to hide read messages across every mailbox and search result. The preference remains selected after restarting the app.
 - Renames affect local display and search metadata only. PST and MBOX sources are never rewritten.

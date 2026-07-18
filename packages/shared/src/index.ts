@@ -952,6 +952,11 @@ export interface MailboxMergeResult {
   movedAttachments: number;
 }
 
+export interface MailboxMoveResult {
+  mailbox: Folder;
+  movedMailboxes: number;
+}
+
 export interface CursorPage<T> {
   items: T[];
   nextCursor: string | null;
@@ -1249,6 +1254,12 @@ export const mailboxMergeSchema = z.object({
 }).strict();
 
 export type MailboxMerge = z.infer<typeof mailboxMergeSchema>;
+
+export const mailboxMoveSchema = z.object({
+  targetParentId: z.string().uuid().nullable()
+}).strict();
+
+export type MailboxMove = z.infer<typeof mailboxMoveSchema>;
 
 export const gmailAuthRequestSchema = z.object({
   archiveId: z.string().uuid().nullable().optional(),

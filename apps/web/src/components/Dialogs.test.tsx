@@ -1,7 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Archive, Folder, GmailConnection } from "@email-client/shared";
-import { EMPTY_FILTERS, FilterPanel, GmailDialog } from "./Dialogs.js";
+import {
+  CreateMailboxDialog,
+  EMPTY_FILTERS,
+  FilterPanel,
+  GmailDialog,
+  MailboxDropDialog
+} from "./Dialogs.js";
 
 afterEach(cleanup);
 
@@ -122,6 +128,48 @@ describe("GmailDialog", () => {
     expect(confirmSpy).toHaveBeenCalled();
     expect(onFullSync).toHaveBeenCalledWith(CONNECTIONS[0]!.id);
     confirmSpy.mockRestore();
+  });
+});
+
+describe("mailbox organization dialogs", () => {
+  it("defaults new mailboxes to the requested parent", () => {
+    const onCreate = vi.fn();
+    render(
+      <CreateMailboxDialog
+        open
+        archive={ARCHIVES[0]!}
+        folders={FOLDERS}
+        initialParentId={FOLDERS[0]!.id}
+        busy={false}
+        onClose={vi.fn()}
+        onCreate={onCreate}
+      />
+    );
+
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(FOLDERS[0]!.id);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Receipts" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(onCreate).toHaveBeenCalledWith("Receipts", FOLDERS[0]!.id);
+  });
+
+  it("asks whether a dropped mailbox should merge or move as a child", () => {
+    const onMerge = vi.fn();
+    const onMoveAsChild = vi.fn();
+    render(
+      <MailboxDropDialog
+        source={FOLDERS[0]!}
+        target={FOLDERS[1]!}
+        busy={false}
+        onClose={vi.fn()}
+        onMerge={onMerge}
+        onMoveAsChild={onMoveAsChild}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Merge" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move as child" }));
+    expect(onMerge).toHaveBeenCalledOnce();
+    expect(onMoveAsChild).toHaveBeenCalledOnce();
   });
 });
 
