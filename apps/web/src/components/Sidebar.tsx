@@ -242,7 +242,7 @@ export function Sidebar({
   const etaByJob = useImportEtas(jobs);
 
   return (
-    <aside className="sidebar" aria-label="Archives and folders">
+    <aside id="folder-sidebar" className="sidebar" aria-label="Archives and folders">
       <div className="sidebar-scroll">
         <div className="section-heading">
           <span>Archives</span>

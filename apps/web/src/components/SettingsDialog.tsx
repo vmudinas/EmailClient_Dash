@@ -7,10 +7,12 @@ import {
   type FormEvent
 } from "react";
 import {
+  Activity,
   AlertTriangle,
   Apple,
   BarChart3,
   BrainCircuit,
+  BookOpen,
   CalendarDays,
   CalendarClock,
   CheckCircle2,
@@ -75,7 +77,7 @@ import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS, NEWS_SOURCE_IDS, 
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "inbox-tabs" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "tools" | "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "inbox-tabs" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -86,6 +88,9 @@ interface SettingsDialogProps {
   session: AuthSessionInfo;
   onClose(): void;
   onSignedOut(): void;
+  onOpenGuide?(): void;
+  onOpenDiagnostics?(): void;
+  pendingDiagnosticCount?: number;
   onAddGoogleCalendar?(): void;
   onReauthorizeGoogleCalendar?(connection: GmailConnection): void;
   onStockSettingsChanged?(): void;
@@ -94,6 +99,7 @@ interface SettingsDialogProps {
 }
 
 const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
+  { id: "tools", label: "Tools", icon: Activity },
   { id: "database", label: "Database", icon: Database },
   { id: "gmail", label: "Gmail", icon: MailCheck },
   { id: "calendars", label: "Calendars", icon: CalendarDays },
@@ -118,6 +124,9 @@ export function SettingsDialog({
   session,
   onClose,
   onSignedOut,
+  onOpenGuide,
+  onOpenDiagnostics,
+  pendingDiagnosticCount = 0,
   onAddGoogleCalendar,
   onReauthorizeGoogleCalendar,
   onStockSettingsChanged,
@@ -191,8 +200,15 @@ export function SettingsDialog({
                 return <><Icon size={18} /><span>{selectedItem.label}</span><ChevronRight size={17} /></>;
               })()}
             </button>
-            {loading && !settings ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
+            {loading && !settings && section !== "tools" ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
               <>
+                {section === "tools" && (
+                  <AdminToolsPanel
+                    onOpenGuide={onOpenGuide}
+                    onOpenDiagnostics={onOpenDiagnostics}
+                    pendingDiagnosticCount={pendingDiagnosticCount}
+                  />
+                )}
                 {section === "database" && settings && (
                   <DatabasePanel
                     api={api!}
@@ -333,6 +349,36 @@ export function SettingsDialog({
         </div>
       </section>
     </div>
+  );
+}
+
+function AdminToolsPanel({
+  onOpenGuide,
+  onOpenDiagnostics,
+  pendingDiagnosticCount
+}: {
+  onOpenGuide?(): void;
+  onOpenDiagnostics?(): void;
+  pendingDiagnosticCount: number;
+}) {
+  return (
+    <>
+      <h3>Tools</h3>
+      <p>Open product guidance or inspect imports, synchronization, AI jobs, and client failures.</p>
+      <div className="admin-tool-grid">
+        <button type="button" className="admin-tool-card" onClick={onOpenGuide} disabled={!onOpenGuide}>
+          <span className="admin-tool-icon"><BookOpen size={22} /></span>
+          <span><strong>Guide</strong><small>Learn how mail, Gmail sync, AI, security, and organization features work.</small></span>
+          <ChevronRight size={18} />
+        </button>
+        <button type="button" className="admin-tool-card" onClick={onOpenDiagnostics} disabled={!onOpenDiagnostics}>
+          <span className="admin-tool-icon diagnostics"><Activity size={22} /></span>
+          <span><strong>Diagnostics</strong><small>Review job progress, authorization issues, retries, and application failures.</small></span>
+          {pendingDiagnosticCount > 0 && <b className="admin-tool-count">{Math.min(99, pendingDiagnosticCount)}</b>}
+          <ChevronRight size={18} />
+        </button>
+      </div>
+    </>
   );
 }
 

@@ -241,7 +241,7 @@ Each schedule can be edited, toggled on/off, triggered immediately with **Run no
 
 ## Diagnostics
 
-Open **Diagnostics** from the activity button in the top toolbar. It shows:
+Open **Admin settings > Tools > Diagnostics**. It shows:
 
 - resumable upload sessions and confirmed byte counts;
 - import job status, phase, checkpoint progress, and error counts;

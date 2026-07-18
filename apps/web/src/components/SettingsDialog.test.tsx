@@ -17,6 +17,39 @@ import { SettingsDialog } from "./SettingsDialog.js";
 afterEach(cleanup);
 
 describe("SettingsDialog", () => {
+  it("opens the guide and diagnostics from Admin tools", async () => {
+    const onOpenGuide = vi.fn();
+    const onOpenDiagnostics = vi.fn();
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS)
+    } as unknown as ApiClient;
+
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={SESSION}
+        onClose={vi.fn()}
+        onSignedOut={vi.fn()}
+        onOpenGuide={onOpenGuide}
+        onOpenDiagnostics={onOpenDiagnostics}
+        pendingDiagnosticCount={7}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }));
+    expect(screen.getByRole("heading", { name: "Tools" })).toBeTruthy();
+    const guideButton = screen.getByRole("button", { name: /^Guide/ });
+    const diagnosticsButton = screen.getByRole("button", { name: /^Diagnostics/ });
+    expect(screen.getByText("7")).toBeTruthy();
+
+    fireEvent.click(guideButton);
+    fireEvent.click(diagnosticsButton);
+    expect(onOpenGuide).toHaveBeenCalledOnce();
+    expect(onOpenDiagnostics).toHaveBeenCalledOnce();
+  });
+
   it("configures the default draft sender and placeholder name", async () => {
     const updatedSettings: AdminSettings = {
       ...SETTINGS,

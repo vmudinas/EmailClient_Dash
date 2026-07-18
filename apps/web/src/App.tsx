@@ -7,8 +7,6 @@ import {
 } from "react";
 import {
   Archive,
-  Activity,
-  BookOpen,
   BrainCircuit,
   CalendarDays,
   FileEdit,
@@ -24,6 +22,8 @@ import {
   MailPlus,
   MonitorSmartphone,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   Settings as SettingsIcon,
@@ -106,6 +106,7 @@ const EMPTY_SHARING: SharingState = {
 
 const SESSION_STORAGE_KEY = "archive-mail-session-token";
 const SHOW_READ_STORAGE_KEY = "archive-mail-show-read-messages";
+const FOLDER_PANEL_STORAGE_KEY = "archive-mail-folder-panel-visible";
 const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   primary: 0,
   promotions: 0,
@@ -171,6 +172,13 @@ export function App() {
   const [showReadMessages, setShowReadMessages] = useState(() => {
     try {
       return window.localStorage.getItem(SHOW_READ_STORAGE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [folderPanelVisible, setFolderPanelVisible] = useState(() => {
+    try {
+      return window.localStorage.getItem(FOLDER_PANEL_STORAGE_KEY) !== "false";
     } catch {
       return true;
     }
@@ -435,6 +443,12 @@ export function App() {
       window.localStorage.setItem(SHOW_READ_STORAGE_KEY, String(showReadMessages));
     } catch {}
   }, [showReadMessages]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FOLDER_PANEL_STORAGE_KEY, String(folderPanelVisible));
+    } catch {}
+  }, [folderPanelVisible]);
 
   useEffect(() => {
     setFilters((current) => current.folderId && current.folderId !== ALL_MAIL_SEARCH_SCOPE
@@ -1843,7 +1857,17 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark"><Archive size={20} /></span>
-          <span>Archive Mail</span>
+          <span className="brand-name">Archive Mail</span>
+          <button
+            className="icon-button subtle folder-panel-toggle"
+            onClick={() => setFolderPanelVisible((visible) => !visible)}
+            title={folderPanelVisible ? "Hide folders" : "Show folders"}
+            aria-label={folderPanelVisible ? "Hide folders" : "Show folders"}
+            aria-controls="folder-sidebar"
+            aria-expanded={folderPanelVisible}
+          >
+            {folderPanelVisible ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+          </button>
         </div>
 
         <div className="search-wrap">
@@ -1924,17 +1948,9 @@ export function App() {
               <MailPlus size={18} />
             </button>
           )}
-          <button className="icon-button guide-trigger" onClick={() => setGuideOpen(true)} title="Open guide" aria-label="Open guide">
-            <BookOpen size={18} />
-          </button>
           {isAdmin && (
             <button className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)} title="Open admin settings" aria-label="Open admin settings">
               <SettingsIcon size={18} />
-            </button>
-          )}
-          {!readOnly && (
-            <button className="icon-button diagnostics-trigger" onClick={openDiagnostics} title="Open diagnostics" aria-label="Open diagnostics">
-              <Activity size={18} />
               {pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
             </button>
           )}
@@ -1951,7 +1967,7 @@ export function App() {
         </div>
       </header>
 
-      <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""}`}>
+      <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""} ${folderPanelVisible ? "" : "folders-collapsed"}`}>
         {viewMode === "calendar" ? (
           api && <CalendarView api={api} connections={gmailConnections} onReauthorize={reauthorizeGmail} onError={showError} />
         ) : (
@@ -2119,9 +2135,7 @@ export function App() {
               <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>
               <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>
               {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
-              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>Admin</span></button>}
-              <button onClick={() => { setMobileMenuOpen(false); setGuideOpen(true); }}><BookOpen size={20} /><span>Guide</span></button>
-              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openDiagnostics(); }}><Activity size={20} /><span>Activity</span>{pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
+              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>Admin</span>{pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
               {electron && isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
             </div>
             <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>
@@ -2301,6 +2315,15 @@ export function App() {
           session={session}
           onClose={() => setSettingsOpen(false)}
           onSignedOut={signOutLocally}
+          onOpenGuide={() => {
+            setSettingsOpen(false);
+            setGuideOpen(true);
+          }}
+          onOpenDiagnostics={() => {
+            setSettingsOpen(false);
+            openDiagnostics();
+          }}
+          pendingDiagnosticCount={pendingDiagnosticCount}
           onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
           onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
           onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
