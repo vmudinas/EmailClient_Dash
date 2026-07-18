@@ -43,6 +43,7 @@ interface SidebarProps {
   selectedSmartMailbox: "starred" | null;
   readOnly: boolean;
   draggedMessage: MessageSummary | null;
+  draggedMessageIds: string[];
   moveBusy: boolean;
   folderBusy: boolean;
   onSelectArchive(id: string): void;
@@ -61,7 +62,7 @@ interface SidebarProps {
   onRemoveFolder(folder: Folder): void;
   onRenameArchive(archive: Archive): void;
   onRenameFolder(folder: Folder): void;
-  onMoveMessage(messageId: string, folderId: string): void;
+  onMoveMessages(messageIds: string[], folderId: string): void;
   onOpenDiagnostics(): void;
 }
 
@@ -74,6 +75,7 @@ export function Sidebar({
   selectedSmartMailbox,
   readOnly,
   draggedMessage,
+  draggedMessageIds,
   moveBusy,
   folderBusy,
   onSelectArchive,
@@ -92,7 +94,7 @@ export function Sidebar({
   onRemoveFolder,
   onRenameArchive,
   onRenameFolder,
-  onMoveMessage,
+  onMoveMessages,
   onOpenDiagnostics
 }: SidebarProps) {
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId);
@@ -137,8 +139,9 @@ export function Sidebar({
         && !folder.path.startsWith(`${draggedFolder.path}/`);
       const canDropMessage = !readOnly
         && !moveBusy
+        && draggedMessageIds.length > 0
         && draggedMessage?.archiveId === folder.archiveId
-        && draggedMessage.folderId !== folder.id;
+        && (draggedMessageIds.length > 1 || draggedMessage.folderId !== folder.id);
       const canDrop = canDropFolder || canDropMessage;
       const row = (
         <div className="folder-entry" key={folder.id}>
@@ -181,7 +184,7 @@ export function Sidebar({
                 onOrganizeFolder(draggedFolder, folder);
                 return;
               }
-              if (canDropMessage && draggedMessage) onMoveMessage(draggedMessage.id, folder.id);
+              if (canDropMessage && draggedMessage) onMoveMessages(draggedMessageIds, folder.id);
             }}
           >
             {hasChildren ? (

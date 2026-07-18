@@ -125,6 +125,7 @@ function GuideContent({ section }: { section: GuideSection }) {
         <p>Rename changes only the local display name. Archive Mail never rewrites an original PST or MBOX.</p>
         <ul>
           <li>Starred is a smart mailbox. Starring a message keeps it in its original mailbox while also showing it in Starred.</li>
+          <li>Check multiple messages, then drag any checked row onto a mailbox to move the entire selection together.</li>
           <li>Combine archives to move folders, messages, state, search rows, and attachment references into another completed archive.</li>
           <li>Combine mailboxes within one archive to move a mailbox tree into another mailbox.</li>
           <li>Drag one mailbox onto another to choose Merge or Move as child. Moving as a child preserves the mailbox tree and messages.</li>

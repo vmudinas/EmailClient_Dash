@@ -48,7 +48,7 @@ interface MessageListProps {
   hasMore: boolean;
   readOnly: boolean;
   onSelect(message: MessageSummary): void;
-  onDragStart(message: MessageSummary): void;
+  onDragStart(message: MessageSummary, messageIds: string[]): void;
   onDragEnd(): void;
   onLoadMore(): void;
   onMobileBack(): void;
@@ -121,7 +121,7 @@ export function MessageList({
   onSpam,
   onToggleRead
 }: MessageListProps) {
-  const [draggingMessageId, setDraggingMessageId] = useState<string | null>(null);
+  const [draggingMessageIds, setDraggingMessageIds] = useState<Set<string>>(new Set());
   const selectAllRef = useRef<HTMLInputElement>(null);
   const selectedCount = selectedIds.size;
   const allVisibleSelected = items.length > 0 && items.every((item) => selectedIds.has(item.message.id));
@@ -237,19 +237,20 @@ export function MessageList({
             readOnly={readOnly}
             selected={selectedMessageId === message.id}
             checked={selectedIds.has(message.id)}
-            dragging={draggingMessageId === message.id}
+            dragging={draggingMessageIds.has(message.id)}
+            dragMessageIds={selectedIds.has(message.id) ? [...selectedIds] : [message.id]}
             actionBusy={actionBusy}
             onSelect={onSelect}
             onToggleSelect={onToggleSelect}
             onArchive={onArchive}
             onSpam={onSpam}
             onToggleRead={onToggleRead}
-            onDragStart={(target) => {
-              setDraggingMessageId(target.id);
-              onDragStart(target);
+            onDragStart={(target, messageIds) => {
+              setDraggingMessageIds(new Set(messageIds));
+              onDragStart(target, messageIds);
             }}
             onDragEnd={() => {
-              setDraggingMessageId(null);
+              setDraggingMessageIds(new Set());
               onDragEnd();
             }}
           />
@@ -379,6 +380,7 @@ function MessageRow({
   selected,
   checked,
   dragging,
+  dragMessageIds,
   actionBusy,
   onSelect,
   onToggleSelect,
@@ -394,13 +396,14 @@ function MessageRow({
   selected: boolean;
   checked: boolean;
   dragging: boolean;
+  dragMessageIds: string[];
   actionBusy: boolean;
   onSelect(message: MessageSummary): void;
   onToggleSelect(messageId: string): void;
   onArchive(message: MessageSummary): void;
   onSpam(message: MessageSummary): void;
   onToggleRead(message: MessageSummary): void;
-  onDragStart(message: MessageSummary): void;
+  onDragStart(message: MessageSummary, messageIds: string[]): void;
   onDragEnd(): void;
 }) {
   const [swipeOffset, setSwipeOffset] = useState(0);
@@ -479,6 +482,7 @@ function MessageRow({
         role="option"
         tabIndex={0}
         aria-selected={selected}
+        title={dragMessageIds.length > 1 ? `Drag to move ${dragMessageIds.length.toLocaleString()} selected messages` : undefined}
         draggable={!readOnly}
         style={{ transform: `translateX(${swipeOffset}px)` }}
         onClick={() => {
@@ -505,8 +509,9 @@ function MessageRow({
         onDragStart={(event) => {
           if (readOnly) return;
           event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", message.id);
-          onDragStart(message);
+          event.dataTransfer.setData("text/plain", dragMessageIds.join("\n"));
+          event.dataTransfer.setData("application/x-archive-mail-messages", JSON.stringify(dragMessageIds));
+          onDragStart(message, dragMessageIds);
         }}
         onDragEnd={onDragEnd}
       >

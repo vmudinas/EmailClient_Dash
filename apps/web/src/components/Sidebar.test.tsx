@@ -75,15 +75,30 @@ describe("Sidebar archive and mailbox actions", () => {
   });
 
   it("moves a dragged message onto another mailbox", () => {
-    const onMoveMessage = vi.fn();
+    const onMoveMessages = vi.fn();
     renderSidebar({
       folders: [INBOX, SAVED],
       draggedMessage: DRAGGED_MESSAGE,
-      onMoveMessage
+      draggedMessageIds: [DRAGGED_MESSAGE.id],
+      onMoveMessages
     });
 
     fireEvent.drop(screen.getByTitle("Saved").closest("button")!);
-    expect(onMoveMessage).toHaveBeenCalledWith(DRAGGED_MESSAGE.id, SAVED.id);
+    expect(onMoveMessages).toHaveBeenCalledWith([DRAGGED_MESSAGE.id], SAVED.id);
+  });
+
+  it("moves every selected message when a grouped drag is dropped", () => {
+    const onMoveMessages = vi.fn();
+    const messageIds = [DRAGGED_MESSAGE.id, "message-2", "message-3"];
+    renderSidebar({
+      folders: [INBOX, SAVED],
+      draggedMessage: DRAGGED_MESSAGE,
+      draggedMessageIds: messageIds,
+      onMoveMessages
+    });
+
+    fireEvent.drop(screen.getByTitle("Saved").closest("button")!);
+    expect(onMoveMessages).toHaveBeenCalledWith(messageIds, SAVED.id);
   });
 
   it("opens the organize choice when one mailbox is dragged onto another", () => {
@@ -272,6 +287,7 @@ function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> 
       selectedSmartMailbox={null}
       readOnly={false}
       draggedMessage={null}
+      draggedMessageIds={[]}
       moveBusy={false}
       folderBusy={false}
       onSelectArchive={vi.fn()}
@@ -290,7 +306,7 @@ function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> 
       onRemoveFolder={vi.fn()}
       onRenameArchive={vi.fn()}
       onRenameFolder={vi.fn()}
-      onMoveMessage={vi.fn()}
+      onMoveMessages={vi.fn()}
       onOpenDiagnostics={vi.fn()}
       {...overrides}
     />

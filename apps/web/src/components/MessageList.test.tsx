@@ -69,9 +69,43 @@ describe("MessageList drag and drop", () => {
 
     fireEvent.dragStart(row, { dataTransfer: { effectAllowed: "", setData } });
     expect(setData).toHaveBeenCalledWith("text/plain", MESSAGE.id);
-    expect(onDragStart).toHaveBeenCalledWith(MESSAGE);
+    expect(setData).toHaveBeenCalledWith("application/x-archive-mail-messages", JSON.stringify([MESSAGE.id]));
+    expect(onDragStart).toHaveBeenCalledWith(MESSAGE, [MESSAGE.id]);
     fireEvent.dragEnd(row);
     expect(onDragEnd).toHaveBeenCalledOnce();
+  });
+
+  it("drags the full selection when a checked message row starts the drag", () => {
+    const secondMessage = { ...MESSAGE, id: "message-2", subject: "Second selected message" };
+    const onDragStart = vi.fn();
+    const setData = vi.fn();
+    const selectedIds = new Set([MESSAGE.id, secondMessage.id]);
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }, { message: secondMessage }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={onDragStart}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+        selectedIds={selectedIds}
+      />
+    );
+
+    fireEvent.dragStart(screen.getAllByRole("option")[0]!, { dataTransfer: { effectAllowed: "", setData } });
+
+    expect(setData).toHaveBeenCalledWith("text/plain", `${MESSAGE.id}\n${secondMessage.id}`);
+    expect(setData).toHaveBeenCalledWith("application/x-archive-mail-messages", JSON.stringify([...selectedIds]));
+    expect(onDragStart).toHaveBeenCalledWith(MESSAGE, [...selectedIds]);
+    expect(screen.getAllByRole("option").every((row) => row.classList.contains("dragging"))).toBe(true);
+    expect(screen.getAllByTitle("Drag to move 2 selected messages")).toHaveLength(2);
   });
 
   it("prioritizes event-linked orange, analyzed purple, and read gray row states", () => {

@@ -228,6 +228,7 @@ export function App() {
   const [moveBusy, setMoveBusy] = useState(false);
   const [spamBusy, setSpamBusy] = useState(false);
   const [draggedMessage, setDraggedMessage] = useState<MessageSummary | null>(null);
+  const [draggedMessageIds, setDraggedMessageIds] = useState<string[]>([]);
   const [messageListRevision, setMessageListRevision] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1553,9 +1554,50 @@ export function App() {
     }
   };
 
-  const dropMessageIntoFolder = (messageId: string, folderId: string) => {
+  const moveSelectedMessagesToFolder = async (messageIds: string[], folderId: string) => {
+    if (!api || readOnly || messageIds.length === 0) return;
+    const destination = folders.find((folder) => folder.id === folderId);
+    if (!destination) {
+      showError("Destination mailbox could not be found");
+      return;
+    }
+    if (!window.confirm(
+      `Move ${messageIds.length.toLocaleString()} selected messages to ${destination.path}? If Gmail mailbox sync is enabled, the Gmail messages move too.`
+    )) return;
+
+    setMoveBusy(true);
+    try {
+      const result = await api.bulkMoveMessagesToFolder(messageIds, folderId);
+      if (message && messageIds.includes(message.id)) {
+        setSelectedMessageId(null);
+        setMessage(null);
+      }
+      setBulkSelectedIds(new Set());
+      await Promise.all([
+        refreshArchives(),
+        loadMessages(false),
+        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+      ]);
+      showError(
+        `Moved ${result.moved.toLocaleString()} selected message${result.moved === 1 ? "" : "s"} to ${result.folderPath}`
+        + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
+        + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : "")
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Selected messages could not be moved");
+    } finally {
+      setMoveBusy(false);
+    }
+  };
+
+  const dropMessagesIntoFolder = (messageIds: string[], folderId: string) => {
     setDraggedMessage(null);
-    void moveMessage(messageId, folderId);
+    setDraggedMessageIds([]);
+    if (messageIds.length === 1) {
+      void moveMessage(messageIds[0]!, folderId);
+      return;
+    }
+    void moveSelectedMessagesToFolder(messageIds, folderId);
   };
 
   const connectGmail = async (request: GmailAuthRequest) => {
@@ -1923,6 +1965,7 @@ export function App() {
               selectedSmartMailbox={selectedSmartMailbox}
               readOnly={readOnly}
               draggedMessage={draggedMessage}
+              draggedMessageIds={draggedMessageIds}
               moveBusy={moveBusy}
               folderBusy={combineMailboxBusy || mailboxDropBusy}
               onSelectArchive={selectArchive}
@@ -1944,7 +1987,7 @@ export function App() {
               onRemoveFolder={(folder) => void removeFolder(folder)}
               onRenameArchive={(archive) => setRenameTarget({ kind: "archive", id: archive.id, name: archive.name })}
               onRenameFolder={(folder) => setRenameTarget({ kind: "mailbox", id: folder.id, archiveId: folder.archiveId, name: folder.name })}
-              onMoveMessage={dropMessageIntoFolder}
+              onMoveMessages={dropMessagesIntoFolder}
               onOpenDiagnostics={openDiagnostics}
             />
             <MessageList
@@ -1956,8 +1999,14 @@ export function App() {
               hasMore={Boolean(nextCursor)}
               readOnly={readOnly}
               onSelect={(selected) => void openMessage(selected)}
-              onDragStart={setDraggedMessage}
-              onDragEnd={() => setDraggedMessage(null)}
+              onDragStart={(target, messageIds) => {
+                setDraggedMessage(target);
+                setDraggedMessageIds(messageIds);
+              }}
+              onDragEnd={() => {
+                setDraggedMessage(null);
+                setDraggedMessageIds([]);
+              }}
               onLoadMore={() => void loadMessages(true)}
               onMobileBack={() => setMobileView("folders")}
               inboxCategories={showInboxCategories ? {
