@@ -157,6 +157,28 @@ describe("ApiClient request headers", () => {
     expect(fetchMock.mock.calls[3]![0]).toBe("http://127.0.0.1:3001/api/folders/source-folder/combine");
     expect(JSON.parse(String((fetchMock.mock.calls[3]![1] as RequestInit).body))).toEqual({ targetFolderId: "target-folder" });
   });
+
+  it("sends mailbox and read-state filters for lists and search", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ items: [], nextCursor: null }))
+      .mockResolvedValueOnce(jsonResponse({ items: [], nextCursor: null }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.listMessages({ folderId: "folder-one", isRead: false });
+    await client.search("invoice", { folderId: "folder-two", isRead: false });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://127.0.0.1:3001/api/messages?folderId=folder-one&isRead=false"
+    );
+    expect(fetchMock.mock.calls[1]![0]).toBe(
+      "http://127.0.0.1:3001/api/search?q=invoice&folderId=folder-two&isRead=false"
+    );
+  });
 });
 
 function jsonResponse(body: unknown): Response {

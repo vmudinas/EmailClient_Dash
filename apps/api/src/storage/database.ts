@@ -1543,6 +1543,15 @@ export class EmailDatabase {
         PRAGMA user_version = 30;
       `);
     }
+
+    const readFilterVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (readFilterVersion < 31) {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS message_state_read_idx
+          ON message_state(is_read, message_id);
+        PRAGMA user_version = 31;
+      `);
+    }
   }
 
   private reclassifyInboxCategories(): void {
@@ -4846,6 +4855,7 @@ export class EmailDatabase {
   listMessages(options: {
     archiveId?: string;
     folderId?: string;
+    isRead?: boolean;
     starred?: boolean;
     inboxCategory?: InboxCategory;
     cursor?: string;
@@ -4862,6 +4872,10 @@ export class EmailDatabase {
     if (options.folderId) {
       conditions.push("m.folder_id = ?");
       params.push(options.folderId);
+    }
+    if (options.isRead !== undefined) {
+      conditions.push("COALESCE(s.is_read, 0) = ?");
+      params.push(options.isRead ? 1 : 0);
     }
     if (options.starred !== undefined) {
       conditions.push("COALESCE(s.is_starred, 0) = ?");
@@ -4888,22 +4902,28 @@ export class EmailDatabase {
     return { items, nextCursor: hasMore ? encodeOffset(offset + limit) : null };
   }
 
-  countInboxCategories(options: { archiveId?: string; folderId?: string }): InboxCategoryCounts {
+  countInboxCategories(options: { archiveId?: string; folderId?: string; isRead?: boolean }): InboxCategoryCounts {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (options.archiveId) {
-      conditions.push("archive_id = ?");
+      conditions.push("m.archive_id = ?");
       params.push(options.archiveId);
     }
     if (options.folderId) {
-      conditions.push("folder_id = ?");
+      conditions.push("m.folder_id = ?");
       params.push(options.folderId);
+    }
+    if (options.isRead !== undefined) {
+      conditions.push("COALESCE(s.is_read, 0) = ?");
+      params.push(options.isRead ? 1 : 0);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.db.prepare(`
-      SELECT inbox_category, COUNT(*) AS count FROM messages
+      SELECT m.inbox_category, COUNT(*) AS count
+      FROM messages m
+      LEFT JOIN message_state s ON s.message_id = m.id
       ${where}
-      GROUP BY inbox_category
+      GROUP BY m.inbox_category
     `).all(...params) as Row[];
     const counts: InboxCategoryCounts = {
       primary: 0,
@@ -5381,6 +5401,10 @@ export class EmailDatabase {
     if (options.folderId) {
       filters.push("m.folder_id = ?");
       filterParams.push(options.folderId);
+    }
+    if (options.isRead !== undefined) {
+      filters.push("COALESCE(s.is_read, 0) = ?");
+      filterParams.push(options.isRead ? 1 : 0);
     }
     if (options.starred !== undefined) {
       filters.push("COALESCE(s.is_starred, 0) = ?");

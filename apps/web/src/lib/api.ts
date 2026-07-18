@@ -376,6 +376,7 @@ export class ApiClient {
   listMessages(options: {
     archiveId?: string;
     folderId?: string;
+    isRead?: boolean;
     starred?: boolean;
     inboxCategory?: InboxCategory;
     cursor?: string;
@@ -384,7 +385,7 @@ export class ApiClient {
     return this.request(`/api/messages?${queryString(options)}`);
   }
 
-  inboxCategoryCounts(options: { archiveId?: string; folderId?: string }): Promise<InboxCategoryCounts> {
+  inboxCategoryCounts(options: { archiveId?: string; folderId?: string; isRead?: boolean }): Promise<InboxCategoryCounts> {
     return this.request(`/api/messages/category-counts?${queryString(options)}`);
   }
 

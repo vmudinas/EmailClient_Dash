@@ -76,6 +76,8 @@ Electron passes the selected local path directly to the import service, so it do
 - Use the combine button beside a mailbox to move all messages from it and its child mailboxes into another mailbox in the same archive. Gmail destinations follow the messages, search paths are refreshed, and the source mailbox tree is removed only inside the committed SQLite transaction.
 - Open an email and click **Archive** to move it into a sibling **Archived** mailbox. If that mailbox does not exist, Archive Mail creates it automatically. The adjacent folder button can move the email to any other local mailbox.
 - On desktop, drag an email row from the message list onto any visible mailbox in the sidebar. The destination highlights before drop; read-only viewer sessions cannot drag messages.
+- Open **Search filters** to search the current view, the entire archive, or one specific mailbox. The active mailbox scope appears in the search placeholder and results title.
+- Use the eye button beside **Search filters** to hide read messages across every mailbox and search result. The preference remains selected after restarting the app.
 - Renames affect local display and search metadata only. PST and MBOX sources are never rewritten.
 - Use the trash button to remove an archive or a completed mailbox. Mailbox deletion includes its child mailboxes, messages, search rows, and unreferenced attachment blobs.
 - Removing an active archive first stops its import and then removes any managed temporary source copy. Directly selected original files are never deleted.

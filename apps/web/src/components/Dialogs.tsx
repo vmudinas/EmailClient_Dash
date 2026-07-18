@@ -37,6 +37,7 @@ import type { UploadProgress } from "../lib/api.js";
 import { importEmailCountLabel, importProgressPercent } from "../lib/import-progress.js";
 
 export interface UiSearchFilters {
+  folderId: string;
   from: string;
   to: string;
   after: string;
@@ -45,12 +46,15 @@ export interface UiSearchFilters {
 }
 
 export const EMPTY_FILTERS: UiSearchFilters = {
+  folderId: "",
   from: "",
   to: "",
   after: "",
   before: "",
   hasAttachment: undefined
 };
+
+export const ALL_MAIL_SEARCH_SCOPE = "__all_mail__";
 
 interface ImportDialogProps {
   open: boolean;
@@ -767,11 +771,20 @@ export function DiagnosticsDialog({
 interface FilterPanelProps {
   open: boolean;
   value: UiSearchFilters;
+  folders: Folder[];
+  currentFolderLabel: string;
   onChange(value: UiSearchFilters): void;
   onClose(): void;
 }
 
-export function FilterPanel({ open, value, onChange, onClose }: FilterPanelProps) {
+export function FilterPanel({
+  open,
+  value,
+  folders,
+  currentFolderLabel,
+  onChange,
+  onClose
+}: FilterPanelProps) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value, open]);
   if (!open) return null;
@@ -781,6 +794,20 @@ export function FilterPanel({ open, value, onChange, onClose }: FilterPanelProps
         <div><Filter size={17} /><strong>Search filters</strong></div>
         <button className="icon-button subtle" onClick={onClose} title="Close filters" aria-label="Close filters"><X size={16} /></button>
       </header>
+      <label>
+        <span>Search in</span>
+        <select
+          value={draft.folderId}
+          onChange={(event) => setDraft({ ...draft, folderId: event.target.value })}
+          aria-label="Search in mailbox"
+        >
+          <option value="">Current view — {currentFolderLabel}</option>
+          <option value={ALL_MAIL_SEARCH_SCOPE}>Entire archive</option>
+          <optgroup label="Specific mailbox">
+            {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}
+          </optgroup>
+        </select>
+      </label>
       <label><span>From</span><input value={draft.from} onChange={(event) => setDraft({ ...draft, from: event.target.value })} placeholder="name or address" /></label>
       <label><span>To or CC</span><input value={draft.to} onChange={(event) => setDraft({ ...draft, to: event.target.value })} placeholder="name or address" /></label>
       <div className="filter-date-grid">

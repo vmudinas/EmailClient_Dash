@@ -68,6 +68,10 @@ describe("EmailDatabase", () => {
     expect(database.getMessage(message.id)?.bodyText).toBe(fullBodyText);
     expect(database.getArchive(archive.id)?.unreadCount).toBe(1);
     expect(database.listFolders(archive.id)[0]?.unreadCount).toBe(1);
+    expect(database.listMessages({ archiveId: archive.id, isRead: false }).items)
+      .toEqual([expect.objectContaining({ id: message.id })]);
+    expect(database.search({ q: "rollout", archiveId: archive.id, isRead: false }).items)
+      .toHaveLength(1);
     const state = database.updateMessageState(message.id, {
       isRead: true,
       isStarred: true,
@@ -82,6 +86,13 @@ describe("EmailDatabase", () => {
     });
     expect(database.getArchive(archive.id)?.unreadCount).toBe(0);
     expect(database.getFolder(folder.id)?.unreadCount).toBe(0);
+    expect(database.listMessages({ archiveId: archive.id, isRead: false }).items).toHaveLength(0);
+    expect(database.listMessages({ archiveId: archive.id, isRead: true }).items)
+      .toEqual([expect.objectContaining({ id: message.id })]);
+    expect(database.search({ q: "rollout", archiveId: archive.id, isRead: false }).items)
+      .toHaveLength(0);
+    expect(database.countInboxCategories({ archiveId: archive.id, isRead: false }).primary).toBe(0);
+    expect(database.countInboxCategories({ archiveId: archive.id, isRead: true }).primary).toBe(1);
     expect(database.listMessages({ archiveId: archive.id, starred: true }).items).toEqual([
       expect.objectContaining({ id: message.id, folderId: folder.id, folderPath: folder.path })
     ]);
@@ -193,7 +204,9 @@ describe("EmailDatabase", () => {
     expect(archivePlan.some((row) => row.detail.includes("messages_archive_sort_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("messages_conversation_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("SCAN sent_reply"))).toBe(false);
-    expect(sqlite.pragma("user_version", { simple: true })).toBe(30);
+    expect(sqlite.pragma("user_version", { simple: true })).toBe(31);
+    expect((sqlite.pragma("index_list(message_state)") as Array<{ name: string }>)
+      .some((index) => index.name === "message_state_read_idx")).toBe(true);
 
     sqlite.close();
     database.close();

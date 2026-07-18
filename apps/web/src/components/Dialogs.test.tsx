@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Archive, Folder, GmailConnection } from "@email-client/shared";
-import { GmailDialog } from "./Dialogs.js";
+import { EMPTY_FILTERS, FilterPanel, GmailDialog } from "./Dialogs.js";
 
 afterEach(cleanup);
 
@@ -122,6 +122,32 @@ describe("GmailDialog", () => {
     expect(confirmSpy).toHaveBeenCalled();
     expect(onFullSync).toHaveBeenCalledWith(CONNECTIONS[0]!.id);
     confirmSpy.mockRestore();
+  });
+});
+
+describe("FilterPanel", () => {
+  it("applies a specific mailbox as the search scope", () => {
+    const onChange = vi.fn();
+    render(
+      <FilterPanel
+        open
+        value={EMPTY_FILTERS}
+        folders={FOLDERS}
+        currentFolderLabel="Inbox"
+        onChange={onChange}
+        onClose={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("Search in mailbox"), {
+      target: { value: FOLDERS[1]!.id }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(onChange).toHaveBeenCalledWith({
+      ...EMPTY_FILTERS,
+      folderId: FOLDERS[1]!.id
+    });
   });
 });
 

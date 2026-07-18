@@ -657,6 +657,7 @@ export class EmailApiRuntime {
       Querystring: {
         archiveId?: string;
         folderId?: string;
+        isRead?: string;
         starred?: string;
         inboxCategory?: string;
         cursor?: string;
@@ -671,6 +672,7 @@ export class EmailApiRuntime {
       return this.database.listMessages({
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
+        isRead: optionalBoolean(request.query.isRead),
         starred: optionalBoolean(request.query.starred),
         inboxCategory,
         cursor: request.query.cursor,
@@ -679,12 +681,13 @@ export class EmailApiRuntime {
     });
 
     this.app.get<{
-      Querystring: { archiveId?: string; folderId?: string };
+      Querystring: { archiveId?: string; folderId?: string; isRead?: string };
     }>("/api/messages/category-counts", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
       return this.database.countInboxCategories({
         archiveId: request.query.archiveId,
-        folderId: request.query.folderId
+        folderId: request.query.folderId,
+        isRead: optionalBoolean(request.query.isRead)
       });
     });
 
@@ -755,6 +758,7 @@ export class EmailApiRuntime {
         q?: string;
         archiveId?: string;
         folderId?: string;
+        isRead?: string;
         starred?: string;
         inboxCategory?: string;
         from?: string;
@@ -781,6 +785,7 @@ export class EmailApiRuntime {
         q: query,
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
+        isRead: optionalBoolean(request.query.isRead),
         starred: optionalBoolean(request.query.starred),
         inboxCategory,
         from: request.query.from,

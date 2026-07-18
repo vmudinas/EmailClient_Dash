@@ -2641,7 +2641,8 @@ textarea:focus-visible {
 
 .notes-editor input,
 .notes-editor textarea,
-.filter-popover input {
+.filter-popover input,
+.filter-popover select {
   width: 100%;
   padding: 8px 9px;
   border: 1px solid var(--line-strong);

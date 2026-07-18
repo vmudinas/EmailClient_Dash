@@ -960,6 +960,7 @@ export interface CursorPage<T> {
 export interface SearchFilters {
   archiveId?: string;
   folderId?: string;
+  isRead?: boolean;
   starred?: boolean;
   inboxCategory?: InboxCategory;
   from?: string;

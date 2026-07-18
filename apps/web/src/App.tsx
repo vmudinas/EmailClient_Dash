@@ -14,6 +14,8 @@ import {
   FileEdit,
   Filter,
   FolderOpen,
+  Eye,
+  EyeOff,
   Import,
   List,
   LoaderCircle,
@@ -64,6 +66,7 @@ import {
 import { MessageReader } from "./components/MessageReader.js";
 import { CalendarView } from "./components/CalendarView.js";
 import {
+  ALL_MAIL_SEARCH_SCOPE,
   EMPTY_FILTERS,
   CombineArchiveDialog,
   CombineMailboxDialog,
@@ -101,6 +104,7 @@ const EMPTY_SHARING: SharingState = {
 };
 
 const SESSION_STORAGE_KEY = "archive-mail-session-token";
+const SHOW_READ_STORAGE_KEY = "archive-mail-show-read-messages";
 const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   primary: 0,
   promotions: 0,
@@ -163,6 +167,13 @@ export function App() {
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [filters, setFilters] = useState<UiSearchFilters>(EMPTY_FILTERS);
+  const [showReadMessages, setShowReadMessages] = useState(() => {
+    try {
+      return window.localStorage.getItem(SHOW_READ_STORAGE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
   const [sort, setSort] = useState<"relevance" | "newest">("relevance");
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState(false);
@@ -235,7 +246,17 @@ export function App() {
   const electron = Boolean(window.emailClient);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
-  const showInboxCategories = selectedFolder?.name.trim().toLowerCase() === "inbox"
+  const searchFolderId = filters.folderId === ALL_MAIL_SEARCH_SCOPE
+    ? null
+    : filters.folderId || selectedFolderId;
+  const visibleFolderId = searchTerm ? searchFolderId : selectedFolderId;
+  const visibleFolder = folders.find((folder) => folder.id === visibleFolderId) ?? null;
+  const searchScopeLabel = filters.folderId === ALL_MAIL_SEARCH_SCOPE
+    ? "Entire archive"
+    : filters.folderId
+      ? folders.find((folder) => folder.id === filters.folderId)?.path ?? "Selected mailbox"
+      : selectedFolder?.path ?? "All mail";
+  const showInboxCategories = visibleFolder?.name.trim().toLowerCase() === "inbox"
     && selectedSmartMailbox === null;
   const activeFilterCount = Object.values(filters).filter((value) => value !== "" && value !== undefined).length;
 
@@ -404,6 +425,18 @@ export function App() {
   }, [query]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(SHOW_READ_STORAGE_KEY, String(showReadMessages));
+    } catch {}
+  }, [showReadMessages]);
+
+  useEffect(() => {
+    setFilters((current) => current.folderId && current.folderId !== ALL_MAIL_SEARCH_SCOPE
+      ? { ...current, folderId: "" }
+      : current);
+  }, [selectedArchiveId]);
+
+  useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -518,12 +551,17 @@ export function App() {
     setLoadingMessages(true);
     try {
       const countsPromise = !append && showInboxCategories
-        ? api.inboxCategoryCounts({ archiveId: selectedArchiveId, folderId: selectedFolderId ?? undefined })
+        ? api.inboxCategoryCounts({
+            archiveId: selectedArchiveId,
+            folderId: visibleFolderId ?? undefined,
+            isRead: showReadMessages ? undefined : false
+          })
         : Promise.resolve(null);
       if (searchTerm) {
         const searchFilters: SearchFilters = {
           archiveId: selectedArchiveId,
-          folderId: selectedFolderId ?? undefined,
+          folderId: searchFolderId ?? undefined,
+          isRead: showReadMessages ? undefined : false,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
           inboxCategory: showInboxCategories ? inboxCategory : undefined,
           from: filters.from || undefined,
@@ -546,6 +584,7 @@ export function App() {
         const [page, counts] = await Promise.all([api.listMessages({
           archiveId: selectedArchiveId,
           folderId: selectedFolderId ?? undefined,
+          isRead: showReadMessages ? undefined : false,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
           inboxCategory: showInboxCategories ? inboxCategory : undefined,
           cursor: append ? nextCursor ?? undefined : undefined,
@@ -569,12 +608,15 @@ export function App() {
     api,
     selectedArchiveId,
     selectedFolderId,
+    searchFolderId,
+    visibleFolderId,
     selectedSmartMailbox,
     showInboxCategories,
     inboxCategory,
     searchTerm,
     filters,
     sort,
+    showReadMessages,
     nextCursor,
     showError
   ]);
@@ -587,7 +629,7 @@ export function App() {
     setMessage(null);
     setBulkSelectedIds(new Set());
     void loadMessages(false);
-  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory]);
+  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory, showReadMessages]);
 
   const loadFoldersForGmail = useCallback(async (archiveId: string): Promise<Folder[]> => {
     if (!api) return [];
@@ -688,15 +730,15 @@ export function App() {
     state: MessageDetail["state"]
   ) => {
     setMessage((current) => current?.id === messageId ? { ...current, state } : current);
-    setItems((current) => current.map((item) => (
-      item.message.id === messageId
-        ? {
-            ...item,
-            message: { ...item.message, state },
-            hit: item.hit ? { ...item.hit, message: { ...item.hit.message, state } } : undefined
-          }
-        : item
-    )));
+    setItems((current) => current.flatMap((item) => {
+      if (item.message.id !== messageId) return [item];
+      if (!showReadMessages && state.isRead) return [];
+      return [{
+        ...item,
+        message: { ...item.message, state },
+        hit: item.hit ? { ...item.hit, message: { ...item.hit.message, state } } : undefined
+      }];
+    }));
   };
 
   const updateState = async (patch: LocalMessageStatePatch) => {
@@ -1356,7 +1398,8 @@ export function App() {
         if (searchTerm) {
           const page = await api.search(searchTerm, {
             archiveId: selectedArchiveId,
-            folderId: selectedFolderId ?? undefined,
+            folderId: searchFolderId ?? undefined,
+            isRead: showReadMessages ? undefined : false,
             starred: selectedSmartMailbox === "starred" ? true : undefined,
             inboxCategory: showInboxCategories ? inboxCategory : undefined,
             from: filters.from || undefined,
@@ -1374,6 +1417,7 @@ export function App() {
           const page = await api.listMessages({
             archiveId: selectedArchiveId,
             folderId: selectedFolderId ?? undefined,
+            isRead: showReadMessages ? undefined : false,
             starred: selectedSmartMailbox === "starred" ? true : undefined,
             inboxCategory: showInboxCategories ? inboxCategory : undefined,
             cursor,
@@ -1673,7 +1717,7 @@ export function App() {
   };
 
   const listTitle = searchTerm
-    ? `Search: ${searchTerm}`
+    ? `Search in ${searchScopeLabel}: ${searchTerm}`
     : selectedSmartMailbox === "starred"
       ? "Starred"
       : selectedFolder?.name ?? (selectedArchive ? "All mail" : "Messages");
@@ -1726,7 +1770,7 @@ export function App() {
             ref={searchInputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search mail and attachments"
+            placeholder={`Search in ${searchScopeLabel}`}
             aria-label="Search mail and attachments"
           />
           {query && (
@@ -1756,10 +1800,21 @@ export function App() {
             <FilterPanel
               open={filterOpen}
               value={filters}
+              folders={folders}
+              currentFolderLabel={selectedFolder?.path ?? "All mail"}
               onChange={setFilters}
               onClose={() => setFilterOpen(false)}
             />
           </div>
+          <button
+            className={`icon-button read-visibility-toggle ${showReadMessages ? "" : "active"}`}
+            onClick={() => setShowReadMessages((current) => !current)}
+            title={showReadMessages ? "Hide read emails in every folder" : "Show read emails in every folder"}
+            aria-label={showReadMessages ? "Hide read emails in every folder" : "Show read emails in every folder"}
+            aria-pressed={!showReadMessages}
+          >
+            {showReadMessages ? <EyeOff size={18} /> : <Eye size={18} />}
+          </button>
           <button
             className={`icon-button calendar-trigger ${viewMode === "calendar" ? "active" : ""}`}
             onClick={() => setViewMode((current) => (current === "calendar" ? "mail" : "calendar"))}

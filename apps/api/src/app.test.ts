@@ -2061,8 +2061,9 @@ describe("Email API Inbox category routes", () => {
     });
     runtime.database.completeArchive(archive.id, 0);
     const inbox = runtime.database.createFolder(archive.id, "Inbox");
+    let primaryMessageId = "";
     for (const category of ["primary", "social"] as const) {
-      runtime.database.insertMessage({
+      const messageId = runtime.database.insertMessage({
         archiveId: archive.id,
         folderId: inbox.id,
         inboxCategory: category,
@@ -2081,7 +2082,9 @@ describe("Email API Inbox category routes", () => {
         sizeBytes: 1,
         attachments: []
       });
+      if (category === "primary") primaryMessageId = messageId;
     }
+    runtime.database.updateMessageState(primaryMessageId, { isRead: true });
 
     const filtered = await runtime.app.inject({
       method: "GET",
@@ -2092,6 +2095,18 @@ describe("Email API Inbox category routes", () => {
     const counts = await runtime.app.inject({
       method: "GET",
       url: `/api/messages/category-counts?folderId=${inbox.id}`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    const unreadCounts = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages/category-counts?folderId=${inbox.id}&isRead=false`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    const unreadSearch = await runtime.app.inject({
+      method: "GET",
+      url: `/api/search?q=category%20route%20marker&folderId=${inbox.id}&isRead=false`,
       headers,
       remoteAddress: "127.0.0.1"
     });
@@ -2112,6 +2127,8 @@ describe("Email API Inbox category routes", () => {
       medical: 0,
       mail_tracking: 0
     });
+    expect(unreadCounts.json()).toMatchObject({ primary: 0, social: 1 });
+    expect(unreadSearch.json()).toMatchObject({ items: [{ message: { subject: "social" } }] });
     expect(invalid.statusCode).toBe(400);
 
     const login = await runtime.app.inject({
