@@ -30,6 +30,7 @@ const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1";
+const INBOX_RECONCILIATION_INTERVAL_MS = 60 * 60 * 1000;
 
 interface PendingAuthorization {
   request: GmailAuthRequest;
@@ -138,6 +139,7 @@ export class GmailService {
   private syncTimer: ReturnType<typeof setInterval> | null = null;
   private syncIntervalMinutes = 0;
   private syncMailboxActionsEnabled: boolean;
+  private readonly lastInboxReconciliationAt = new Map<string, number>();
 
   constructor(
     private readonly database: EmailStore,
@@ -171,7 +173,10 @@ export class GmailService {
   }
 
   configureMailboxActionSync(enabled: boolean): void {
-    if (enabled !== this.syncMailboxActionsEnabled) this.pending.clear();
+    if (enabled !== this.syncMailboxActionsEnabled) {
+      this.pending.clear();
+      this.lastInboxReconciliationAt.clear();
+    }
     this.syncMailboxActionsEnabled = enabled;
   }
 
@@ -592,6 +597,7 @@ export class GmailService {
     accessToken: string,
     signal: AbortSignal
   ): Promise<string | null> {
+    if (normalizeLabelName(targetFolderPath) === normalizeLabelName(connection.folderPath)) return null;
     const kind = mailboxKind(targetFolderPath);
     if (kind !== "custom") return null;
     const labelName = gmailLabelName(connection.folderPath, targetFolderPath);
@@ -950,6 +956,19 @@ export class GmailService {
           controller.signal
         );
       }
+      if (this.syncMailboxActionsEnabled && connection.canModifyMailbox) {
+        const lastReconciledAt = this.lastInboxReconciliationAt.get(connection.id) ?? 0;
+        if (full || Date.now() - lastReconciledAt >= INBOX_RECONCILIATION_INTERVAL_MS) {
+          await this.reconcileKnownRemoteInbox(
+            connection,
+            labelsById,
+            accessToken,
+            controller.signal,
+            new Set(mailboxReconciliationCandidates.map((candidate) => candidate.gmailMessageId))
+          );
+          this.lastInboxReconciliationAt.set(connection.id, Date.now());
+        }
+      }
 
       this.database.refreshArchiveStatistics(connection.archiveId);
       const status = itemErrors > 0 ? "error" : "connected";
@@ -1089,6 +1108,80 @@ export class GmailService {
         mutationGroups: mutations.size
       });
     }
+  }
+
+  private async reconcileKnownRemoteInbox(
+    connection: GmailConnectionRecord,
+    labelsById: Map<string, GmailLabel>,
+    accessToken: string,
+    signal: AbortSignal,
+    excludedGmailMessageIds: ReadonlySet<string>
+  ): Promise<void> {
+    const remoteInboxIds = await this.listMessageIdsForLabel(accessToken, "INBOX", signal);
+    const candidates = this.database.getGmailMessageMutationTargetsByGmailIds(
+      connection.id,
+      remoteInboxIds.filter((messageId) => !excludedGmailMessageIds.has(messageId))
+    );
+    const targetLabelIds = new Map<string, string | null>();
+    const mutations = new Map<string, {
+      mutation: GmailLabelMutation;
+      targets: GmailMessageMutationTarget[];
+    }>();
+
+    for (const target of candidates) {
+      throwIfAborted(signal);
+      const targetKind = normalizeLabelName(target.currentFolderPath) === normalizeLabelName(connection.folderPath)
+        ? "archive"
+        : mailboxKind(target.currentFolderPath);
+      if (targetKind === "inbox" || targetKind === "drafts" || targetKind === "sent") continue;
+
+      let targetLabelId = targetLabelIds.get(target.currentFolderPath);
+      if (!targetLabelIds.has(target.currentFolderPath)) {
+        targetLabelId = targetKind === "archive"
+          ? null
+          : await this.resolveTargetUserLabel(
+              connection,
+              target.currentFolderPath,
+              labelsById,
+              accessToken,
+              signal
+            );
+        targetLabelIds.set(target.currentFolderPath, targetLabelId);
+      }
+      const mutation = resolveMoveMutation(
+        connection.folderPath,
+        connection.folderPath,
+        target.currentFolderPath,
+        labelsById,
+        targetLabelId ?? null
+      );
+      const key = `${mutation.addLabelIds.slice().sort().join(",")}|${mutation.removeLabelIds.slice().sort().join(",")}`;
+      const group = mutations.get(key) ?? { mutation, targets: [] };
+      group.targets.push(target);
+      mutations.set(key, group);
+    }
+
+    let reconciledMessages = 0;
+    for (const group of mutations.values()) {
+      await this.modifyTargets(connection, group.targets, group.mutation, accessToken, signal);
+      reconciledMessages += group.targets.length;
+    }
+    this.database.recordDiagnostic({
+      level: "info",
+      category: "gmail",
+      message: reconciledMessages > 0
+        ? `Gmail Inbox repaired for ${reconciledMessages} locally filed message${reconciledMessages === 1 ? "" : "s"}`
+        : "Gmail Inbox reconciliation found no local folder drift",
+      archiveId: connection.archiveId,
+      sourceName: connection.email,
+      context: {
+        operation: "inbox_reconcile",
+        remoteInboxMessages: remoteInboxIds.length,
+        locallyKnownMessages: candidates.length,
+        reconciledMessages,
+        mutationGroups: mutations.size
+      }
+    });
   }
 
   private async listMessageIds(
@@ -1462,7 +1555,9 @@ function resolveMoveMutation(
   labelsById: ReadonlyMap<string, GmailLabel>,
   targetLabelId: string | null
 ): GmailLabelMutation {
-  const kind = mailboxKind(targetFolderPath);
+  const kind = normalizeLabelName(targetFolderPath) === normalizeLabelName(baseFolderPath)
+    ? "archive"
+    : mailboxKind(targetFolderPath);
   if (kind === "drafts" || kind === "sent") {
     throw new Error(`Gmail does not allow messages to be moved into ${kind === "drafts" ? "Drafts" : "Sent"}`);
   }

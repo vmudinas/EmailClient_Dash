@@ -812,6 +812,75 @@ describe("GmailService", () => {
     }]);
   });
 
+  it("repairs older locally filed messages that still remain in the Gmail Inbox", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "archive-mail-gmail-inbox-repair-"));
+    directories.push(dataDir);
+    const database = new EmailDatabase(dataDir);
+    const imports = new ImportService(database, new BlobStore(dataDir));
+    await imports.initialize();
+    const archive = database.createArchive({
+      name: "Gmail",
+      sourceType: "gmail",
+      fingerprint: "gmail-inbox-repair",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const root = database.ensureFolder(archive.id, "Gmail", "Gmail", null);
+    const archived = database.ensureFolder(archive.id, "Archived", "Gmail/Archived", root.id);
+    const connection = database.createGmailConnection({
+      email: "owner@example.test",
+      archiveId: archive.id,
+      folderId: root.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: false,
+      canModifyMailbox: true,
+      canManageCalendar: false,
+      refreshToken: "refresh-token",
+      accessToken: "access-token",
+      accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    });
+    insertGmailActionMessage(database, archive.id, archived.id, connection.email, "gmail-stale-inbox");
+    const requests: Array<{ ids: string[]; addLabelIds: string[]; removeLabelIds: string[] }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname.endsWith("/users/me/labels")) {
+        return jsonResponse({ labels: [
+          { id: "INBOX", name: "INBOX", type: "system" },
+          { id: "SPAM", name: "SPAM", type: "system" },
+          { id: "TRASH", name: "TRASH", type: "system" }
+        ] });
+      }
+      if (url.pathname.endsWith("/users/me/messages") && url.searchParams.get("labelIds") === "INBOX") {
+        return jsonResponse({ messages: [{ id: "gmail-stale-inbox" }], resultSizeEstimate: 1 });
+      }
+      if (url.pathname.endsWith("/users/me/messages")) return jsonResponse({ messages: [], resultSizeEstimate: 0 });
+      if (url.pathname.endsWith("/users/me/messages/batchModify")) {
+        requests.push(JSON.parse(String(init?.body)));
+        return jsonResponse({});
+      }
+      throw new Error(`Unexpected Gmail test request: ${url}`);
+    };
+    const gmail = new GmailService(database, imports, {
+      clientId: "desktop-client-id",
+      clientSecret: null,
+      redirectUri: () => "http://127.0.0.1:3001/api/gmail/oauth/callback",
+      fetcher,
+      syncMailboxActions: true
+    });
+    services.push({ gmail, imports, database });
+
+    gmail.startSync(connection.id);
+    const synced = await waitForSync(database, connection.id);
+
+    expect(synced.status).toBe("connected");
+    expect(requests).toEqual([{
+      ids: ["gmail-stale-inbox"],
+      addLabelIds: [],
+      removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
+    }]);
+  });
+
   it("refuses mailbox actions for connections that have not been reauthorized", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "archive-mail-gmail-actions-permission-"));
     directories.push(dataDir);

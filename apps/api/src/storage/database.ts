@@ -4294,6 +4294,45 @@ export class EmailDatabase {
     return targets;
   }
 
+  getGmailMessageMutationTargetsByGmailIds(
+    connectionId: string,
+    gmailMessageIds: string[]
+  ): GmailMessageMutationTarget[] {
+    const connection = this.getGmailConnectionRecord(connectionId);
+    if (!connection || gmailMessageIds.length === 0) return [];
+    const prefix = `gmail:${connection.email.trim().toLowerCase()}:`;
+    const targets: GmailMessageMutationTarget[] = [];
+    for (let index = 0; index < gmailMessageIds.length; index += 500) {
+      const ids = gmailMessageIds.slice(index, index + 500);
+      const sourceKeys = ids.map((gmailMessageId) => `${prefix}${gmailMessageId}`);
+      const placeholders = sourceKeys.map(() => "?").join(", ");
+      const rows = this.db.prepare(`
+        SELECT m.id, m.folder_id, m.source_key, m.headers_json, f.path AS folder_path
+        FROM messages m
+        JOIN folders f ON f.id = m.folder_id
+        WHERE m.archive_id = ? AND m.source_key IN (${placeholders})
+      `).all(connection.archiveId, ...sourceKeys) as Row[];
+      for (const row of rows) {
+        const sourceKey = String(row.source_key);
+        const gmailMessageId = sourceKey.slice(prefix.length);
+        if (!gmailMessageId) continue;
+        const headers = parseJson<Record<string, string>>(row.headers_json, {});
+        targets.push({
+          messageId: String(row.id),
+          gmailMessageId,
+          connection,
+          currentFolderId: String(row.folder_id),
+          currentFolderPath: String(row.folder_path),
+          labelIds: (headers["x-archive-mail-gmail-label-ids"] ?? "")
+            .split(",")
+            .map((labelId) => labelId.trim())
+            .filter(Boolean)
+        });
+      }
+    }
+    return targets;
+  }
+
   getGmailMessageFolderStateBySourceKey(archiveId: string, sourceKey: string): GmailMessageFolderState | null {
     const row = this.db.prepare(`
       SELECT m.id, m.folder_id, f.path AS folder_path
