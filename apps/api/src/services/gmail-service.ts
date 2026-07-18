@@ -83,6 +83,12 @@ interface GmailLabelMutation {
   removeLabelIds: string[];
 }
 
+interface GmailMailboxReconciliationCandidate {
+  gmailMessageId: string;
+  sourceKey: string;
+  labelIds: string[];
+}
+
 interface GmailSendAsEntry {
   sendAsEmail: string;
   displayName?: string;
@@ -846,6 +852,7 @@ export class GmailService {
     let imported = 0;
     let itemErrors = 0;
     let lastProgressWrite = 0;
+    const mailboxReconciliationCandidates: GmailMailboxReconciliationCandidate[] = [];
 
     try {
       let connection = this.requireConnection(connectionId);
@@ -880,6 +887,13 @@ export class GmailService {
             controller.signal
           );
           const labelIds = rawMessage.labelIds ?? [];
+          if (this.syncMailboxActionsEnabled && connection.canModifyMailbox) {
+            mailboxReconciliationCandidates.push({
+              gmailMessageId: messageId,
+              sourceKey,
+              labelIds
+            });
+          }
           this.database.updateMessageGmailInboxCategoryBySourceKey(
             connection.archiveId,
             sourceKey,
@@ -925,6 +939,16 @@ export class GmailService {
             importedItems: imported
           });
         }
+      }
+
+      if (mailboxReconciliationCandidates.length > 0) {
+        await this.reconcileMailboxState(
+          connection,
+          mailboxReconciliationCandidates,
+          labelsById,
+          accessToken,
+          controller.signal
+        );
       }
 
       this.database.refreshArchiveStatistics(connection.archiveId);
@@ -986,6 +1010,84 @@ export class GmailService {
       }
     } finally {
       this.controllers.delete(connectionId);
+    }
+  }
+
+  private async reconcileMailboxState(
+    connection: GmailConnectionRecord,
+    candidates: GmailMailboxReconciliationCandidate[],
+    labelsById: Map<string, GmailLabel>,
+    accessToken: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    const targetLabelIds = new Map<string, string | null>();
+    const mutations = new Map<string, {
+      mutation: GmailLabelMutation;
+      targets: GmailMessageMutationTarget[];
+    }>();
+
+    for (const candidate of candidates) {
+      throwIfAborted(signal);
+      const local = this.database.getGmailMessageFolderStateBySourceKey(
+        connection.archiveId,
+        candidate.sourceKey
+      );
+      if (!local) continue;
+      const targetKind = mailboxKind(local.folderPath);
+      if (targetKind === "drafts" || targetKind === "sent") continue;
+
+      let targetLabelId = targetLabelIds.get(local.folderPath);
+      if (!targetLabelIds.has(local.folderPath)) {
+        targetLabelId = await this.resolveTargetUserLabel(
+          connection,
+          local.folderPath,
+          labelsById,
+          accessToken,
+          signal
+        );
+        targetLabelIds.set(local.folderPath, targetLabelId);
+      }
+      const remoteFolderPath = resolveMessageFolderPath(
+        connection.folderPath,
+        candidate.labelIds,
+        labelsById
+      );
+      const expected = resolveMoveMutation(
+        connection.folderPath,
+        remoteFolderPath,
+        local.folderPath,
+        labelsById,
+        targetLabelId ?? null
+      );
+      const currentLabels = new Set(candidate.labelIds);
+      const mutation: GmailLabelMutation = {
+        addLabelIds: expected.addLabelIds.filter((labelId) => !currentLabels.has(labelId)),
+        removeLabelIds: expected.removeLabelIds.filter((labelId) => currentLabels.has(labelId))
+      };
+      if (mutation.addLabelIds.length === 0 && mutation.removeLabelIds.length === 0) continue;
+
+      const key = `${mutation.addLabelIds.slice().sort().join(",")}|${mutation.removeLabelIds.slice().sort().join(",")}`;
+      const group = mutations.get(key) ?? { mutation, targets: [] };
+      group.targets.push({
+        messageId: local.messageId,
+        gmailMessageId: candidate.gmailMessageId,
+        connection,
+        currentFolderId: local.folderId,
+        currentFolderPath: local.folderPath,
+        labelIds: candidate.labelIds
+      });
+      mutations.set(key, group);
+    }
+
+    let reconciledMessages = 0;
+    for (const group of mutations.values()) {
+      await this.modifyTargets(connection, group.targets, group.mutation, accessToken, signal);
+      reconciledMessages += group.targets.length;
+    }
+    if (reconciledMessages > 0) {
+      this.recordMailboxMutation(connection, "pull_reconcile", reconciledMessages, {
+        mutationGroups: mutations.size
+      });
     }
   }
 

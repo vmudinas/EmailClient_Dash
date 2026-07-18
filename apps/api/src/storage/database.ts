@@ -189,6 +189,12 @@ export interface GmailMessageMutationTarget {
   labelIds: string[];
 }
 
+export interface GmailMessageFolderState {
+  messageId: string;
+  folderId: string;
+  folderPath: string;
+}
+
 export interface CalendarAccountCreateInput {
   id?: string;
   label: string;
@@ -4276,6 +4282,21 @@ export class EmailDatabase {
       });
     }
     return targets;
+  }
+
+  getGmailMessageFolderStateBySourceKey(archiveId: string, sourceKey: string): GmailMessageFolderState | null {
+    const row = this.db.prepare(`
+      SELECT m.id, m.folder_id, f.path AS folder_path
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.archive_id = ? AND m.source_key = ?
+    `).get(archiveId, sourceKey) as Row | undefined;
+    if (!row) return null;
+    return {
+      messageId: String(row.id),
+      folderId: String(row.folder_id),
+      folderPath: String(row.folder_path)
+    };
   }
 
   listSenderMessageIds(messageId: string, inboxAndSelectedOnly = false): string[] {

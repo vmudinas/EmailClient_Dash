@@ -487,7 +487,10 @@ export function GmailDialog({
                       <div className="gmail-connection-copy">
                         <strong>{connection.email}</strong>
                         <span>{connection.archiveName} / {connection.folderPath}</span>
-                        <small className="gmail-permission">{connection.canSend ? "Pull-only sync · sending enabled" : "Pull-only sync · authorize again to send"}</small>
+                        <small className="gmail-permission">
+                          {connection.canModifyMailbox ? "Gmail mailbox permission granted" : "Mailbox changes stay local until reauthorized"}
+                          {connection.canSend ? " · sending enabled" : " · authorize again to send"}
+                        </small>
                         {connection.status === "syncing" ? (
                           <><progress max={100} value={percent} /><small>{connection.processedItems.toLocaleString()} of {(connection.totalItems ?? 0).toLocaleString()} · {connection.importedItems.toLocaleString()} new</small></>
                         ) : (
@@ -604,7 +607,7 @@ export function GmailDialog({
               <input type="checkbox" checked={ocrEnabled} onChange={(event) => setOcrEnabled(event.target.checked)} />
             </label>
             <p className="gmail-destination-note">Gmail labels are mirrored underneath this local folder: Inbox, Sent, Drafts, Spam, Trash, and custom labels each become their own sub-folder. Mail with no matching label is filed under Archived.</p>
-            <div className="gmail-safety"><ShieldCheck size={18} /><span>Synchronization is pull-only. Authorization grants separate read-only and send permissions, with no permission to modify or delete Gmail messages.</span></div>
+            <div className="gmail-safety"><ShieldCheck size={18} /><span>Gmail starts with read access. If mailbox mirroring is enabled in Admin settings, authorization also grants permission to archive, move, mark Spam, move to Trash, change read state, and star messages. Permanent deletion is never performed.</span></div>
           </section>
           {error && <div className="import-error" role="alert"><CircleAlert size={18} /><div><strong>Gmail action failed</strong><span>{error}</span></div></div>}
         </div>

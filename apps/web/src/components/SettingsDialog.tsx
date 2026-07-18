@@ -1181,7 +1181,10 @@ function GmailPanel({
   const pullAll = async (connection: GmailConnection) => {
     if (!window.confirm(
       `Pull the complete Gmail history for ${connection.email}, including Spam and Trash? `
-      + "This removes the original date filter for future syncs and can take a long time for large accounts."
+      + "This removes the original date filter for future syncs and can take a long time for large accounts. "
+      + (syncMailboxActions
+        ? "Local mailbox positions will also be reconciled to Gmail."
+        : "Gmail mailbox actions are not currently mirrored.")
     )) return;
     setPullingId(connection.id);
     onError("");
@@ -1306,7 +1309,7 @@ function GmailPanel({
         <div className="settings-title-row">
           <div>
             <h3>Connected account pulls</h3>
-            <p>Pull every message from Gmail, across the full account history. Progress continues if you close this window.</p>
+            <p>Pull every message from Gmail across the full account history. When mailbox mirroring is enabled, the pull also repairs local folder changes that have not reached Gmail.</p>
           </div>
           <button type="button" className="secondary-button" disabled={connectionsLoading} onClick={() => void refreshConnections(true)}>
             <RefreshCw size={16} className={connectionsLoading ? "spin" : ""} /> Refresh
