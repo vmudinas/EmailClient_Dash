@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { access, rm, stat } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { basename, dirname, extname } from "node:path";
+import type { Worker } from "node:worker_threads";
 import type {
   ImportJob,
   ImportOptions,
@@ -18,18 +19,26 @@ import {
 } from "../storage/database.js";
 import { AttachmentTextExtractor } from "./attachment-text.js";
 import { fingerprintArchive } from "./archive-fingerprint.js";
+import { yieldToEventLoop } from "./yield-to-event-loop.js";
+import { createServiceWorker } from "./service-worker.js";
 
 export class UnsupportedArchiveError extends Error {}
+
+export interface ImportServiceOptions {
+  useWorker?: boolean;
+}
 
 export class ImportService {
   private readonly controllers = new Map<string, AbortController>();
   private readonly runs = new Map<string, Promise<void>>();
   private readonly folderCache = new Map<string, Map<string, string>>();
+  private readonly workers = new Map<string, Worker>();
   private readonly extractor = new AttachmentTextExtractor();
 
   constructor(
     readonly database: EmailStore,
-    readonly blobStore: BlobStore
+    readonly blobStore: BlobStore,
+    private readonly options: ImportServiceOptions = {}
   ) {}
 
   async initialize(): Promise<void> {
@@ -82,6 +91,7 @@ export class ImportService {
     if (!job) throw new Error("Import job not found");
     const controller = this.controllers.get(jobId);
     if (controller) controller.abort();
+    this.workers.get(jobId)?.postMessage({ type: "cancel" });
     const cancelled = this.database.updateImportJob(jobId, {
       status: "cancelled",
       canResume: true,
@@ -154,7 +164,10 @@ export class ImportService {
   async removeArchive(archiveId: string): Promise<void> {
     const archive = this.database.getArchive(archiveId);
     const jobs = this.database.listImportJobRecordsForArchive(archiveId);
-    for (const job of jobs) this.controllers.get(job.id)?.abort();
+    for (const job of jobs) {
+      this.controllers.get(job.id)?.abort();
+      this.workers.get(job.id)?.postMessage({ type: "cancel" });
+    }
     await Promise.allSettled(
       jobs.map((job) => this.runs.get(job.id)).filter((run): run is Promise<void> => Boolean(run))
     );
@@ -243,20 +256,27 @@ export class ImportService {
 
   async close(): Promise<void> {
     for (const controller of this.controllers.values()) controller.abort();
+    for (const worker of this.workers.values()) worker.postMessage({ type: "cancel" });
     await Promise.allSettled(this.runs.values());
     await this.extractor.close();
   }
 
+  abortJob(jobId: string): void {
+    this.controllers.get(jobId)?.abort();
+  }
+
   private launchJob(jobId: string): void {
     if (this.runs.has(jobId)) return;
-    const run = this.runJob(jobId);
+    const run = this.options.useWorker === false
+      ? this.runJobInCurrentThread(jobId)
+      : this.runJobInWorker(jobId);
     this.runs.set(jobId, run);
     void run.finally(() => {
       if (this.runs.get(jobId) === run) this.runs.delete(jobId);
     }).catch(() => undefined);
   }
 
-  private async runJob(jobId: string): Promise<void> {
+  async runJobInCurrentThread(jobId: string): Promise<void> {
     if (this.controllers.has(jobId)) return;
     const controller = new AbortController();
     this.controllers.set(jobId, controller);
@@ -337,6 +357,7 @@ export class ImportService {
               message: "Importing messages"
             });
           }
+          if ((index + 1) % 250 === 0) await yieldToEventLoop();
         },
         onTotal: (total: number) => {
           latestTotal = total;
@@ -451,6 +472,57 @@ export class ImportService {
     } finally {
       this.controllers.delete(jobId);
     }
+  }
+
+  private async runJobInWorker(jobId: string): Promise<void> {
+    const worker = createServiceWorker(import.meta.url, "./import-worker.ts", "./import-worker.js", {
+      databasePath: this.database.path,
+      blobDataDir: dirname(this.blobStore.rootDir),
+      jobId
+    });
+    this.workers.set(jobId, worker);
+    try {
+      await new Promise<void>((resolve) => {
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          resolve();
+        };
+        worker.on("message", (message: { type?: string; error?: string; stack?: string | null }) => {
+          if (message.type === "failed") this.failWorkerJob(jobId, message.error ?? "Import worker failed", message.stack);
+        });
+        worker.on("error", (error) => {
+          this.failWorkerJob(jobId, error.message, error.stack);
+          finish();
+        });
+        worker.on("exit", (code) => {
+          if (code !== 0) this.failWorkerJob(jobId, `Import worker stopped unexpectedly (${code})`);
+          finish();
+        });
+      });
+    } finally {
+      this.workers.delete(jobId);
+      await worker.terminate();
+    }
+  }
+
+  private failWorkerJob(jobId: string, message: string, stack?: string | null): void {
+    const job = this.database.getImportJobRecord(jobId);
+    if (!job || ["completed", "completed_with_errors", "cancelled"].includes(job.status)) return;
+    this.database.addImportError(jobId, "worker", message);
+    this.database.failArchive(job.archiveId);
+    this.database.updateImportJob(jobId, { status: "failed", canResume: true, message });
+    this.database.recordDiagnostic({
+      level: "error",
+      category: "import",
+      message,
+      stack: stack ?? null,
+      jobId,
+      archiveId: job.archiveId,
+      sourceName: job.sourceName,
+      context: { operation: "import_worker" }
+    });
   }
 
   private async persistMessage(

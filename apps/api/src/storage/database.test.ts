@@ -53,6 +53,19 @@ describe("EmailDatabase", () => {
           relativePath: "aa/aa/blob",
           sizeBytes: 20
         }
+      }, {
+        filename: "signature.png",
+        contentType: "image/png",
+        sizeBytes: 10,
+        contentId: "signature-logo",
+        disposition: "inline",
+        textStatus: "unsupported",
+        extractedText: "",
+        blob: {
+          sha256: "b".repeat(64),
+          relativePath: "bb/bb/blob",
+          sizeBytes: 10
+        }
       }]
     });
     database.completeArchive(archive.id, 0);
@@ -65,13 +78,25 @@ describe("EmailDatabase", () => {
     expect(database.search({ q: "launch", from: "nobody" }).items).toHaveLength(0);
 
     const message = database.listMessages({ archiveId: archive.id }).items[0]!;
+    expect(message).toMatchObject({ hasAttachments: true, attachmentCount: 1 });
+    expect(database.getMessage(message.id)?.attachments).toHaveLength(2);
     expect(database.getMessage(message.id)?.bodyText).toBe(fullBodyText);
     expect(database.getArchive(archive.id)?.unreadCount).toBe(1);
     expect(database.listFolders(archive.id)[0]?.unreadCount).toBe(1);
     expect(database.listMessages({ archiveId: archive.id, isRead: false }).items)
       .toEqual([expect.objectContaining({ id: message.id })]);
+    expect(database.listMessages({ archiveId: archive.id, hasAttachment: true }).items)
+      .toEqual([expect.objectContaining({ id: message.id })]);
+    expect(database.listMessages({ archiveId: archive.id, hasAttachment: false }).items).toHaveLength(0);
+    expect(database.listMessages({ archiveId: archive.id, from: "maya", to: "product" }).items)
+      .toEqual([expect.objectContaining({ id: message.id })]);
+    expect(database.listMessages({ archiveId: archive.id, after: "2026-07-02" }).items).toHaveLength(0);
     expect(database.search({ q: "rollout", archiveId: archive.id, isRead: false }).items)
       .toHaveLength(1);
+    expect(database.search({ q: "rollout", archiveId: archive.id, hasAttachment: true }).items)
+      .toHaveLength(1);
+    expect(database.search({ q: "rollout", archiveId: archive.id, hasAttachment: false }).items)
+      .toHaveLength(0);
     const state = database.updateMessageState(message.id, {
       isRead: true,
       isStarred: true,
@@ -105,6 +130,60 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("keeps inline CID images visible without treating them as file attachments", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "inline-images.mbox",
+      sourceType: "mbox",
+      fingerprint: "inline-image-fixture",
+      sizeBytes: 20
+    });
+    const folder = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = database.insertMessage({
+      archiveId: archive.id,
+      folderId: folder.id,
+      sourceKey: "inline-only",
+      internetMessageId: null,
+      subject: "Inline logo",
+      sender: { name: null, address: "sender@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: null,
+      receivedAt: null,
+      bodyText: "Company logo",
+      bodyHtml: '<img src="cid:logo">',
+      headers: {},
+      sizeBytes: 20,
+      attachments: [{
+        filename: "logo.png",
+        contentType: "image/png",
+        sizeBytes: 10,
+        contentId: "logo",
+        disposition: "inline",
+        textStatus: "unsupported",
+        extractedText: "",
+        blob: {
+          sha256: "c".repeat(64),
+          relativePath: "cc/cc/blob",
+          sizeBytes: 10
+        }
+      }]
+    });
+    database.completeArchive(archive.id, 0);
+
+    expect(database.listMessages({ archiveId: archive.id }).items[0])
+      .toMatchObject({ id: messageId, hasAttachments: false, attachmentCount: 0 });
+    expect(database.listMessages({ archiveId: archive.id, hasAttachment: true }).items).toHaveLength(0);
+    expect(database.listMessages({ archiveId: archive.id, hasAttachment: false }).items)
+      .toEqual([expect.objectContaining({ id: messageId })]);
+    expect(database.getMessage(messageId)?.attachments).toEqual([
+      expect.objectContaining({ filename: "logo.png", disposition: "inline" })
+    ]);
+    database.close();
+  });
+
   it("lists mail by newest received date and keeps undated records at the bottom", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
@@ -128,6 +207,11 @@ describe("EmailDatabase", () => {
       "older",
       "undated"
     ]);
+    const firstPage = database.listMessages({ folderId: folder.id, limit: 2 });
+    const secondPage = database.listMessages({ folderId: folder.id, limit: 2, cursor: firstPage.nextCursor ?? undefined });
+    expect(firstPage.items.map((message) => message.subject)).toEqual(["newest", "sent-fallback"]);
+    expect(secondPage.items.map((message) => message.subject)).toEqual(["older", "undated"]);
+    expect(secondPage.nextCursor).toBeNull();
     expect(database.search({ q: "ordering-marker", folderId: folder.id, sort: "newest" }).items
       .map((hit) => hit.message.subject)).toEqual([
       "newest",
@@ -156,33 +240,21 @@ describe("EmailDatabase", () => {
       EXPLAIN QUERY PLAN
       SELECT id FROM messages
       WHERE folder_id = ?
-      ORDER BY
-        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
-        COALESCE(received_at, sent_at) DESC,
-        created_at DESC,
-        id DESC
+      ORDER BY COALESCE(received_at, sent_at, '') DESC, created_at DESC, id DESC
       LIMIT 51
     `).all(folder.id) as Array<{ detail: string }>;
     const categoryPlan = sqlite.prepare(`
       EXPLAIN QUERY PLAN
       SELECT id FROM messages
       WHERE folder_id = ? AND inbox_category = 'primary'
-      ORDER BY
-        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
-        COALESCE(received_at, sent_at) DESC,
-        created_at DESC,
-        id DESC
+      ORDER BY COALESCE(received_at, sent_at, '') DESC, created_at DESC, id DESC
       LIMIT 51
     `).all(folder.id) as Array<{ detail: string }>;
     const archivePlan = sqlite.prepare(`
       EXPLAIN QUERY PLAN
       SELECT id FROM messages
       WHERE archive_id = ?
-      ORDER BY
-        CASE WHEN COALESCE(received_at, sent_at) IS NULL THEN 1 ELSE 0 END,
-        COALESCE(received_at, sent_at) DESC,
-        created_at DESC,
-        id DESC
+      ORDER BY COALESCE(received_at, sent_at, '') DESC, created_at DESC, id DESC
       LIMIT 51
     `).all(archive.id) as Array<{ detail: string }>;
     const replyPlan = sqlite.prepare(`
@@ -199,12 +271,12 @@ describe("EmailDatabase", () => {
       LIMIT 51
     `).all(folder.id) as Array<{ detail: string }>;
 
-    expect(folderPlan.some((row) => row.detail.includes("messages_folder_sort_idx"))).toBe(true);
-    expect(categoryPlan.some((row) => row.detail.includes("messages_folder_category_sort_idx"))).toBe(true);
-    expect(archivePlan.some((row) => row.detail.includes("messages_archive_sort_idx"))).toBe(true);
+    expect(folderPlan.some((row) => row.detail.includes("messages_folder_keyset_idx"))).toBe(true);
+    expect(categoryPlan.some((row) => row.detail.includes("messages_folder_category_keyset_idx"))).toBe(true);
+    expect(archivePlan.some((row) => row.detail.includes("messages_archive_keyset_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("messages_conversation_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("SCAN sent_reply"))).toBe(false);
-    expect(sqlite.pragma("user_version", { simple: true })).toBe(31);
+    expect(sqlite.pragma("user_version", { simple: true })).toBe(32);
     expect((sqlite.pragma("index_list(message_state)") as Array<{ name: string }>)
       .some((index) => index.name === "message_state_read_idx")).toBe(true);
 
@@ -1790,6 +1862,62 @@ describe("EmailDatabase", () => {
     database.close();
   });
 
+  it("runs a smart rule once across Inbox or every folder", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Scoped smart rules",
+      sourceType: "gmail",
+      fingerprint: "scoped-smart-rules",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const sent = database.ensureFolder(archive.id, "Sent", "Sent", null);
+    const inboxId = insertSenderMessage(database, archive.id, inbox.id, "inbox-invoice", "Billing", "billing@example.test");
+    const sentId = insertSenderMessage(database, archive.id, sent.id, "sent-invoice", "Billing", "billing@example.test");
+    const rule = database.createSmartMailRule({
+      archiveId: archive.id,
+      name: "Billing mail",
+      instruction: "Mark billing email read.",
+      conditions: {
+        match: "any",
+        senderContains: ["billing@example.test"],
+        subjectContains: [],
+        bodyContains: [],
+        hasAttachments: null
+      },
+      targetFolderId: null,
+      markRead: true,
+      star: false,
+      enabled: true,
+      applyExisting: false
+    });
+
+    const inboxRun = database.runSmartMailRule(rule.id, "inbox");
+    expect(inboxRun).toMatchObject({
+      scope: "inbox",
+      scannedMessages: 1,
+      matchedMessages: 1,
+      movedMessages: 0,
+      markedReadMessages: 1,
+      starredMessages: 0
+    });
+    expect(database.getMessage(inboxId)?.state.isRead).toBe(true);
+    expect(database.getMessage(sentId)?.state.isRead).toBe(false);
+
+    const allRun = database.runSmartMailRule(rule.id, "all");
+    expect(allRun).toMatchObject({
+      scope: "all",
+      scannedMessages: 2,
+      matchedMessages: 2,
+      movedMessages: 0,
+      markedReadMessages: 1,
+      starredMessages: 0
+    });
+    expect(database.getMessage(sentId)?.state.isRead).toBe(true);
+    database.close();
+  });
+
   it("stores per-day to-do items ordered by position and supports editing and removal", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
@@ -2128,6 +2256,14 @@ describe("EmailDatabase", () => {
 
     expect(database.applyAiInboxCategory(messageId, ["Medical"], 0.8)).toBeNull();
     expect(database.applyAiInboxCategory(messageId, ["Medical"], 0.9)).toBe("medical");
+    expect(database.getMessage(messageId)?.inboxCategory).toBe("medical");
+
+    database.updateInboxTabSettings(archive.id, {
+      ...settings,
+      tabs: settings.tabs.map((tab) => tab.id === "medical" ? { ...tab, keywordOnly: true } : tab)
+    });
+    expect(database.inboxTabAiPrompt(archive.id)).not.toContain("medical (Medical)");
+    expect(database.applyAiInboxCategory(messageId, ["Primary"], 0.95)).toBeNull();
     expect(database.getMessage(messageId)?.inboxCategory).toBe("medical");
     database.close();
   });

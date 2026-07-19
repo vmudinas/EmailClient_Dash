@@ -4,7 +4,10 @@ import type { AiMessageState, EmailDraft, MessageDetail } from "@email-client/sh
 import type { ApiClient } from "../lib/api.js";
 import { MessageReader } from "./MessageReader.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 describe("MessageReader AI analysis", () => {
   it("returns to the message list from the reader toolbar", () => {
@@ -282,6 +285,35 @@ describe("MessageReader reply, forward, and move", () => {
 });
 
 describe("MessageReader attachment preview", () => {
+  it("shows inline attachments and lets the user download them", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null }),
+      attachmentBlob: vi.fn().mockResolvedValue(new Blob(["inline-image"], { type: "image/png" }))
+    } as unknown as ApiClient;
+    renderReader(api, {
+      ...MESSAGE,
+      hasAttachments: true,
+      attachmentCount: 1,
+      attachments: [{
+        id: "inline-attachment",
+        messageId: MESSAGE.id,
+        filename: "signature-logo.png",
+        contentType: "application/octet-stream",
+        sizeBytes: 1_024,
+        contentId: "signature-logo",
+        disposition: "inline",
+        textStatus: "unsupported"
+      }]
+    });
+
+    expect(await screen.findByText("signature-logo.png")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "1 inline image" })).toBeTruthy();
+    expect(screen.getByText(/Inline/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Preview signature-logo.png" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Download signature-logo.png" }));
+    await waitFor(() => expect(api.attachmentBlob).toHaveBeenCalledWith("inline-attachment"));
+  });
+
   it("previews an image attachment and offers no preview for a non-previewable one", async () => {
     const imageBlob = new Blob(["fake-image-bytes"], { type: "image/png" });
     const api = {
@@ -335,16 +367,16 @@ describe("MessageReader remote images", () => {
     } as unknown as ApiClient;
     renderReader(api, {
       ...MESSAGE,
-      bodyHtml: '<img src="https://example.test/pixel.gif" alt="pixel" data-remote-src="https://example.test/pixel.gif">'
+      bodyHtml: '<img src="https://example.test/pixel.gif" alt="pixel">'
     });
 
-    await waitFor(() => expect(screen.getByText("Images are blocked to protect your privacy.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Remote images are blocked/)).toBeTruthy());
     const frame = document.querySelector("iframe.email-frame") as HTMLIFrameElement;
     await waitFor(() => expect(frame.getAttribute("srcdoc")).not.toMatch(/<img[^>]*\ssrc=/));
 
     fireEvent.click(screen.getByRole("button", { name: "Show images" }));
 
-    await waitFor(() => expect(screen.queryByText("Images are blocked to protect your privacy.")).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/Remote images are blocked/)).toBeNull());
     await waitFor(() => expect(document.querySelector("iframe.email-frame")?.getAttribute("srcdoc")).toContain("https://example.test/pixel.gif"));
   });
 
@@ -358,7 +390,27 @@ describe("MessageReader remote images", () => {
     });
 
     await waitFor(() => expect(document.querySelector("iframe.email-frame")).toBeTruthy());
-    expect(screen.queryByText("Images are blocked to protect your privacy.")).toBeNull();
+    expect(screen.queryByText(/Remote images are blocked/)).toBeNull();
+  });
+
+  it("can remember and revoke remote images for a sender", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
+    } as unknown as ApiClient;
+    renderReader(api, {
+      ...MESSAGE,
+      bodyHtml: '<img data-remote-src="https://example.test/logo.png" alt="logo">'
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Always for sender" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Always for sender" }));
+
+    await waitFor(() => expect(screen.getByText(/shown automatically for Customer/)).toBeTruthy());
+    expect(window.localStorage.getItem("archive-mail.trusted-remote-image-senders")).toContain("customer@example.test");
+
+    fireEvent.click(screen.getByRole("button", { name: "Block images" }));
+    await waitFor(() => expect(screen.getByText(/Remote images are blocked/)).toBeTruthy());
+    expect(window.localStorage.getItem("archive-mail.trusted-remote-image-senders")).toBe("[]");
   });
 });
 

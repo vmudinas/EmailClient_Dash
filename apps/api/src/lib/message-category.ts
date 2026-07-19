@@ -93,12 +93,23 @@ export function classifyInboxCategoryWithTabs(
     const domainMatch = tab.senderDomains.some((domain) => (
       senderDomain === domain || senderDomain.endsWith(`.${domain}`)
     ));
-    const keywordMatch = tab.keywords.some((keyword) => searchableText.includes(keyword.toLowerCase()));
+    const keywordMatch = tab.keywords.some((keyword) => keywordMatches(searchableText, keyword));
     if (domainMatch || keywordMatch) return tab.id;
   }
 
   const classified = preferredCategory ?? classifyInboxCategory(input);
-  return enabledTabs.some((tab) => tab.id === classified)
+  return enabledTabs.some((tab) => tab.id === classified && !tab.keywordOnly)
     ? classified
     : enabledTabs.find((tab) => tab.id === "primary")?.id ?? enabledTabs[0]?.id ?? "primary";
+}
+
+function keywordMatches(searchableText: string, keyword: string): boolean {
+  const normalized = keyword.trim().toLowerCase();
+  if (!normalized) return false;
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const startsWithWord = /[a-z0-9]/.test(normalized[0] ?? "");
+  const endsWithWord = /[a-z0-9]/.test(normalized.at(-1) ?? "");
+  const prefix = startsWithWord ? "(?:^|[^a-z0-9])" : "";
+  const suffix = endsWithWord ? "(?=$|[^a-z0-9])" : "";
+  return new RegExp(`${prefix}${escaped}${suffix}`, "i").test(searchableText);
 }

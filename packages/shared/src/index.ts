@@ -113,6 +113,7 @@ export interface InboxTabDefinition {
   color: string;
   keywords: string[];
   senderDomains: string[];
+  keywordOnly: boolean;
 }
 
 export interface InboxTabSettings {
@@ -130,13 +131,13 @@ export interface InboxTabReclassifyResult {
 }
 
 export const DEFAULT_INBOX_TABS: ReadonlyArray<InboxTabDefinition> = [
-  { id: "primary", label: "Primary", description: "Personal and important conversations.", enabled: true, position: 0, color: "#1a73e8", keywords: [], senderDomains: [] },
-  { id: "promotions", label: "Promotions", description: "Deals, offers, newsletters, and marketing.", enabled: true, position: 1, color: "#188038", keywords: [], senderDomains: [] },
-  { id: "social", label: "Social", description: "Social network activity and community updates.", enabled: true, position: 2, color: "#9334e6", keywords: [], senderDomains: [] },
-  { id: "updates", label: "Updates", description: "Automated confirmations, alerts, and account updates.", enabled: true, position: 3, color: "#b06000", keywords: [], senderDomains: [] },
-  { id: "bills", label: "Bills", description: "Invoices, statements, balances, and payment notices.", enabled: true, position: 4, color: "#137333", keywords: [], senderDomains: [] },
-  { id: "medical", label: "Medical", description: "Health care, pharmacy, and appointment messages.", enabled: true, position: 5, color: "#c5221f", keywords: [], senderDomains: [] },
-  { id: "mail_tracking", label: "Mail/Tracking", description: "Shipping, delivery, and package tracking.", enabled: true, position: 6, color: "#1967d2", keywords: [], senderDomains: [] }
+  { id: "primary", label: "Primary", description: "Personal and important conversations.", enabled: true, position: 0, color: "#1a73e8", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "promotions", label: "Promotions", description: "Deals, offers, newsletters, and marketing.", enabled: true, position: 1, color: "#188038", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "social", label: "Social", description: "Social network activity and community updates.", enabled: true, position: 2, color: "#9334e6", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "updates", label: "Updates", description: "Automated confirmations, alerts, and account updates.", enabled: true, position: 3, color: "#b06000", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "bills", label: "Bills", description: "Invoices, statements, balances, and payment notices.", enabled: true, position: 4, color: "#137333", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "medical", label: "Medical", description: "Health care, pharmacy, and appointment messages.", enabled: true, position: 5, color: "#c5221f", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "mail_tracking", label: "Mail/Tracking", description: "Shipping, delivery, and package tracking.", enabled: true, position: 6, color: "#1967d2", keywords: [], senderDomains: [], keywordOnly: false }
 ];
 
 export interface MessageSummary {
@@ -604,6 +605,46 @@ export interface SmartMailRuleSuggestion {
   confidence: number;
 }
 
+export const SMART_MAIL_RULE_RUN_SCOPES = ["inbox", "all"] as const;
+export type SmartMailRuleRunScope = typeof SMART_MAIL_RULE_RUN_SCOPES[number];
+
+export interface SmartMailRuleRunResult {
+  rule: SmartMailRule;
+  scope: SmartMailRuleRunScope;
+  scannedMessages: number;
+  matchedMessages: number;
+  movedMessages: number;
+  markedReadMessages: number;
+  starredMessages: number;
+}
+
+export const MAILBOX_TASK_STATUSES = ["queued", "running", "completed", "failed", "cancelled"] as const;
+export type MailboxTaskStatus = typeof MAILBOX_TASK_STATUSES[number];
+
+export interface SmartMailRuleRunTask {
+  id: string;
+  type: "smart_rule_run";
+  status: MailboxTaskStatus;
+  archiveId: string;
+  scope: SmartMailRuleRunScope;
+  ruleIds: string[];
+  totalRules: number;
+  completedRules: number;
+  currentRuleId: string | null;
+  currentRuleName: string | null;
+  totalMessages: number;
+  processedMessages: number;
+  matchedMessages: number;
+  movedMessages: number;
+  markedReadMessages: number;
+  starredMessages: number;
+  cancelRequested: boolean;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
 const smartMailRuleConditionsSchema = z.object({
   match: z.enum(["all", "any"]),
   senderContains: z.array(z.string().trim().min(1).max(320)).max(20),
@@ -657,6 +698,20 @@ export const smartMailRulePatchSchema = z.object({
 );
 
 export type SmartMailRulePatch = z.infer<typeof smartMailRulePatchSchema>;
+
+export const smartMailRuleRunSchema = z.object({
+  scope: z.enum(SMART_MAIL_RULE_RUN_SCOPES).default("inbox")
+}).strict();
+
+export type SmartMailRuleRun = z.infer<typeof smartMailRuleRunSchema>;
+
+export const smartMailRuleBatchRunSchema = z.object({
+  archiveId: z.string().uuid(),
+  ruleIds: z.array(z.string().uuid()).min(1).max(100),
+  scope: z.enum(SMART_MAIL_RULE_RUN_SCOPES).default("inbox")
+}).strict();
+
+export type SmartMailRuleBatchRun = z.infer<typeof smartMailRuleBatchRunSchema>;
 
 export interface DraftIdentitySettings {
   defaultFromAddress: string;
@@ -1091,6 +1146,7 @@ export interface AdminSettings {
   ai: {
     activeProvider: AiProviderId;
     enabled: boolean;
+    concurrency: number;
     dailyRequestLimit: number;
     monthlyRequestLimit: number;
     settingsPath: string;
@@ -1156,6 +1212,19 @@ export const localMessageStatePatchSchema = z.object({
 
 export type LocalMessageStatePatch = z.infer<typeof localMessageStatePatchSchema>;
 
+export const bulkMessageReadSchema = z.object({
+  messageIds: z.array(z.string().uuid()).min(1).max(500)
+    .transform((messageIds) => [...new Set(messageIds)])
+}).strict();
+
+export type BulkMessageReadRequest = z.infer<typeof bulkMessageReadSchema>;
+
+export interface BulkMessageReadResult {
+  updated: number;
+  alreadyRead: number;
+  failed: number;
+}
+
 export const messageMoveSchema = z.object({
   folderId: z.string().uuid()
 }).strict();
@@ -1178,6 +1247,7 @@ export interface BulkMoveResult {
   moved: number;
   alreadyThere: number;
   failed: number;
+  senderRules: number;
 }
 
 export const bulkFolderMoveSchema = z.object({
@@ -1359,7 +1429,8 @@ const inboxTabDefinitionSchema = z.object({
   senderDomains: z.array(z.string().trim().toLowerCase().min(1).max(253)
     .regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/, "Use a domain such as example.com"))
     .max(40)
-    .transform((values) => [...new Set(values)])
+    .transform((values) => [...new Set(values)]),
+  keywordOnly: z.boolean().default(false)
 }).strict();
 
 export const inboxTabSettingsUpdateSchema = z.object({
@@ -1479,6 +1550,7 @@ export const aiSettingsPatchSchema = z.object({
   clearApiKey: z.boolean().default(false),
   enabled: z.boolean().optional(),
   model: z.string().trim().min(1).max(120).optional(),
+  concurrency: z.number().int().min(1).max(8).optional(),
   dailyRequestLimit: z.number().int().min(1).max(100_000).optional(),
   monthlyRequestLimit: z.number().int().min(1).max(1_000_000).optional()
 }).strict().refine(

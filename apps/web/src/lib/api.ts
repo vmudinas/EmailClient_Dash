@@ -20,6 +20,7 @@ import type {
   AuthSessionInfo,
   AppleCalendarAccountCreate,
   BulkMoveDestination,
+  BulkMessageReadResult,
   BulkMoveResult,
   BulkFolderMoveResult,
   CalendarAccount,
@@ -77,6 +78,8 @@ import type {
   SmartMailRule,
   SmartMailRuleCreate,
   SmartMailRulePatch,
+  SmartMailRuleRunTask,
+  SmartMailRuleRunScope,
   SmartMailRuleSuggestion,
   SmartMailRuleSuggestionRequest,
   StockQuote,
@@ -245,6 +248,12 @@ export class ApiClient {
     });
   }
 
+  reconcileGmailMailbox(connectionId: string): Promise<GmailConnection> {
+    return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/reconcile`, {
+      method: "POST"
+    });
+  }
+
   reorganizeGmailFolders(connectionId: string): Promise<GmailConnection> {
     return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/reorganize`, {
       method: "POST"
@@ -381,15 +390,7 @@ export class ApiClient {
     });
   }
 
-  listMessages(options: {
-    archiveId?: string;
-    folderId?: string;
-    isRead?: boolean;
-    starred?: boolean;
-    inboxCategory?: InboxCategory;
-    cursor?: string;
-    limit?: number;
-  }): Promise<CursorPage<MessageSummary>> {
+  listMessages(options: Omit<SearchFilters, "sort">): Promise<CursorPage<MessageSummary>> {
     return this.request(`/api/messages?${queryString(options)}`);
   }
 
@@ -544,6 +545,32 @@ export class ApiClient {
     });
   }
 
+  runSmartMailRule(id: string, scope: SmartMailRuleRunScope): Promise<SmartMailRuleRunTask> {
+    return this.request(`/api/admin/smart-mail-rules/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ scope })
+    });
+  }
+
+  startSmartMailRuleRun(
+    archiveId: string,
+    ruleIds: string[],
+    scope: SmartMailRuleRunScope
+  ): Promise<SmartMailRuleRunTask> {
+    return this.request("/api/admin/smart-mail-rules/run", {
+      method: "POST",
+      body: JSON.stringify({ archiveId, ruleIds, scope })
+    });
+  }
+
+  mailboxTask(id: string): Promise<SmartMailRuleRunTask> {
+    return this.request(`/api/admin/mailbox-tasks/${encodeURIComponent(id)}`);
+  }
+
+  cancelMailboxTask(id: string): Promise<SmartMailRuleRunTask> {
+    return this.request(`/api/admin/mailbox-tasks/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+  }
+
   deleteSmartMailRule(id: string): Promise<void> {
     return this.request(`/api/admin/smart-mail-rules/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
@@ -555,6 +582,13 @@ export class ApiClient {
     return this.request(`/api/messages/${encodeURIComponent(messageId)}/state`, {
       method: "PATCH",
       body: JSON.stringify(patch)
+    });
+  }
+
+  bulkMarkMessagesRead(messageIds: string[]): Promise<BulkMessageReadResult> {
+    return this.request("/api/messages/bulk-read", {
+      method: "POST",
+      body: JSON.stringify({ messageIds })
     });
   }
 

@@ -15,6 +15,81 @@ afterEach(async () => {
 });
 
 describe("AiService", () => {
+  it("processes queued jobs up to the configured concurrency", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const firstMessageId = insertMessage(database);
+    const first = database.getMessage(firstMessageId)!;
+    const secondMessageId = database.insertMessage({
+      archiveId: first.archiveId,
+      folderId: first.folderId,
+      sourceKey: "message-2",
+      internetMessageId: "<ai-service-2@example.test>",
+      subject: "Second contract review",
+      sender: { name: "Customer", address: "customer@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-14T13:00:00.000Z",
+      receivedAt: "2026-07-14T13:00:00.000Z",
+      bodyText: "second private contract body",
+      bodyHtml: null,
+      headers: { "message-id": "<ai-service-2@example.test>" },
+      sizeBytes: 80,
+      attachments: []
+    });
+    const settings = new AiSettingsManager(dataDir, {});
+    settings.update({
+      apiKey: "sk-proj-test-secret-value",
+      clearApiKey: false,
+      enabled: true,
+      model: "test-analysis-model",
+      concurrency: 2
+    });
+    let active = 0;
+    let maximumActive = 0;
+    const releases: Array<() => void> = [];
+    const analyze = vi.fn(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return {
+        analysis: {
+          summary: "Concurrent analysis completed.",
+          categories: ["Work"],
+          priority: "normal" as const,
+          actionRequired: false,
+          actionSummary: "",
+          spamProbability: 0,
+          phishingProbability: 0,
+          draftRecommended: false,
+          confidence: 0.9,
+          signals: []
+        },
+        usage: { inputTokens: 10, outputTokens: 5 }
+      };
+    });
+    const service = new AiService(database, settings, () => ({ analyze, testConnection: vi.fn() }));
+
+    const firstJob = service.startAnalysis(firstMessageId).job;
+    const secondJob = service.startAnalysis(secondMessageId).job;
+    const deadline = Date.now() + 1_000;
+    while (releases.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(releases).toHaveLength(2);
+    expect(maximumActive).toBe(2);
+    releases.splice(0).forEach((release) => release());
+    await Promise.all([
+      waitForJob(database, firstJob.id, "completed"),
+      waitForJob(database, secondJob.id, "completed")
+    ]);
+
+    await service.close();
+    database.close();
+  });
+
   it("retries transient failures, persists structured output, and reuses a current result", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);

@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { useEffect, useRef, useState, type CSSProperties, type TouchEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type CSSProperties, type TouchEvent } from "react";
 import {
   Archive,
   ArrowLeft,
@@ -70,6 +70,7 @@ interface MessageListProps {
   onBulkDelete(): void;
   onBulkArchive(): void;
   onBulkSpam(): void;
+  onBulkMarkRead(): void;
   onBulkAiFile(): void;
   aiFilingBusy: boolean;
   actionBusy: boolean;
@@ -114,6 +115,7 @@ export function MessageList({
   onBulkDelete,
   onBulkArchive,
   onBulkSpam,
+  onBulkMarkRead,
   onBulkAiFile,
   aiFilingBusy,
   actionBusy,
@@ -123,8 +125,39 @@ export function MessageList({
 }: MessageListProps) {
   const [draggingMessageIds, setDraggingMessageIds] = useState<Set<string>>(new Set());
   const selectAllRef = useRef<HTMLInputElement>(null);
+  const rowCallbacksRef = useRef({
+    onSelect,
+    onToggleSelect,
+    onArchive,
+    onSpam,
+    onToggleRead,
+    onDragStart,
+    onDragEnd
+  });
+  rowCallbacksRef.current = {
+    onSelect,
+    onToggleSelect,
+    onArchive,
+    onSpam,
+    onToggleRead,
+    onDragStart,
+    onDragEnd
+  };
   const selectedCount = selectedIds.size;
   const allVisibleSelected = items.length > 0 && items.every((item) => selectedIds.has(item.message.id));
+  const selectRow = useCallback((target: MessageSummary) => rowCallbacksRef.current.onSelect(target), []);
+  const toggleRow = useCallback((messageId: string) => rowCallbacksRef.current.onToggleSelect(messageId), []);
+  const archiveRow = useCallback((target: MessageSummary) => rowCallbacksRef.current.onArchive(target), []);
+  const spamRow = useCallback((target: MessageSummary) => rowCallbacksRef.current.onSpam(target), []);
+  const toggleReadRow = useCallback((target: MessageSummary) => rowCallbacksRef.current.onToggleRead(target), []);
+  const startRowDrag = useCallback((target: MessageSummary, messageIds: string[]) => {
+    setDraggingMessageIds(new Set(messageIds));
+    rowCallbacksRef.current.onDragStart(target, messageIds);
+  }, []);
+  const endRowDrag = useCallback(() => {
+    setDraggingMessageIds(new Set());
+    rowCallbacksRef.current.onDragEnd();
+  }, []);
 
   useEffect(() => {
     if (selectAllRef.current) {
@@ -158,6 +191,9 @@ export function MessageList({
             <div className="message-bulk-actions">
               <button className="icon-button ai-bulk-file" onClick={onBulkAiFile} disabled={bulkBusy} title="Ask AI where to file selected messages" aria-label="AI file selected messages">
                 {aiFilingBusy ? <LoaderCircle className="spin" size={17} /> : <BrainCircuit size={17} />}
+              </button>
+              <button className="icon-button bulk-read-button" onClick={onBulkMarkRead} disabled={bulkBusy} title="Mark selected messages as read" aria-label="Mark selected as read">
+                <MailOpen size={17} /><span>Read</span>
               </button>
               <button className="icon-button" onClick={onBulkArchive} disabled={bulkBusy} title="Move to Archive" aria-label="Move selected to Archive">
                 <Archive size={17} />
@@ -201,6 +237,30 @@ export function MessageList({
         )}
       </header>
 
+      {selectedCount > 0 && allVisibleSelected && (
+        <div className="message-selection-scope" role="status" aria-live="polite">
+          {hasMore && selectedCount === items.length ? (
+            <>
+              <span>All {items.length.toLocaleString()} loaded messages are selected.</span>
+              <button
+                type="button"
+                onClick={onSelectEntireView}
+                disabled={selectionBusy || bulkBusy}
+              >
+                {selectionBusy && <LoaderCircle className="spin" size={14} />}
+                Select all available in {title} (up to 500)
+              </button>
+            </>
+          ) : (
+            <span>
+              {hasMore
+                ? `${selectedCount.toLocaleString()} messages selected for bulk action.`
+                : `All ${selectedCount.toLocaleString()} messages in ${title} are selected.`}
+            </span>
+          )}
+        </div>
+      )}
+
       {inboxCategories && (
         <nav
           className="inbox-category-tabs"
@@ -240,19 +300,13 @@ export function MessageList({
             dragging={draggingMessageIds.has(message.id)}
             dragMessageIds={selectedIds.has(message.id) ? [...selectedIds] : [message.id]}
             actionBusy={actionBusy}
-            onSelect={onSelect}
-            onToggleSelect={onToggleSelect}
-            onArchive={onArchive}
-            onSpam={onSpam}
-            onToggleRead={onToggleRead}
-            onDragStart={(target, messageIds) => {
-              setDraggingMessageIds(new Set(messageIds));
-              onDragStart(target, messageIds);
-            }}
-            onDragEnd={() => {
-              setDraggingMessageIds(new Set());
-              onDragEnd();
-            }}
+            onSelect={selectRow}
+            onToggleSelect={toggleRow}
+            onArchive={archiveRow}
+            onSpam={spamRow}
+            onToggleRead={toggleReadRow}
+            onDragStart={startRowDrag}
+            onDragEnd={endRowDrag}
           />
         ))}
 
@@ -373,23 +427,7 @@ function SelectionMenu({
   );
 }
 
-function MessageRow({
-  message,
-  hit,
-  readOnly,
-  selected,
-  checked,
-  dragging,
-  dragMessageIds,
-  actionBusy,
-  onSelect,
-  onToggleSelect,
-  onArchive,
-  onSpam,
-  onToggleRead,
-  onDragStart,
-  onDragEnd
-}: {
+interface MessageRowProps {
   message: MessageSummary;
   hit?: SearchHit;
   readOnly: boolean;
@@ -405,7 +443,25 @@ function MessageRow({
   onToggleRead(message: MessageSummary): void;
   onDragStart(message: MessageSummary, messageIds: string[]): void;
   onDragEnd(): void;
-}) {
+}
+
+const MessageRow = memo(function MessageRow({
+  message,
+  hit,
+  readOnly,
+  selected,
+  checked,
+  dragging,
+  dragMessageIds,
+  actionBusy,
+  onSelect,
+  onToggleSelect,
+  onArchive,
+  onSpam,
+  onToggleRead,
+  onDragStart,
+  onDragEnd
+}: MessageRowProps) {
   const [swipeOffset, setSwipeOffset] = useState(0);
   const [swiping, setSwiping] = useState(false);
   const touchStartRef = useRef<{ x: number; y: number; offset: number } | null>(null);
@@ -566,4 +622,14 @@ function MessageRow({
       </div>
     </div>
   );
-}
+}, (previous, next) => (
+  previous.message === next.message
+  && previous.hit === next.hit
+  && previous.readOnly === next.readOnly
+  && previous.selected === next.selected
+  && previous.checked === next.checked
+  && previous.dragging === next.dragging
+  && previous.actionBusy === next.actionBusy
+  && previous.dragMessageIds.length === next.dragMessageIds.length
+  && previous.dragMessageIds.every((id, index) => id === next.dragMessageIds[index])
+));

@@ -1,0 +1,52 @@
+name: archive-mail
+
+services:
+  archive-mail:
+    image: archive-mail:${ARCHIVE_MAIL_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: archive-mail
+    init: true
+    restart: unless-stopped
+    user: "${ARCHIVE_MAIL_UID:-1000}:${ARCHIVE_MAIL_GID:-1000}"
+    ports:
+      - "${ARCHIVE_MAIL_BIND_ADDRESS:-127.0.0.1}:${ARCHIVE_MAIL_PORT:-3001}:3001"
+    environment:
+      NODE_ENV: production
+      TZ: "${TZ:-UTC}"
+      EMAIL_CLIENT_HOST: 0.0.0.0
+      EMAIL_CLIENT_PORT: 3001
+      EMAIL_CLIENT_DATA_DIR: /data
+      EMAIL_CLIENT_DEV_AUTH_BYPASS: 0
+      EMAIL_CLIENT_SESSION_MINUTES: "${EMAIL_CLIENT_SESSION_MINUTES:-720}"
+      EMAIL_CLIENT_PUBLIC_URL: "${EMAIL_CLIENT_PUBLIC_URL:-}"
+      EMAIL_CLIENT_TRUST_PROXY: "${EMAIL_CLIENT_TRUST_PROXY:-false}"
+      GMAIL_CLIENT_ID: "${GMAIL_CLIENT_ID:-}"
+      GMAIL_CLIENT_SECRET: "${GMAIL_CLIENT_SECRET:-}"
+      GMAIL_SYNC_INTERVAL_MINUTES: "${GMAIL_SYNC_INTERVAL_MINUTES:-}"
+      GMAIL_SYNC_MAILBOX_ACTIONS: "${GMAIL_SYNC_MAILBOX_ACTIONS:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+    volumes:
+      - type: bind
+        source: "${ARCHIVE_MAIL_DATA_DIR:?ARCHIVE_MAIL_DATA_DIR must be set in deploy/.env}"
+        target: /data
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 2m
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/api/health').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

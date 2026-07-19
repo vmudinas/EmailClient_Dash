@@ -72,6 +72,22 @@ describe("GmailSettingsManager", () => {
     });
   });
 
+  it("loads Google Web OAuth JSON for an HTTPS server callback", async () => {
+    const dataDir = await temporaryDirectory();
+    await writeFile(join(dataDir, "gmail-oauth-settings.json"), JSON.stringify({
+      web: {
+        client_id: "server.apps.googleusercontent.com",
+        client_secret: "server-secret"
+      }
+    }));
+
+    const manager = new GmailSettingsManager(dataDir, { clientId: null, clientSecret: null, syncIntervalMinutes: null });
+    expect(manager.credentials()).toEqual({
+      clientId: "server.apps.googleusercontent.com",
+      clientSecret: "server-secret"
+    });
+  });
+
   it("reports malformed saved settings and protects environment-managed credentials", async () => {
     const dataDir = await temporaryDirectory();
     await writeFile(join(dataDir, "gmail-oauth-settings.json"), "not-json");

@@ -31,6 +31,7 @@ export interface AiRuntimeSettings {
   apiKey: string | null;
   model: string;
   enabled: boolean;
+  concurrency: number;
   dailyRequestLimit: number;
   monthlyRequestLimit: number;
 }
@@ -44,6 +45,7 @@ interface PersistedAiSettings {
   // and back doesn't lose a custom model id in favor of the other provider's default.
   models: ByProvider<string>;
   enabled: boolean;
+  concurrency: number;
   dailyRequestLimit: number;
   monthlyRequestLimit: number;
 }
@@ -53,6 +55,7 @@ const DEFAULT_SETTINGS: PersistedAiSettings = {
   apiKeys: { openai: null, deepseek: null },
   models: { openai: AI_PROVIDER_INFO.openai.defaultModel, deepseek: AI_PROVIDER_INFO.deepseek.defaultModel },
   enabled: false,
+  concurrency: 2,
   dailyRequestLimit: 100,
   monthlyRequestLimit: 2_000
 };
@@ -82,6 +85,7 @@ export class AiSettingsManager {
       apiKey: this.persisted.apiKeys[provider] || this.environmentApiKeys[provider] || null,
       model: this.persisted.models[provider],
       enabled: this.persisted.enabled,
+      concurrency: this.persisted.concurrency,
       dailyRequestLimit: this.persisted.dailyRequestLimit,
       monthlyRequestLimit: this.persisted.monthlyRequestLimit
     };
@@ -108,6 +112,7 @@ export class AiSettingsManager {
     return {
       activeProvider: this.persisted.provider,
       enabled: this.persisted.enabled,
+      concurrency: this.persisted.concurrency,
       dailyRequestLimit: this.persisted.dailyRequestLimit,
       monthlyRequestLimit: this.persisted.monthlyRequestLimit,
       settingsPath: this.settingsPath,
@@ -138,6 +143,7 @@ export class AiSettingsManager {
       apiKeys,
       models,
       enabled: input.enabled ?? this.persisted.enabled,
+      concurrency: input.concurrency ?? this.persisted.concurrency,
       dailyRequestLimit: input.dailyRequestLimit ?? this.persisted.dailyRequestLimit,
       monthlyRequestLimit: input.monthlyRequestLimit ?? this.persisted.monthlyRequestLimit
     });
@@ -214,6 +220,7 @@ function parseSettings(value: unknown): PersistedAiSettings {
     apiKeys,
     models,
     enabled: typeof root.enabled === "boolean" ? root.enabled : DEFAULT_SETTINGS.enabled,
+    concurrency: boundedInteger(root.concurrency, DEFAULT_SETTINGS.concurrency, 1, 8),
     dailyRequestLimit: positiveInteger(root.dailyRequestLimit, DEFAULT_SETTINGS.dailyRequestLimit),
     monthlyRequestLimit: positiveInteger(root.monthlyRequestLimit, DEFAULT_SETTINGS.monthlyRequestLimit)
   };
@@ -225,6 +232,12 @@ function optionalString(value: unknown): string | null {
 
 function positiveInteger(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function boundedInteger(value: unknown, fallback: number, minimum: number, maximum: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum
+    ? value
+    : fallback;
 }
 
 function errorMessage(error: unknown): string {

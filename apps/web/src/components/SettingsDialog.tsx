@@ -68,6 +68,8 @@ import type {
   ResumeAsset,
   SenderFilingStatus,
   SmartMailRule,
+  SmartMailRuleRunTask,
+  SmartMailRuleRunScope,
   SmartMailRuleSuggestion,
   InboxTabDefinition,
   InboxTabSettings,
@@ -81,6 +83,7 @@ type SettingsSection = "tools" | "database" | "gmail" | "calendars" | "drafts" |
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
+const MAILBOX_TASK_POLL_MS = 400;
 
 interface SettingsDialogProps {
   open: boolean;
@@ -508,7 +511,7 @@ function InboxTabsPanel({
   return (
     <>
       <h3>Inbox tabs</h3>
-      <p>Configure the visible tab names, order, colors, and deterministic matching rules for each archive. Primary remains the safe fallback.</p>
+      <p>Configure the visible tab names, order, colors, and deterministic matching rules for each archive. Keywords match complete terms instead of text inside unrelated words. Primary remains the safe fallback.</p>
       <label className="settings-standalone-field">Archive
         <select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={busy || loading}>
           {archives.length === 0 && <option value="">No archives available</option>}
@@ -524,6 +527,7 @@ function InboxTabsPanel({
                   <input className="inbox-tab-color" type="color" value={tab.color} onChange={(event) => updateTab(tab.id, { color: event.target.value })} aria-label={`${tab.label} color`} disabled={busy} />
                   <label>Tab name<input value={tab.label} onChange={(event) => updateTab(tab.id, { label: event.target.value })} disabled={busy} /></label>
                   <label className="settings-checkbox"><input type="checkbox" checked={tab.enabled} onChange={(event) => updateTab(tab.id, { enabled: event.target.checked })} disabled={busy || tab.id === "primary"} /><span>Visible</span></label>
+                  <label className="settings-checkbox"><input type="checkbox" checked={tab.keywordOnly} onChange={(event) => updateTab(tab.id, { keywordOnly: event.target.checked })} disabled={busy || tab.id === "primary"} /><span><strong>Strict rules</strong><small>Only keywords or sender domains can place mail in this tab.</small></span></label>
                   <div className="inbox-tab-order-actions">
                     <button type="button" className="icon-button" onClick={() => moveTab(tab.id, -1)} disabled={busy || index === 0} title="Move tab up" aria-label={`Move ${tab.label} up`}><ChevronUp size={15} /></button>
                     <button type="button" className="icon-button" onClick={() => moveTab(tab.id, 1)} disabled={busy || index === settings.tabs.length - 1} title="Move tab down" aria-label={`Move ${tab.label} down`}><ChevronDown size={15} /></button>
@@ -693,9 +697,13 @@ function SmartMailRulesPanel({
   const [rules, setRules] = useState<SmartMailRule[]>([]);
   const [instruction, setInstruction] = useState("");
   const [suggestion, setSuggestion] = useState<SmartMailRuleSuggestion | null>(null);
+  const [editingRule, setEditingRule] = useState<SmartMailRule | null>(null);
   const [applyExisting, setApplyExisting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [suggesting, setSuggesting] = useState(false);
+  const [ruleRunTask, setRuleRunTask] = useState<SmartMailRuleRunTask | null>(null);
+  const [taskStarting, setTaskStarting] = useState(false);
+  const taskRunning = taskStarting || Boolean(ruleRunTask && ["queued", "running"].includes(ruleRunTask.status));
 
   useEffect(() => {
     let active = true;
@@ -725,6 +733,8 @@ function SmartMailRulesPanel({
       setFolders(nextFolders);
       setRules(nextRules);
       setSuggestion(null);
+      setEditingRule(null);
+      setRuleRunTask(null);
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -749,10 +759,12 @@ function SmartMailRulesPanel({
 
   const save = async () => {
     if (!suggestion) return;
+    const applyAfterSaving = applyExisting;
+    let savedRule: SmartMailRule | null = null;
     onBusy(true);
     onError("");
     try {
-      const saved = await api.createSmartMailRule({
+      savedRule = await api.createSmartMailRule({
         archiveId,
         name: suggestion.name,
         instruction: suggestion.instruction,
@@ -761,18 +773,19 @@ function SmartMailRulesPanel({
         markRead: suggestion.markRead,
         star: suggestion.star,
         enabled: true,
-        applyExisting
+        applyExisting: false
       });
-      await loadArchive(archiveId);
+      setRules((current) => [savedRule!, ...current]);
       setInstruction("");
       setSuggestion(null);
       setApplyExisting(false);
-      onNotice(`Smart rule "${saved.name}" saved${applyExisting ? " and applied to current Inbox mail" : ""}.`);
+      if (!applyAfterSaving) onNotice(`Smart rule "${savedRule.name}" saved.`);
     } catch (error) {
       onError(errorText(error));
     } finally {
       onBusy(false);
     }
+    if (savedRule && applyAfterSaving) await executeRuleRun([savedRule.id], "inbox");
   };
 
   const toggle = async (rule: SmartMailRule) => {
@@ -787,12 +800,119 @@ function SmartMailRulesPanel({
     }
   };
 
+  const beginEdit = (rule: SmartMailRule) => {
+    setEditingRule({
+      ...rule,
+      conditions: {
+        ...rule.conditions,
+        senderContains: [...rule.conditions.senderContains],
+        subjectContains: [...rule.conditions.subjectContains],
+        bodyContains: [...rule.conditions.bodyContains]
+      }
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editingRule) return;
+    onBusy(true);
+    onError("");
+    try {
+      const updated = await api.updateSmartMailRule(editingRule.id, {
+        name: editingRule.name,
+        instruction: editingRule.instruction,
+        conditions: editingRule.conditions,
+        targetFolderId: editingRule.targetFolderId,
+        markRead: editingRule.markRead,
+        star: editingRule.star,
+        enabled: editingRule.enabled
+      });
+      setRules((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
+      setEditingRule(null);
+      onNotice(`Smart rule "${updated.name}" updated.`);
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      onBusy(false);
+    }
+  };
+
+  const waitForRuleTask = async (initialTask: SmartMailRuleRunTask): Promise<SmartMailRuleRunTask> => {
+    let task = initialTask;
+    let pollFailures = 0;
+    while (["queued", "running"].includes(task.status)) {
+      try {
+        task = await api.mailboxTask(task.id);
+        pollFailures = 0;
+        setRuleRunTask(task);
+      } catch (error) {
+        pollFailures += 1;
+        if (pollFailures >= 3) throw error;
+      }
+      if (["queued", "running"].includes(task.status)) {
+        await new Promise((resolve) => window.setTimeout(resolve, MAILBOX_TASK_POLL_MS));
+      }
+    }
+    return task;
+  };
+
+  async function executeRuleRun(ruleIds: string[], scope: SmartMailRuleRunScope) {
+    setTaskStarting(true);
+    onError("");
+    try {
+      const queuedTask = await api.startSmartMailRuleRun(archiveId, ruleIds, scope);
+      setRuleRunTask(queuedTask);
+      setTaskStarting(false);
+      const task = await waitForRuleTask(queuedTask);
+      const nextRules = await api.listSmartMailRules(archiveId);
+      setRules(nextRules);
+      setEditingRule((current) => current ? nextRules.find((rule) => rule.id === current.id) ?? null : null);
+      if (task.status === "completed") {
+        onNotice(`Ran ${task.totalRules} smart rule${task.totalRules === 1 ? "" : "s"}; ${task.matchedMessages.toLocaleString()} matched and ${task.movedMessages.toLocaleString()} moved.`);
+      } else if (task.status === "cancelled") {
+        onNotice(`Smart rule run cancelled after ${task.processedMessages.toLocaleString()} messages; ${task.movedMessages.toLocaleString()} moved.`);
+      } else {
+        onError(task.error ?? "Smart rule run failed");
+      }
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setTaskStarting(false);
+    }
+  }
+
+  const runNow = async (rule: SmartMailRule, scope: SmartMailRuleRunScope) => {
+    const target = scope === "all"
+      ? "all folders, including Sent, Spam, Trash, and existing destination folders"
+      : "the current Inbox";
+    if (!rule.enabled || taskRunning || !window.confirm(`Run the smart rule "${rule.name}" against ${target}?`)) return;
+    await executeRuleRun([rule.id], scope);
+  };
+
+  const runAllRules = async (scope: SmartMailRuleRunScope) => {
+    const enabledRules = rules.filter((rule) => rule.enabled);
+    const target = scope === "all"
+      ? "all folders, including Sent, Spam, Trash, and existing destination folders"
+      : "the current Inbox";
+    if (enabledRules.length === 0 || taskRunning || !window.confirm(`Run all ${enabledRules.length} enabled smart rules against ${target}?`)) return;
+    await executeRuleRun(enabledRules.map((rule) => rule.id), scope);
+  };
+
+  const cancelRuleRun = async () => {
+    if (!ruleRunTask || !["queued", "running"].includes(ruleRunTask.status) || ruleRunTask.cancelRequested) return;
+    try {
+      setRuleRunTask(await api.cancelMailboxTask(ruleRunTask.id));
+    } catch (error) {
+      onError(errorText(error));
+    }
+  };
+
   const remove = async (rule: SmartMailRule) => {
     if (!window.confirm(`Delete the smart rule "${rule.name}"? Previously filed mail stays where it is.`)) return;
     onBusy(true);
     try {
       await api.deleteSmartMailRule(rule.id);
       setRules((current) => current.filter((entry) => entry.id !== rule.id));
+      setEditingRule((current) => current?.id === rule.id ? null : current);
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -810,13 +930,34 @@ function SmartMailRulesPanel({
     } : current);
   };
 
+  const updateEditingConditions = (field: "senderContains" | "subjectContains" | "bodyContains", value: string) => {
+    setEditingRule((current) => current ? {
+      ...current,
+      conditions: {
+        ...current.conditions,
+        [field]: value.split(",").map((entry) => entry.trim()).filter(Boolean)
+      }
+    } : current);
+  };
+
+  const progressTitle = ruleRunTask?.status === "queued"
+    ? `Queued ${ruleRunTask.totalRules} rule${ruleRunTask.totalRules === 1 ? "" : "s"}`
+    : ruleRunTask?.status === "running"
+      ? `Running ${Math.min(ruleRunTask.totalRules, ruleRunTask.completedRules + (ruleRunTask.currentRuleName ? 1 : 0))} of ${ruleRunTask.totalRules}`
+      : ruleRunTask?.status === "completed"
+        ? `Completed ${ruleRunTask.totalRules} rule${ruleRunTask.totalRules === 1 ? "" : "s"}`
+        : ruleRunTask?.status === "cancelled"
+          ? `Cancelled after ${ruleRunTask.completedRules} of ${ruleRunTask.totalRules}`
+          : ruleRunTask ? `Stopped after ${ruleRunTask.completedRules} of ${ruleRunTask.totalRules}` : "";
+  const progressUsesMessages = Boolean(ruleRunTask && ruleRunTask.totalMessages > 0);
+
   return (
     <>
       <h3>Natural-language mail rules</h3>
       <p>Describe how new Inbox mail should be organized. AI converts the request into literal, inspectable conditions; you review every condition and action before activation.</p>
       <div className="settings-warning neutral"><ShieldCheck size={17} /><span>Rules run locally only when mail enters Inbox. They never execute email instructions, use regular expressions, or change Gmail server-side filters.</span></div>
       <div className="settings-form">
-        <label>Archive<select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={busy || loading}>{archives.map((archive) => <option key={archive.id} value={archive.id}>{archive.name}</option>)}</select></label>
+        <label>Archive<select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={busy || loading || taskRunning}>{archives.map((archive) => <option key={archive.id} value={archive.id}>{archive.name}</option>)}</select></label>
         <label>Describe the rule<textarea rows={4} value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="Move invoices from Stripe to Finance, mark them read, and star messages with an attachment." disabled={busy || suggesting} /></label>
         <div className="settings-button-row"><button type="button" className="primary-button compact" disabled={busy || suggesting || !archiveId || !instruction.trim()} onClick={() => void suggest()}>{suggesting ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />} Preview rule with AI</button></div>
       </div>
@@ -836,20 +977,86 @@ function SmartMailRulesPanel({
               <label>Move to<select value={suggestion.targetFolderId ?? ""} onChange={(event) => { const target = folders.find((folder) => folder.id === event.target.value) ?? null; setSuggestion({ ...suggestion, targetFolderId: target?.id ?? null, targetFolderPath: target?.path ?? null }); }}><option value="">Do not move</option>{folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}</select></label>
             </div>
             <div className="smart-rule-actions"><label className="settings-checkbox"><input type="checkbox" checked={suggestion.markRead} onChange={(event) => setSuggestion({ ...suggestion, markRead: event.target.checked })} /><span>Mark read</span></label><label className="settings-checkbox"><input type="checkbox" checked={suggestion.star} onChange={(event) => setSuggestion({ ...suggestion, star: event.target.checked })} /><span>Star</span></label><label className="settings-checkbox"><input type="checkbox" checked={applyExisting} onChange={(event) => setApplyExisting(event.target.checked)} /><span>Apply to current Inbox mail</span></label></div>
-            <div className="settings-button-row"><button type="button" className="primary-button compact" disabled={busy} onClick={() => void save()}><Save size={16} /> Activate reviewed rule</button><button type="button" className="secondary-button" disabled={busy} onClick={() => setSuggestion(null)}>Discard</button></div>
+            <div className="settings-button-row"><button type="button" className="primary-button compact" disabled={busy || taskRunning} onClick={() => void save()}><Save size={16} /> Activate reviewed rule</button><button type="button" className="secondary-button" disabled={busy || taskRunning} onClick={() => setSuggestion(null)}>Discard</button></div>
           </div>
         </section>
       )}
       {loading ? <div className="settings-loading"><LoaderCircle className="spin" size={18} /> Loading smart rules</div> : rules.length === 0 ? <p className="settings-empty">No natural-language rules are active for this archive.</p> : (
-        <ul className="smart-rule-list">
+        <>
+          <section className="smart-rule-bulk-toolbar" aria-label="Run all smart rules">
+            <div><strong>Run enabled rules</strong><span>{rules.filter((rule) => rule.enabled).length} of {rules.length} rules enabled</span></div>
+            <div className="smart-rule-bulk-actions">
+              <button type="button" className="secondary-button compact" disabled={busy || taskRunning || rules.every((rule) => !rule.enabled)} onClick={() => void runAllRules("inbox")}><RefreshCw size={15} /> Run all rules in Inbox</button>
+              <button type="button" className="secondary-button compact smart-rule-run-all" disabled={busy || taskRunning || rules.every((rule) => !rule.enabled)} onClick={() => void runAllRules("all")}><RefreshCw size={15} /> Run all rules in all folders</button>
+            </div>
+            {ruleRunTask && (
+              <div className={`smart-rule-bulk-progress ${ruleRunTask.status}`} role="status" aria-label="Smart rule run progress">
+                <div className="smart-rule-progress-heading">
+                  <strong>{progressTitle}</strong>
+                  <span>{ruleRunTask.currentRuleName ? `Processing ${ruleRunTask.currentRuleName}` : ruleRunTask.scope === "all" ? "All folders" : "Inbox"}</span>
+                </div>
+                <progress
+                  value={progressUsesMessages ? ruleRunTask.processedMessages : ruleRunTask.completedRules}
+                  max={progressUsesMessages ? ruleRunTask.totalMessages : Math.max(ruleRunTask.totalRules, 1)}
+                />
+                <div className="smart-rule-progress-stats">
+                  <span><strong>{ruleRunTask.processedMessages.toLocaleString()}</strong> of {ruleRunTask.totalMessages.toLocaleString()} checked</span>
+                  <span><strong>{ruleRunTask.matchedMessages.toLocaleString()}</strong> matched</span>
+                  <span><strong>{ruleRunTask.movedMessages.toLocaleString()}</strong> moved</span>
+                  <span><strong>{ruleRunTask.markedReadMessages.toLocaleString()}</strong> read</span>
+                  <span><strong>{ruleRunTask.starredMessages.toLocaleString()}</strong> starred</span>
+                </div>
+                {taskRunning && <button type="button" className="secondary-button compact smart-rule-task-cancel" disabled={ruleRunTask.cancelRequested} onClick={() => void cancelRuleRun()}>{ruleRunTask.cancelRequested ? <LoaderCircle className="spin" size={15} /> : <X size={15} />} {ruleRunTask.cancelRequested ? "Cancelling" : "Cancel run"}</button>}
+              </div>
+            )}
+          </section>
+          <ul className="smart-rule-list">
           {rules.map((rule) => (
-            <li key={rule.id}>
-              <div><strong>{rule.name}</strong><span>{rule.instruction}</span><small>{rule.conditions.match === "all" ? "All" : "Any"} conditions · {rule.targetFolderPath ? `Move to ${rule.targetFolderPath}` : "No move"}{rule.markRead ? " · Mark read" : ""}{rule.star ? " · Star" : ""} · {rule.matchedMessages.toLocaleString()} matched</small></div>
-              <label className="settings-checkbox"><input type="checkbox" checked={rule.enabled} disabled={busy} onChange={() => void toggle(rule)} /><span>Enabled</span></label>
-              <button type="button" className="icon-button" disabled={busy} onClick={() => void remove(rule)} title="Delete rule" aria-label={`Delete ${rule.name}`}><Trash2 size={15} /></button>
+            <li key={rule.id} className={editingRule?.id === rule.id ? "is-editing" : undefined}>
+              <div className="smart-rule-summary">
+                <strong>{rule.name}</strong>
+                <p>{rule.instruction}</p>
+                <div className="smart-rule-meta">
+                  <span>{rule.conditions.match === "all" ? "All" : "Any"} conditions</span>
+                  <span>{rule.targetFolderPath ? `Move to ${rule.targetFolderPath}` : "No move"}</span>
+                  {rule.markRead && <span>Mark read</span>}
+                  {rule.star && <span>Star</span>}
+                  <span>{rule.matchedMessages.toLocaleString()} matched</span>
+                </div>
+              </div>
+              <label className="settings-checkbox smart-rule-enabled-toggle"><input type="checkbox" checked={rule.enabled} disabled={busy || taskRunning} onChange={() => void toggle(rule)} /><span>{rule.enabled ? "Enabled" : "Paused"}</span></label>
+              <div className="smart-rule-row-actions">
+                <button type="button" className="secondary-button compact" disabled={busy || taskRunning} onClick={() => beginEdit(rule)}><Pencil size={15} /> Edit</button>
+                <button type="button" className="secondary-button compact" disabled={busy || taskRunning || !rule.enabled} onClick={() => void runNow(rule, "inbox")} title={rule.enabled ? "Apply to current Inbox mail" : "Enable this rule before running it"}><RefreshCw size={15} /> Run Inbox</button>
+                <button type="button" className="secondary-button compact smart-rule-run-all" disabled={busy || taskRunning || !rule.enabled} onClick={() => void runNow(rule, "all")} title={rule.enabled ? "Apply once across every folder" : "Enable this rule before running it"}><RefreshCw size={15} /> Run all folders</button>
+                <button type="button" className="icon-button smart-rule-delete" disabled={busy || taskRunning} onClick={() => void remove(rule)} title="Delete rule" aria-label={`Delete ${rule.name}`}><Trash2 size={15} /></button>
+              </div>
+              {editingRule?.id === rule.id && (
+                <form className="smart-rule-edit" onSubmit={(event) => { event.preventDefault(); void saveEdit(); }}>
+                  <div className="settings-form-grid">
+                    <label>Rule name<input value={editingRule.name} onChange={(event) => setEditingRule({ ...editingRule, name: event.target.value })} /></label>
+                    <label>Match<select value={editingRule.conditions.match} onChange={(event) => setEditingRule({ ...editingRule, conditions: { ...editingRule.conditions, match: event.target.value as "all" | "any" } })}><option value="all">All populated conditions</option><option value="any">Any populated condition</option></select></label>
+                  </div>
+                  <label>Instruction<textarea rows={3} value={editingRule.instruction} onChange={(event) => setEditingRule({ ...editingRule, instruction: event.target.value })} /></label>
+                  <label>Sender contains<input value={editingRule.conditions.senderContains.join(", ")} onChange={(event) => updateEditingConditions("senderContains", event.target.value)} /></label>
+                  <label>Subject contains<input value={editingRule.conditions.subjectContains.join(", ")} onChange={(event) => updateEditingConditions("subjectContains", event.target.value)} /></label>
+                  <label>Body contains<input value={editingRule.conditions.bodyContains.join(", ")} onChange={(event) => updateEditingConditions("bodyContains", event.target.value)} /></label>
+                  <div className="settings-form-grid">
+                    <label>Attachment condition<select value={editingRule.conditions.hasAttachments === null ? "any" : editingRule.conditions.hasAttachments ? "yes" : "no"} onChange={(event) => setEditingRule({ ...editingRule, conditions: { ...editingRule.conditions, hasAttachments: event.target.value === "any" ? null : event.target.value === "yes" } })}><option value="any">Any</option><option value="yes">Has attachments</option><option value="no">No attachments</option></select></label>
+                    <label>Move to<select value={editingRule.targetFolderId ?? ""} onChange={(event) => { const target = folders.find((folder) => folder.id === event.target.value) ?? null; setEditingRule({ ...editingRule, targetFolderId: target?.id ?? null, targetFolderPath: target?.path ?? null }); }}><option value="">Do not move</option>{folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}</select></label>
+                  </div>
+                  <div className="smart-rule-actions">
+                    <label className="settings-checkbox"><input type="checkbox" checked={editingRule.markRead} onChange={(event) => setEditingRule({ ...editingRule, markRead: event.target.checked })} /><span>Mark read</span></label>
+                    <label className="settings-checkbox"><input type="checkbox" checked={editingRule.star} onChange={(event) => setEditingRule({ ...editingRule, star: event.target.checked })} /><span>Star</span></label>
+                    <label className="settings-checkbox"><input type="checkbox" checked={editingRule.enabled} onChange={(event) => setEditingRule({ ...editingRule, enabled: event.target.checked })} /><span>Enabled</span></label>
+                  </div>
+                  <div className="settings-button-row"><button type="submit" className="primary-button compact" disabled={busy || taskRunning}><Save size={15} /> Save changes</button><button type="button" className="secondary-button" disabled={busy || taskRunning} onClick={() => setEditingRule(null)}>Cancel</button></div>
+                </form>
+              )}
             </li>
           ))}
-        </ul>
+          </ul>
+        </>
       )}
     </>
   );
@@ -1137,6 +1344,7 @@ function GmailPanel({
   const [connections, setConnections] = useState<GmailConnection[]>([]);
   const [connectionsLoading, setConnectionsLoading] = useState(true);
   const [pullingId, setPullingId] = useState<string | null>(null);
+  const [reconcilingId, setReconcilingId] = useState<string | null>(null);
   const environmentManaged = settings.gmail.source === "environment";
   const intervalEnvManaged = settings.gmail.syncIntervalEnvManaged;
 
@@ -1167,13 +1375,19 @@ function GmailPanel({
     return () => window.clearInterval(interval);
   }, [connections, refreshConnections]);
 
+  useEffect(() => {
+    if (!reconcilingId) return;
+    const connection = connections.find((item) => item.id === reconcilingId);
+    if (connection && connection.status !== "syncing") setReconcilingId(null);
+  }, [connections, reconcilingId]);
+
   const loadJson = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     onError("");
     try {
-      const credentials = parseDesktopOAuthJson(await file.text());
+      const credentials = parseGoogleOAuthJson(await file.text());
       setClientId(credentials.clientId);
       setClientSecret(credentials.clientSecret);
       setClearClientSecret(false);
@@ -1259,10 +1473,30 @@ function GmailPanel({
     }
   };
 
+  const reconcileMailbox = async (connection: GmailConnection) => {
+    if (!window.confirm(
+      `Reconcile every downloaded message for ${connection.email} with Gmail? `
+      + "Local Archive, folder, Spam, and Trash positions will be applied to Gmail. "
+      + "Messages in local Trash move to Gmail Trash; nothing is permanently deleted."
+    )) return;
+    setPullingId(connection.id);
+    onError("");
+    try {
+      const updated = await api.reconcileGmailMailbox(connection.id);
+      setReconcilingId(connection.id);
+      setConnections((current) => current.map((item) => item.id === updated.id ? updated : item));
+      onNotice(`Gmail mailbox reconciliation started for ${connection.email}.`);
+    } catch (reconcileError) {
+      onError(errorText(reconcileError));
+    } finally {
+      setPullingId(null);
+    }
+  };
+
   return (
     <>
       <h3>Gmail</h3>
-      <p>One Google Desktop OAuth configuration can authorize multiple Gmail accounts. Each account keeps a separate token and sync status; Gmail passwords are never stored.</p>
+      <p>One Google OAuth configuration can authorize multiple Gmail accounts. Use a Desktop client for local launches or a Web client with an HTTPS callback for a server deployment.</p>
       {settings.gmail.configurationError && (
         <div className="settings-warning"><AlertTriangle size={17} /><span>{settings.gmail.configurationError}</span></div>
       )}
@@ -1277,18 +1511,18 @@ function GmailPanel({
       )}
       <form className="settings-form gmail-settings-form" onSubmit={(event) => void save(event)}>
         <label className="gmail-json-picker">
-          Desktop OAuth JSON
+          Google OAuth JSON
           <span className="gmail-file-control"><FileJson size={17} /><span>{loadedFilename || "Choose downloaded JSON"}</span></span>
           <input type="file" accept="application/json,.json" onChange={(event) => void loadJson(event)} disabled={busy || environmentManaged} />
         </label>
-        <small>The file must contain Google’s <code>installed.client_id</code> value. Its client secret is stored locally and is never returned by the API.</small>
+        <small>The file must contain Google’s <code>installed.client_id</code> or <code>web.client_id</code> value. Its client secret is stored locally and is never returned by the API.</small>
         <label>
           Client ID
-          <input value={clientId} onChange={(event) => setClientId(event.target.value)} spellCheck={false} autoComplete="off" disabled={busy || environmentManaged} placeholder="Desktop OAuth client ID" />
+          <input value={clientId} onChange={(event) => setClientId(event.target.value)} spellCheck={false} autoComplete="off" disabled={busy || environmentManaged} placeholder="Google OAuth client ID" />
         </label>
         <label>
           Client secret {settings.gmail.clientSecretConfigured ? "(saved)" : "(optional)"}
-          <input type="password" value={clientSecret} onChange={(event) => { setClientSecret(event.target.value); setClearClientSecret(false); }} spellCheck={false} autoComplete="new-password" disabled={busy || environmentManaged || clearClientSecret} placeholder={settings.gmail.clientSecretConfigured ? "Leave blank to keep the saved secret" : "Desktop OAuth client secret"} />
+          <input type="password" value={clientSecret} onChange={(event) => { setClientSecret(event.target.value); setClearClientSecret(false); }} spellCheck={false} autoComplete="new-password" disabled={busy || environmentManaged || clearClientSecret} placeholder={settings.gmail.clientSecretConfigured ? "Leave blank to keep the saved secret" : "Google OAuth client secret"} />
         </label>
         {settings.gmail.clientSecretConfigured && !environmentManaged && (
           <label className="settings-checkbox">
@@ -1387,7 +1621,9 @@ function GmailPanel({
                         <progress max={100} value={percent} />
                         <small>
                           {connection.processedItems.toLocaleString()} of {(connection.totalItems ?? 0).toLocaleString()} checked
-                          {` · ${connection.importedItems.toLocaleString()} new · ${percent}%`}
+                          {reconcilingId === connection.id
+                            ? ` · mailbox state · ${percent}%`
+                            : ` · ${connection.importedItems.toLocaleString()} new · ${percent}%`}
                         </small>
                       </>
                     ) : (
@@ -1408,9 +1644,24 @@ function GmailPanel({
                         {acting ? <LoaderCircle className="spin" size={16} /> : <X size={16} />} Stop
                       </button>
                     ) : (
-                      <button type="button" className="primary-button compact" disabled={acting} onClick={() => void pullAll(connection)}>
-                        {acting ? <LoaderCircle className="spin" size={16} /> : <CloudDownload size={16} />} Pull all email
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          className="secondary-button compact"
+                          disabled={acting || !settings.gmail.syncMailboxActions || !connection.canModifyMailbox}
+                          onClick={() => void reconcileMailbox(connection)}
+                          title={!settings.gmail.syncMailboxActions
+                            ? "Enable and save Mirror mailbox actions to Gmail first"
+                            : !connection.canModifyMailbox
+                              ? "Reauthorize this Gmail account for mailbox actions"
+                              : "Apply local mailbox positions to Gmail"}
+                        >
+                          {acting && reconcilingId === connection.id ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} Reconcile Gmail
+                        </button>
+                        <button type="button" className="primary-button compact" disabled={acting} onClick={() => void pullAll(connection)}>
+                          {acting && reconcilingId !== connection.id ? <LoaderCircle className="spin" size={16} /> : <CloudDownload size={16} />} Pull all email
+                        </button>
+                      </>
                     )}
                   </div>
                 </article>
@@ -2038,6 +2289,7 @@ function AiPanel({
   onNotice(value: string): void;
 }) {
   const [enabled, setEnabled] = useState(settings.ai.enabled);
+  const [concurrency, setConcurrency] = useState(settings.ai.concurrency);
   const [dailyLimit, setDailyLimit] = useState(settings.ai.dailyRequestLimit);
   const [monthlyLimit, setMonthlyLimit] = useState(settings.ai.monthlyRequestLimit);
   const activeProvider = settings.ai.activeProvider;
@@ -2046,9 +2298,10 @@ function AiPanel({
 
   useEffect(() => {
     setEnabled(settings.ai.enabled);
+    setConcurrency(settings.ai.concurrency);
     setDailyLimit(settings.ai.dailyRequestLimit);
     setMonthlyLimit(settings.ai.monthlyRequestLimit);
-  }, [settings.ai.enabled, settings.ai.dailyRequestLimit, settings.ai.monthlyRequestLimit]);
+  }, [settings.ai.enabled, settings.ai.concurrency, settings.ai.dailyRequestLimit, settings.ai.monthlyRequestLimit]);
 
   const saveGlobal = async (event: FormEvent) => {
     event.preventDefault();
@@ -2058,6 +2311,7 @@ function AiPanel({
       const updated = await api.updateAiSettings({
         clearApiKey: false,
         enabled,
+        concurrency,
         dailyRequestLimit: dailyLimit,
         monthlyRequestLimit: monthlyLimit
       });
@@ -2098,6 +2352,11 @@ function AiPanel({
         </label>
         <div className="settings-form-grid ai-limit-grid">
           <label>
+            Parallel AI jobs
+            <input type="number" min={1} max={8} value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))} disabled={busy} />
+            <small>Use 1–2 for conservative provider limits; increase only if your account permits it.</small>
+          </label>
+          <label>
             Daily request limit
             <input type="number" min={1} max={100000} value={dailyLimit} onChange={(event) => setDailyLimit(Number(event.target.value))} disabled={busy} />
           </label>
@@ -2107,7 +2366,7 @@ function AiPanel({
           </label>
         </div>
         <div className="settings-button-row">
-          <button className="primary-button compact" disabled={busy || dailyLimit < 1 || monthlyLimit < 1}>
+          <button className="primary-button compact" disabled={busy || concurrency < 1 || concurrency > 8 || dailyLimit < 1 || monthlyLimit < 1}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save
           </button>
         </div>
@@ -3300,7 +3559,7 @@ function AuditPanel({ api, onError }: { api: ApiClient; onError(value: string): 
   );
 }
 
-function parseDesktopOAuthJson(text: string): { clientId: string; clientSecret: string } {
+function parseGoogleOAuthJson(text: string): { clientId: string; clientSecret: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -3311,16 +3570,17 @@ function parseDesktopOAuthJson(text: string): { clientId: string; clientSecret: 
     throw new Error("The selected OAuth file is not a JSON object");
   }
   const root = parsed as Record<string, unknown>;
-  if (root.web && !root.installed) {
-    throw new Error("This is a Web OAuth client. Create and download a Google OAuth client with application type Desktop app.");
+  const credentials = root.installed && typeof root.installed === "object"
+    ? root.installed as Record<string, unknown>
+    : root.web && typeof root.web === "object"
+      ? root.web as Record<string, unknown>
+      : null;
+  if (!credentials) {
+    throw new Error("The selected file does not contain Google OAuth credentials under installed or web");
   }
-  if (!root.installed || typeof root.installed !== "object") {
-    throw new Error("The selected file does not contain Desktop OAuth credentials under installed");
-  }
-  const installed = root.installed as Record<string, unknown>;
-  const clientId = typeof installed.client_id === "string" ? installed.client_id.trim() : "";
-  const clientSecret = typeof installed.client_secret === "string" ? installed.client_secret.trim() : "";
-  if (!clientId) throw new Error("The selected Desktop OAuth file does not contain client_id");
+  const clientId = typeof credentials.client_id === "string" ? credentials.client_id.trim() : "";
+  const clientSecret = typeof credentials.client_secret === "string" ? credentials.client_secret.trim() : "";
+  if (!clientId) throw new Error("The selected Google OAuth file does not contain client_id");
   return { clientId, clientSecret };
 }
 

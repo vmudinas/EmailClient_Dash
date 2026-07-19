@@ -79,6 +79,67 @@ describe("ApiClient request headers", () => {
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
   });
 
+  it("marks selected messages read with one bulk request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ updated: 2, alreadyRead: 0, failed: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.bulkMarkMessagesRead(["message-1", "message-2"]);
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://127.0.0.1:3001/api/messages/bulk-read");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ messageIds: ["message-1", "message-2"] });
+  });
+
+  it("starts Gmail mailbox reconciliation without a request body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "gmail-1", status: "syncing" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.reconcileGmailMailbox("gmail-1");
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://127.0.0.1:3001/api/gmail/connections/gmail-1/reconcile");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+  });
+
+  it("starts and monitors a background smart-rule task", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({
+      id: "task-1",
+      status: "queued",
+      scope: "all",
+      ruleIds: ["rule-1", "rule-2"]
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.startSmartMailRuleRun("archive-1", ["rule-1", "rule-2"], "all");
+    await client.mailboxTask("task-1");
+    await client.cancelMailboxTask("task-1");
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://127.0.0.1:3001/api/admin/smart-mail-rules/run");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ archiveId: "archive-1", ruleIds: ["rule-1", "rule-2"], scope: "all" });
+    expect(fetchMock.mock.calls[1]![0]).toBe("http://127.0.0.1:3001/api/admin/mailbox-tasks/task-1");
+    expect(fetchMock.mock.calls[2]![0]).toBe("http://127.0.0.1:3001/api/admin/mailbox-tasks/task-1/cancel");
+    expect((fetchMock.mock.calls[2]![1] as RequestInit).method).toBe("POST");
+  });
+
   it("clears an import with a bodyless DELETE", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -173,11 +234,11 @@ describe("ApiClient request headers", () => {
       platform: "browser"
     });
 
-    await client.listMessages({ folderId: "folder-one", isRead: false });
+    await client.listMessages({ folderId: "folder-one", isRead: false, hasAttachment: true });
     await client.search("invoice", { folderId: "folder-two", isRead: false });
 
     expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://127.0.0.1:3001/api/messages?folderId=folder-one&isRead=false"
+      "http://127.0.0.1:3001/api/messages?folderId=folder-one&isRead=false&hasAttachment=true"
     );
     expect(fetchMock.mock.calls[1]![0]).toBe(
       "http://127.0.0.1:3001/api/search?q=invoice&folderId=folder-two&isRead=false"

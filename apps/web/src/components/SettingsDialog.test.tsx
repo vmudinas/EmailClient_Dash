@@ -9,6 +9,8 @@ import type {
   Folder,
   GmailConnection,
   SenderFilingStatus,
+  SmartMailRule,
+  SmartMailRuleRunTask,
   UserSummary
 } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
@@ -82,6 +84,191 @@ describe("SettingsDialog", () => {
       senderName: "Vitas Mudinas"
     }));
     expect(await screen.findByText("Draft identity saved.")).toBeTruthy();
+  });
+
+  it("edits and reruns an existing smart rule against current Inbox mail", async () => {
+    const archive: Archive = {
+      id: "archive-smart-rules",
+      name: "Gmail",
+      sourceType: "gmail",
+      status: "ready",
+      sizeBytes: 100,
+      messageCount: 10,
+      unreadCount: 2,
+      folderCount: 2,
+      attachmentCount: 0,
+      errorCount: 0,
+      importedAt: "2026-07-13T00:00:00.000Z",
+      createdAt: "2026-07-13T00:00:00.000Z"
+    };
+    const folders: Folder[] = [
+      { id: "folder-inbox", archiveId: archive.id, parentId: null, name: "Inbox", path: "Inbox", messageCount: 10, unreadCount: 2 },
+      { id: "folder-finance", archiveId: archive.id, parentId: null, name: "Finance", path: "Finance", messageCount: 0, unreadCount: 0 }
+    ];
+    const rule: SmartMailRule = {
+      id: "rule-invoices",
+      archiveId: archive.id,
+      archiveName: archive.name,
+      name: "Invoice filing",
+      instruction: "Move invoice email to Finance.",
+      conditions: {
+        match: "any",
+        senderContains: [],
+        subjectContains: ["invoice"],
+        bodyContains: [],
+        hasAttachments: null
+      },
+      targetFolderId: folders[1]!.id,
+      targetFolderPath: folders[1]!.path,
+      markRead: false,
+      star: false,
+      enabled: true,
+      matchedMessages: 4,
+      createdAt: "2026-07-17T00:00:00.000Z",
+      updatedAt: "2026-07-17T00:00:00.000Z"
+    };
+    const updatedRule: SmartMailRule = {
+      ...rule,
+      name: "Receipt filing",
+      instruction: "Move receipt email to Finance.",
+      conditions: { ...rule.conditions, subjectContains: ["receipt"] },
+      updatedAt: "2026-07-18T00:00:00.000Z"
+    };
+    const rerunRule = { ...updatedRule, matchedMessages: 7 };
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      listArchives: vi.fn().mockResolvedValue([archive]),
+      listFolders: vi.fn().mockResolvedValue(folders),
+      listSmartMailRules: vi.fn().mockResolvedValueOnce([rule]).mockResolvedValue([rerunRule]),
+      updateSmartMailRule: vi.fn().mockResolvedValue(updatedRule),
+      startSmartMailRuleRun: vi.fn().mockResolvedValue(smartRuleTask({
+        archiveId: archive.id,
+        ruleIds: [rule.id],
+        totalRules: 1,
+        totalMessages: 12,
+        scope: "all"
+      })),
+      mailboxTask: vi.fn().mockResolvedValue(smartRuleTask({
+        archiveId: archive.id,
+        ruleIds: [rule.id],
+        status: "completed",
+        totalRules: 1,
+        completedRules: 1,
+        totalMessages: 12,
+        processedMessages: 12,
+        matchedMessages: 3,
+        movedMessages: 2,
+        markedReadMessages: 1,
+        scope: "all"
+      }))
+    } as unknown as ApiClient;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Smart rules" }));
+    await waitFor(() => expect(screen.getByText("Invoice filing")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Rule name" }), { target: { value: "Receipt filing" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Instruction" }), { target: { value: "Move receipt email to Finance." } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Subject contains" }), { target: { value: "receipt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateSmartMailRule).toHaveBeenNthCalledWith(1, rule.id, {
+      name: "Receipt filing",
+      instruction: "Move receipt email to Finance.",
+      conditions: { ...rule.conditions, subjectContains: ["receipt"] },
+      targetFolderId: folders[1]!.id,
+      markRead: false,
+      star: false,
+      enabled: true
+    }));
+    expect(await screen.findByText('Smart rule "Receipt filing" updated.')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Run all folders" }));
+    await waitFor(() => expect(api.startSmartMailRuleRun).toHaveBeenCalledWith(archive.id, [rule.id], "all"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("including Sent, Spam, Trash"));
+    expect(await screen.findByText(/3 matched and 2 moved/)).toBeTruthy();
+    confirm.mockRestore();
+  });
+
+  it("shows cumulative progress while running all enabled smart rules", async () => {
+    const archive: Archive = {
+      id: "archive-bulk-rules",
+      name: "Gmail",
+      sourceType: "gmail",
+      status: "ready",
+      sizeBytes: 100,
+      messageCount: 10,
+      unreadCount: 2,
+      folderCount: 1,
+      attachmentCount: 0,
+      errorCount: 0,
+      importedAt: "2026-07-13T00:00:00.000Z",
+      createdAt: "2026-07-13T00:00:00.000Z"
+    };
+    const inbox: Folder = { id: "folder-bulk-inbox", archiveId: archive.id, parentId: null, name: "Inbox", path: "Inbox", messageCount: 10, unreadCount: 2 };
+    const baseRule: SmartMailRule = {
+      id: "rule-one",
+      archiveId: archive.id,
+      archiveName: archive.name,
+      name: "First rule",
+      instruction: "Move matching messages.",
+      conditions: { match: "any", senderContains: ["first.test"], subjectContains: [], bodyContains: [], hasAttachments: null },
+      targetFolderId: inbox.id,
+      targetFolderPath: inbox.path,
+      markRead: false,
+      star: false,
+      enabled: true,
+      matchedMessages: 0,
+      createdAt: "2026-07-17T00:00:00.000Z",
+      updatedAt: "2026-07-17T00:00:00.000Z"
+    };
+    const secondRule: SmartMailRule = { ...baseRule, id: "rule-two", name: "Second rule", conditions: { ...baseRule.conditions, senderContains: ["second.test"] } };
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      listArchives: vi.fn().mockResolvedValue([archive]),
+      listFolders: vi.fn().mockResolvedValue([inbox]),
+      listSmartMailRules: vi.fn().mockResolvedValue([baseRule, secondRule]),
+      startSmartMailRuleRun: vi.fn().mockResolvedValue(smartRuleTask({
+        archiveId: archive.id,
+        ruleIds: [baseRule.id, secondRule.id],
+        totalRules: 2,
+        totalMessages: 18,
+        scope: "all"
+      })),
+      mailboxTask: vi.fn().mockResolvedValue(smartRuleTask({
+        archiveId: archive.id,
+        ruleIds: [baseRule.id, secondRule.id],
+        status: "completed",
+        totalRules: 2,
+        completedRules: 2,
+        totalMessages: 18,
+        processedMessages: 18,
+        matchedMessages: 3,
+        movedMessages: 3,
+        scope: "all"
+      }))
+    } as unknown as ApiClient;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Smart rules" }));
+    await waitFor(() => expect(screen.getByText("First rule")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Run all rules in all folders" }));
+
+    await waitFor(() => expect(api.startSmartMailRuleRun).toHaveBeenCalledWith(archive.id, [baseRule.id, secondRule.id], "all"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Run all 2 enabled smart rules"));
+    const progress = screen.getByLabelText("Smart rule run progress");
+    expect(progress.textContent).toContain("Completed 2 rules");
+    expect(progress.textContent).toContain("18 of 18 checked");
+    expect(progress.textContent).toContain("3 matched");
+    expect(progress.textContent).toContain("3 moved");
+    confirm.mockRestore();
   });
 
   it("adds and removes symbols from the footer stock ticker", async () => {
@@ -419,6 +606,33 @@ describe("SettingsDialog", () => {
     expect(screen.queryByDisplayValue("desktop-secret")).toBeNull();
   });
 
+  it("loads Google Web OAuth credentials for a server deployment", async () => {
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listGmailConnections: vi.fn().mockResolvedValue([]),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      listAiSchedules: vi.fn().mockResolvedValue([]),
+      listResumes: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    const file = new File(["{}"], "web-oauth.json", { type: "application/json" });
+    Object.defineProperty(file, "text", {
+      value: vi.fn().mockResolvedValue(JSON.stringify({
+        web: {
+          client_id: "web.apps.googleusercontent.com",
+          client_secret: "web-secret"
+        }
+      }))
+    });
+    fireEvent.change(document.querySelector<HTMLInputElement>('input[type="file"]')!, { target: { files: [file] } });
+
+    await waitFor(() => expect(screen.getByDisplayValue("web.apps.googleusercontent.com")).toBeTruthy());
+    expect(screen.getByDisplayValue("web-secret")).toBeTruthy();
+  });
+
   it("enables Gmail mailbox action sync and offers reauthorization for older connections", async () => {
     const currentSettings: AdminSettings = {
       ...SETTINGS,
@@ -533,6 +747,54 @@ describe("SettingsDialog", () => {
 
     await waitFor(() => expect(api.syncGmail).toHaveBeenCalledWith("gmail-1", { full: true }));
     expect(screen.getByText(/25 of 100 checked · 10 new · 25%/)).toBeTruthy();
+    confirm.mockRestore();
+  });
+
+  it("starts a safe Gmail mailbox reconciliation from the admin panel", async () => {
+    const settings: AdminSettings = {
+      ...SETTINGS,
+      gmail: { ...SETTINGS.gmail, syncMailboxActions: true }
+    };
+    const connection: GmailConnection = {
+      id: "gmail-reconcile",
+      email: "owner@example.test",
+      archiveId: "archive-1",
+      archiveName: "Gmail",
+      folderId: "folder-1",
+      folderPath: "Gmail",
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canModifyMailbox: true,
+      canManageCalendar: true,
+      status: "connected",
+      processedItems: 0,
+      totalItems: null,
+      importedItems: 0,
+      lastSyncedAt: null,
+      lastError: null,
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:00:00.000Z"
+    };
+    const syncing = { ...connection, status: "syncing" as const };
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(settings),
+      listGmailConnections: vi.fn().mockResolvedValue([connection]),
+      reconcileGmailMailbox: vi.fn().mockResolvedValue(syncing),
+      listUsers: vi.fn().mockResolvedValue(USERS)
+    } as unknown as ApiClient;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    const reconcile = await screen.findByRole("button", { name: "Reconcile Gmail" });
+    fireEvent.click(reconcile);
+
+    await waitFor(() => expect(api.reconcileGmailMailbox).toHaveBeenCalledWith("gmail-reconcile"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("nothing is permanently deleted"));
+    expect(screen.getByText(/mailbox state · 0%/)).toBeTruthy();
     confirm.mockRestore();
   });
 
@@ -1041,6 +1303,33 @@ describe("SettingsDialog", () => {
   });
 });
 
+function smartRuleTask(overrides: Partial<SmartMailRuleRunTask> = {}): SmartMailRuleRunTask {
+  return {
+    id: "smart-rule-task-1",
+    type: "smart_rule_run",
+    status: "queued",
+    archiveId: "archive-1",
+    scope: "inbox",
+    ruleIds: [],
+    totalRules: 0,
+    completedRules: 0,
+    currentRuleId: null,
+    currentRuleName: null,
+    totalMessages: 0,
+    processedMessages: 0,
+    matchedMessages: 0,
+    movedMessages: 0,
+    markedReadMessages: 0,
+    starredMessages: 0,
+    cancelRequested: false,
+    error: null,
+    createdAt: "2026-07-18T12:00:00.000Z",
+    startedAt: null,
+    completedAt: null,
+    ...overrides
+  };
+}
+
 const USERS: UserSummary[] = [{
   id: "user-1",
   username: "admin",
@@ -1110,6 +1399,7 @@ const SETTINGS: AdminSettings = {
   ai: {
     activeProvider: "openai",
     enabled: false,
+    concurrency: 2,
     dailyRequestLimit: 100,
     monthlyRequestLimit: 2000,
     settingsPath: "/tmp/ai-settings.json",

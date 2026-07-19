@@ -32,7 +32,7 @@ import {
 } from "./draft-settings.js";
 
 export class AiService {
-  private processing: Promise<void> | null = null;
+  private readonly workers = new Set<Promise<void>>();
   private closing = false;
   private readonly controllers = new Map<string, AbortController>();
 
@@ -52,7 +52,7 @@ export class AiService {
   async close(): Promise<void> {
     this.closing = true;
     for (const controller of this.controllers.values()) controller.abort();
-    await this.processing;
+    await Promise.allSettled(this.workers);
   }
 
   startAnalysis(
@@ -550,11 +550,16 @@ export class AiService {
   }
 
   private kick(): void {
-    if (this.closing || this.processing) return;
-    this.processing = this.processQueue().finally(() => {
-      this.processing = null;
-      if (!this.closing && this.database.hasQueuedAiJobs()) this.kick();
-    });
+    if (this.closing) return;
+    const concurrency = this.settings.current().concurrency;
+    while (this.workers.size < concurrency && this.database.hasQueuedAiJobs()) {
+      const worker = this.processQueue();
+      this.workers.add(worker);
+      void worker.finally(() => {
+        this.workers.delete(worker);
+        if (!this.closing && this.database.hasQueuedAiJobs()) this.kick();
+      }).catch(() => undefined);
+    }
   }
 
   private async processQueue(): Promise<void> {

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { networkInterfaces } from "node:os";
-import { basename, resolve } from "node:path";
+import { basename, extname, resolve } from "node:path";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, {
@@ -19,6 +19,7 @@ import {
   appleCalendarAccountCreateSchema,
   archiveMergeSchema,
   authLoginSchema,
+  bulkMessageReadSchema,
   bulkMoveMessagesSchema,
   bulkFilingSuggestionRequestSchema,
   bulkFolderMoveSchema,
@@ -51,7 +52,9 @@ import {
   replyStyleCreateSchema,
   replyStylePatchSchema,
   smartMailRuleCreateSchema,
+  smartMailRuleBatchRunSchema,
   smartMailRulePatchSchema,
+  smartMailRuleRunSchema,
   smartMailRuleSuggestionRequestSchema,
   stockSettingsPatchSchema,
   todoCreateSchema,
@@ -63,6 +66,7 @@ import {
   type AiJob,
   type AiProviderId,
   type BulkMoveDestination,
+  type BulkMessageReadResult,
   type BulkFolderMoveResult,
   type BulkMoveResult,
   type DiagnosticCategory,
@@ -133,6 +137,7 @@ import {
 } from "./services/upload-service.js";
 import { NewsService } from "./services/news-service.js";
 import { StockService } from "./services/stock-service.js";
+import { MailboxTaskService } from "./services/mailbox-task-service.js";
 
 type Role = "viewer" | "local" | "admin";
 
@@ -181,6 +186,7 @@ export class EmailApiRuntime {
   readonly ai: AiService;
   readonly aiSettings: AiSettingsManager;
   readonly aiSchedules: AiScheduleService;
+  readonly mailboxTasks: MailboxTaskService;
   readonly stocks: StockService;
   readonly news: NewsService;
   readonly uploads: UploadService;
@@ -197,6 +203,7 @@ export class EmailApiRuntime {
     this.app = Fastify({
       logger: config.logger,
       bodyLimit: 5 * 1024 * 1024,
+      trustProxy: config.trustProxy,
       routerOptions: { maxParamLength: 2 * 1024 }
     });
     this.storageSettings = new StorageSettingsManager(config.dataDir);
@@ -215,7 +222,9 @@ export class EmailApiRuntime {
     this.gmail = new GmailService(this.database, this.imports, {
       clientId: gmailCredentials.clientId,
       clientSecret: gmailCredentials.clientSecret,
-      redirectUri: () => `http://127.0.0.1:${this.listeningPort}/api/gmail/oauth/callback`,
+      redirectUri: () => this.config.publicUrl
+        ? `${this.config.publicUrl}/api/gmail/oauth/callback`
+        : `http://127.0.0.1:${this.listeningPort}/api/gmail/oauth/callback`,
       syncIntervalMinutes: this.gmailSettings.syncIntervalMinutes(),
       syncMailboxActions: this.gmailSettings.syncMailboxActions()
     });
@@ -229,6 +238,7 @@ export class EmailApiRuntime {
     });
     this.ai = new AiService(this.database, this.aiSettings, undefined, undefined, this.draftSettings);
     this.aiSchedules = new AiScheduleService(this.database, this.ai);
+    this.mailboxTasks = new MailboxTaskService(this.database);
     this.stocks = new StockService(config.dataDir);
     this.news = new NewsService(config.dataDir);
     this.uploads = new UploadService(config.dataDir, this.database, this.imports);
@@ -285,7 +295,8 @@ export class EmailApiRuntime {
       category: "system",
       message: "Local email service shutting down"
     });
-    this.aiSchedules.close();
+    await this.aiSchedules.close();
+    await this.mailboxTasks.close();
     await this.ai.close();
     await this.gmail.close();
     await this.imports.close();
@@ -694,6 +705,11 @@ export class EmailApiRuntime {
         isRead?: string;
         starred?: string;
         inboxCategory?: string;
+        from?: string;
+        to?: string;
+        after?: string;
+        before?: string;
+        hasAttachment?: string;
         cursor?: string;
         limit?: string;
       };
@@ -709,6 +725,11 @@ export class EmailApiRuntime {
         isRead: optionalBoolean(request.query.isRead),
         starred: optionalBoolean(request.query.starred),
         inboxCategory,
+        from: request.query.from,
+        to: request.query.to,
+        after: request.query.after,
+        before: request.query.before,
+        hasAttachment: optionalBoolean(request.query.hasAttachment),
         cursor: request.query.cursor,
         limit: optionalNumber(request.query.limit)
       });
@@ -919,6 +940,55 @@ export class EmailApiRuntime {
       }
     });
 
+    this.app.post<{ Body: unknown }>("/api/messages/bulk-read", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = bulkMessageReadSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose one or more messages" });
+      }
+      const pendingMessageIds: string[] = [];
+      let alreadyRead = 0;
+      let failed = 0;
+      for (const messageId of parsed.data.messageIds) {
+        const existing = this.database.getMessage(messageId);
+        if (!existing) {
+          failed += 1;
+        } else if (existing.state.isRead) {
+          alreadyRead += 1;
+        } else {
+          pendingMessageIds.push(messageId);
+        }
+      }
+      try {
+        await this.gmail.syncMessagesState(pendingMessageIds, { isRead: true });
+      } catch (error) {
+        return this.mailboxActionErrorReply(reply, error, "Selected messages could not be marked read");
+      }
+      let updated = 0;
+      for (const messageId of pendingMessageIds) {
+        try {
+          this.database.updateMessageState(messageId, { isRead: true });
+          updated += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      const result: BulkMessageReadResult = { updated, alreadyRead, failed };
+      this.database.recordDiagnostic({
+        level: failed > 0 ? "warning" : "info",
+        category: "system",
+        message: `Bulk read updated ${updated} message${updated === 1 ? "" : "s"}${failed ? `, ${failed} failed` : ""}`,
+        context: {
+          operation: "bulk_mark_read",
+          requested: parsed.data.messageIds.length,
+          updated,
+          alreadyRead,
+          failed
+        }
+      });
+      return result;
+    });
+
     this.app.post<{
       Params: { messageId: string };
       Body: unknown;
@@ -947,6 +1017,27 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose messages and a destination" });
       }
       const { messageIds, destination } = parsed.data;
+      if (destination === "spam") {
+        try {
+          const result = await this.markSelectedSendersAsSpam(messageIds);
+          this.database.recordDiagnostic({
+            level: result.failed > 0 ? "warning" : "info",
+            category: "system",
+            message: `Bulk spam moved ${result.moved} message${result.moved === 1 ? "" : "s"} and enabled ${result.senderRules} sender rule${result.senderRules === 1 ? "" : "s"}`,
+            context: {
+              operation: "bulk_spam_senders",
+              requested: messageIds.length,
+              moved: result.moved,
+              alreadyThere: result.alreadyThere,
+              failed: result.failed,
+              senderRules: result.senderRules
+            }
+          });
+          return result;
+        } catch (error) {
+          return this.mailboxActionErrorReply(reply, error, "Selected senders could not be marked as spam");
+        }
+      }
       const matchNames = BULK_DESTINATION_MATCH_NAMES[destination];
       const createName = BULK_DESTINATION_CREATE_NAME[destination];
       const folderCache = new Map<string, { id: string; path: string }>();
@@ -1000,7 +1091,14 @@ export class EmailApiRuntime {
           failed += 1;
         }
       }
-      const result: BulkMoveResult = { destination, folderPaths: [...folderPaths], moved, alreadyThere, failed };
+      const result: BulkMoveResult = {
+        destination,
+        folderPaths: [...folderPaths],
+        moved,
+        alreadyThere,
+        failed,
+        senderRules: 0
+      };
       this.database.recordDiagnostic({
         level: failed > 0 ? "warning" : "info",
         category: "system",
@@ -1290,11 +1388,13 @@ export class EmailApiRuntime {
         if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
         const result = this.database.getAttachmentBlob(request.params.attachmentId);
         if (!result) return reply.code(404).send({ error: "Attachment not found" });
-        reply.header("Content-Type", result.attachment.contentType);
+        reply.header("Content-Type", attachmentContentType(result.attachment.contentType, result.attachment.filename));
+        reply.header("Content-Length", result.attachment.sizeBytes);
         reply.header(
           "Content-Disposition",
           `inline; filename*=UTF-8''${encodeURIComponent(safeFilename(result.attachment.filename))}`
         );
+        reply.header("Cache-Control", "private, no-store");
         reply.header("X-Content-Type-Options", "nosniff");
         return reply.send(createReadStream(this.blobStore.resolve(result.relativePath)));
       }
@@ -1373,6 +1473,18 @@ export class EmailApiRuntime {
         } catch (error) {
           const message = error instanceof Error ? error.message : "Gmail sync could not start";
           return reply.code(message.includes("not found") ? 404 : 409).send({ error: message });
+        }
+      }
+    );
+
+    this.app.post<{ Params: { connectionId: string } }>(
+      "/api/gmail/connections/:connectionId/reconcile",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          return this.gmail.startMailboxReconciliation(request.params.connectionId);
+        } catch (error) {
+          return this.mailboxActionErrorReply(reply, error, "Gmail mailbox reconciliation could not start");
         }
       }
     );
@@ -2335,6 +2447,57 @@ export class EmailApiRuntime {
       }
     );
 
+    this.app.post<{ Params: { ruleId: string }; Body: unknown }>(
+      "/api/admin/smart-mail-rules/:ruleId/run",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const parsed = smartMailRuleRunSchema.safeParse(request.body ?? {});
+        if (!parsed.success) {
+          return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose a valid rule scope" });
+        }
+        try {
+          const rule = this.database.getSmartMailRule(request.params.ruleId);
+          if (!rule) return reply.code(404).send({ error: "Mail rule not found" });
+          const task = this.mailboxTasks.enqueueSmartRuleRun({
+            archiveId: rule.archiveId,
+            ruleIds: [rule.id],
+            scope: parsed.data.scope
+          });
+          return reply.code(202).send(task);
+        } catch (error) {
+          return reply.code(400).send({ error: error instanceof Error ? error.message : "Mail rule could not run" });
+        }
+      }
+    );
+
+    this.app.post<{ Body: unknown }>("/api/admin/smart-mail-rules/run", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = smartMailRuleBatchRunSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose valid mail rules and scope" });
+      }
+      try {
+        return reply.code(202).send(this.mailboxTasks.enqueueSmartRuleRun(parsed.data));
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Mail rules could not run" });
+      }
+    });
+
+    this.app.get<{ Params: { taskId: string } }>("/api/admin/mailbox-tasks/:taskId", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const task = this.mailboxTasks.getTask(request.params.taskId);
+      return task ?? reply.code(404).send({ error: "Mailbox task not found" });
+    });
+
+    this.app.post<{ Params: { taskId: string } }>("/api/admin/mailbox-tasks/:taskId/cancel", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      try {
+        return this.mailboxTasks.cancelTask(request.params.taskId);
+      } catch (error) {
+        return reply.code(404).send({ error: error instanceof Error ? error.message : "Mailbox task not found" });
+      }
+    });
+
     this.app.delete<{ Params: { ruleId: string } }>(
       "/api/admin/smart-mail-rules/:ruleId",
       async (request, reply) => {
@@ -2777,6 +2940,76 @@ export class EmailApiRuntime {
       ?? this.database.createFolder(archiveId, createName, parentId);
   }
 
+  private async markSelectedSendersAsSpam(messageIds: string[]): Promise<BulkMoveResult> {
+    const selected = [...new Set(messageIds)];
+    const folderCache = new Map<string, { id: string; path: string }>();
+    const folderPaths = new Set<string>();
+    const remoteGroups = new Map<string, Set<string>>();
+    const pending: Array<{
+      messageId: string;
+      archiveId: string;
+      senderAddress: string;
+    }> = [];
+    let failed = 0;
+    let alreadyThere = 0;
+
+    for (const messageId of selected) {
+      const message = this.database.getMessage(messageId);
+      if (!message) {
+        failed += 1;
+        continue;
+      }
+      let spamFolder = folderCache.get(message.archiveId);
+      if (!spamFolder) {
+        spamFolder = this.resolveNamedFolder(message.archiveId, message.folderId, ["spam", "junk"], "Spam");
+        folderCache.set(message.archiveId, spamFolder);
+      }
+      folderPaths.add(spamFolder.path);
+      const isAlreadyThere = message.folderId === spamFolder.id;
+      if (isAlreadyThere) alreadyThere += 1;
+      const senderAddress = message.sender.address.trim().toLowerCase();
+      if (!senderAddress) {
+        failed += 1;
+        continue;
+      }
+      const remoteMessageIds = remoteGroups.get(spamFolder.id) ?? new Set<string>();
+      for (const relatedMessageId of this.database.listSenderMessageIds(messageId, true)) {
+        remoteMessageIds.add(relatedMessageId);
+      }
+      remoteGroups.set(spamFolder.id, remoteMessageIds);
+      pending.push({
+        messageId,
+        archiveId: message.archiveId,
+        senderAddress
+      });
+    }
+
+    for (const [spamFolderId, relatedMessageIds] of remoteGroups) {
+      await this.gmail.syncMessagesMove([...relatedMessageIds], spamFolderId);
+    }
+
+    let moved = 0;
+    const senderRules = new Set<string>();
+    for (const item of pending) {
+      try {
+        const result = this.database.markSenderAsSpam(item.messageId);
+        moved += result.movedMessages;
+        senderRules.add(`${item.archiveId}:${item.senderAddress}`);
+      } catch {
+        failed += 1;
+      }
+    }
+
+    return {
+      destination: "spam",
+      folderPaths: [...folderPaths],
+      moved,
+      alreadyThere,
+      failed,
+      senderRules: senderRules.size
+    };
+  }
+
   private getAdminSettings(): AdminSettings {
     const configured = this.storageSettings.current();
     return {
@@ -2869,6 +3102,32 @@ function parseAiProvider(value: string | undefined): AiProviderId | undefined {
 
 function safeFilename(value: string): string {
   return basename(value).replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 240) || "archive";
+}
+
+const ATTACHMENT_CONTENT_TYPES: Record<string, string> = {
+  ".bmp": "image/bmp",
+  ".csv": "text/csv; charset=utf-8",
+  ".gif": "image/gif",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".json": "application/json; charset=utf-8",
+  ".log": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".text": "text/plain; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".webp": "image/webp",
+  ".xml": "application/xml; charset=utf-8"
+};
+
+function attachmentContentType(contentType: string, filename: string): string {
+  const declared = contentType.trim();
+  const mediaType = declared.split(";", 1)[0]?.toLowerCase();
+  if (mediaType && mediaType !== "application/octet-stream" && mediaType !== "binary/octet-stream") {
+    return declared;
+  }
+  return ATTACHMENT_CONTENT_TYPES[extname(filename).toLowerCase()] ?? "application/octet-stream";
 }
 
 function oauthResultPage(title: string, message: string): string {

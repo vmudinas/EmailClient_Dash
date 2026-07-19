@@ -1,6 +1,7 @@
 import type { AiJob, AiSchedule } from "@email-client/shared";
 import type { EmailStore } from "../storage/database.js";
 import { AiConfigurationError, AiDraftSkippedError, type AiService } from "./ai-service.js";
+import { yieldToEventLoop } from "./yield-to-event-loop.js";
 
 const TICK_INTERVAL_MS = 60_000;
 
@@ -9,6 +10,8 @@ const TICK_INTERVAL_MS = 60_000;
 export class AiScheduleService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private closing = false;
+  private readonly activeRuns = new Set<Promise<void>>();
 
   constructor(
     private readonly database: EmailStore,
@@ -21,19 +24,22 @@ export class AiScheduleService {
     this.timer.unref?.();
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    this.closing = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    await Promise.allSettled([...this.activeRuns]);
   }
 
   async runDueSchedules(now: string = new Date().toISOString()): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.closing) return;
     this.running = true;
     try {
       for (const schedule of this.database.dueAiSchedules(now)) {
-        await this.runSchedule(schedule, now);
+        if (this.closing) break;
+        await this.trackRun(this.runSchedule(schedule, now));
       }
     } finally {
       this.running = false;
@@ -42,12 +48,13 @@ export class AiScheduleService {
 
   /** Runs one schedule immediately, regardless of whether its interval has elapsed. */
   async runNow(scheduleId: string): Promise<AiSchedule> {
+    if (this.closing) throw new Error("AI scheduler is shutting down");
     const schedule = this.database.getAiSchedule(scheduleId);
     if (!schedule) throw new Error("Schedule not found");
     if (schedule.progress && ["queueing", "processing"].includes(schedule.progress.status)) {
       throw new Error("Schedule already has a run in progress");
     }
-    await this.runSchedule(schedule, new Date().toISOString());
+    this.trackRun(this.runSchedule(schedule, new Date().toISOString()));
     return this.database.getAiSchedule(scheduleId)!;
   }
 
@@ -61,7 +68,8 @@ export class AiScheduleService {
       let queued = 0;
       let skipped = 0;
       let enqueueErrors = 0;
-      for (const messageId of messageIds) {
+      for (const [index, messageId] of messageIds.entries()) {
+        if (index > 0 && index % 250 === 0) await yieldToEventLoop();
         try {
           const agent = {
             provider: schedule.provider,
@@ -157,5 +165,11 @@ export class AiScheduleService {
         skills: schedule.skills
       }
     });
+  }
+
+  private trackRun(run: Promise<void>): Promise<void> {
+    this.activeRuns.add(run);
+    void run.finally(() => this.activeRuns.delete(run)).catch(() => undefined);
+    return run;
   }
 }

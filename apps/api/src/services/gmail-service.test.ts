@@ -672,6 +672,7 @@ describe("GmailService", () => {
     const inbox = database.ensureFolder(archive.id, "Inbox", "Gmail/Inbox", root.id);
     const archived = database.ensureFolder(archive.id, "Archived", "Gmail/Archived", root.id);
     const jobs = database.ensureFolder(archive.id, "Jobs", "Gmail/Jobs", root.id);
+    const trash = database.ensureFolder(archive.id, "Trash", "Gmail/Trash", root.id);
     const connection = database.createGmailConnection({
       email: "owner@example.test",
       archiveId: archive.id,
@@ -718,27 +719,55 @@ describe("GmailService", () => {
     });
     services.push({ gmail, imports, database });
 
-    await gmail.syncMessageState(firstMessageId, { isRead: true, isStarred: true });
+    await gmail.syncMessagesState([firstMessageId, secondMessageId], { isRead: true });
+    await gmail.syncMessageState(firstMessageId, { isStarred: true });
     await gmail.syncMessagesMove([firstMessageId, secondMessageId], archived.id);
     database.moveMessage(firstMessageId, archived.id);
     await gmail.syncMessageMove(firstMessageId, jobs.id);
 
     expect(requests[0]).toEqual({
-      ids: ["gmail-1"],
-      addLabelIds: ["STARRED"],
+      ids: expect.arrayContaining(["gmail-1", "gmail-2"]),
+      addLabelIds: [],
       removeLabelIds: ["UNREAD"]
     });
-    expect(requests[1]).toMatchObject({
+    expect(requests[0]?.ids).toHaveLength(2);
+    expect(requests[1]).toEqual({
+      ids: ["gmail-1"],
+      addLabelIds: ["STARRED"],
+      removeLabelIds: []
+    });
+    expect(requests[2]).toMatchObject({
       ids: expect.arrayContaining(["gmail-1", "gmail-2"]),
       addLabelIds: [],
       removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
     });
-    expect(requests[2]).toMatchObject({
+    expect(requests[3]).toMatchObject({
       ids: ["gmail-1"],
       addLabelIds: ["Label_Jobs"],
       removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
     });
     expect(createdLabel).toBe(true);
+
+    requests.length = 0;
+    database.moveMessage(firstMessageId, jobs.id);
+    database.moveMessage(secondMessageId, trash.id);
+    gmail.startMailboxReconciliation(connection.id);
+    const reconciled = await waitForReorganize(database, connection.id);
+
+    expect(reconciled.status).toBe("connected");
+    expect(reconciled.processedItems).toBe(2);
+    expect(requests).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ids: ["gmail-1"],
+        addLabelIds: ["Label_Jobs"],
+        removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
+      }),
+      expect.objectContaining({
+        ids: ["gmail-2"],
+        addLabelIds: ["TRASH"],
+        removeLabelIds: expect.arrayContaining(["INBOX", "SPAM"])
+      })
+    ]));
   });
 
   it("reconciles local folder drift back to Gmail during a pull", async () => {
@@ -809,6 +838,75 @@ describe("GmailService", () => {
       ids: ["gmail-drift"],
       addLabelIds: ["SPAM"],
       removeLabelIds: ["INBOX"]
+    }]);
+  });
+
+  it("repairs older locally filed messages that still remain in the Gmail Inbox", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "archive-mail-gmail-inbox-repair-"));
+    directories.push(dataDir);
+    const database = new EmailDatabase(dataDir);
+    const imports = new ImportService(database, new BlobStore(dataDir));
+    await imports.initialize();
+    const archive = database.createArchive({
+      name: "Gmail",
+      sourceType: "gmail",
+      fingerprint: "gmail-inbox-repair",
+      sizeBytes: 0
+    });
+    database.completeArchive(archive.id, 0);
+    const root = database.ensureFolder(archive.id, "Gmail", "Gmail", null);
+    const archived = database.ensureFolder(archive.id, "Archived", "Gmail/Archived", root.id);
+    const connection = database.createGmailConnection({
+      email: "owner@example.test",
+      archiveId: archive.id,
+      folderId: root.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: false,
+      canModifyMailbox: true,
+      canManageCalendar: false,
+      refreshToken: "refresh-token",
+      accessToken: "access-token",
+      accessTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    });
+    insertGmailActionMessage(database, archive.id, archived.id, connection.email, "gmail-stale-inbox");
+    const requests: Array<{ ids: string[]; addLabelIds: string[]; removeLabelIds: string[] }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+      if (url.pathname.endsWith("/users/me/labels")) {
+        return jsonResponse({ labels: [
+          { id: "INBOX", name: "INBOX", type: "system" },
+          { id: "SPAM", name: "SPAM", type: "system" },
+          { id: "TRASH", name: "TRASH", type: "system" }
+        ] });
+      }
+      if (url.pathname.endsWith("/users/me/messages") && url.searchParams.get("labelIds") === "INBOX") {
+        return jsonResponse({ messages: [{ id: "gmail-stale-inbox" }], resultSizeEstimate: 1 });
+      }
+      if (url.pathname.endsWith("/users/me/messages")) return jsonResponse({ messages: [], resultSizeEstimate: 0 });
+      if (url.pathname.endsWith("/users/me/messages/batchModify")) {
+        requests.push(JSON.parse(String(init?.body)));
+        return jsonResponse({});
+      }
+      throw new Error(`Unexpected Gmail test request: ${url}`);
+    };
+    const gmail = new GmailService(database, imports, {
+      clientId: "desktop-client-id",
+      clientSecret: null,
+      redirectUri: () => "http://127.0.0.1:3001/api/gmail/oauth/callback",
+      fetcher,
+      syncMailboxActions: true
+    });
+    services.push({ gmail, imports, database });
+
+    gmail.startSync(connection.id);
+    const synced = await waitForSync(database, connection.id);
+
+    expect(synced.status).toBe("connected");
+    expect(requests).toEqual([{
+      ids: ["gmail-stale-inbox"],
+      addLabelIds: [],
+      removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
     }]);
   });
 
