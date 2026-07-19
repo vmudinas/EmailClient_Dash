@@ -8,7 +8,7 @@ WORKDIR /app
 # Install with the full workspace lockfile so `npm ci` stays reproducible and matches
 # what CI/local dev installs. This does pull in apps/desktop's devDependencies
 # (Electron) during this stage, but the runtime stage below never copies them.
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json tsconfig.base.json start.mjs ./
 COPY packages/shared/package.json packages/shared/package.json
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
