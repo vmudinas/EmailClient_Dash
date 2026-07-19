@@ -15,6 +15,47 @@ afterEach(async () => {
 });
 
 describe("AiScheduleService", () => {
+  it("returns a manual run while large schedule queueing continues in the background", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Large schedule",
+      sourceType: "mbox",
+      fingerprint: "large-ai-schedule",
+      sizeBytes: 0
+    });
+    const inbox = database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    for (let index = 0; index < 251; index += 1) {
+      insertMessage(database, archive.id, inbox.id, `message-${index}`);
+    }
+    database.completeArchive(archive.id, 0);
+    const startAnalysis = vi.fn((_messageId: string, _agent: unknown, options: { scheduleRunId: string }) => ({
+      job: { scheduleRunId: options.scheduleRunId }
+    }));
+    const scheduler = new AiScheduleService(database, { startAnalysis } as unknown as AiService);
+    const schedule = database.createAiSchedule({
+      name: "Large Inbox sweep",
+      folderId: inbox.id,
+      mode: "all",
+      intervalMinutes: 60,
+      provider: "openai",
+      model: "schedule-model",
+      skills: ["summarize"],
+      prompt: "",
+      enabled: true
+    });
+
+    const started = await scheduler.runNow(schedule.id);
+
+    expect(started.progress).toMatchObject({ status: "queueing", totalMessages: 251 });
+    expect(startAnalysis).toHaveBeenCalledTimes(250);
+    await vi.waitFor(() => expect(startAnalysis).toHaveBeenCalledTimes(251));
+    expect(database.getAiSchedule(schedule.id)?.progress).toMatchObject({ queuedJobs: 251 });
+
+    await scheduler.close();
+    database.close();
+  });
+
   it("runs a due schedule against its folder, respects unread-only mode, and records the summary", async () => {
     const dataDir = await temporaryDirectory();
     const database = new EmailDatabase(dataDir);
@@ -146,8 +187,8 @@ describe("AiScheduleService", () => {
       status: "processing",
       totalMessages: 2,
       queuedJobs: 2,
-      queued: 1,
-      running: 1,
+      queued: 0,
+      running: 2,
       completed: 0,
       processedJobs: 0,
       percent: 0

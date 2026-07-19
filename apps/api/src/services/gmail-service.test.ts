@@ -672,6 +672,7 @@ describe("GmailService", () => {
     const inbox = database.ensureFolder(archive.id, "Inbox", "Gmail/Inbox", root.id);
     const archived = database.ensureFolder(archive.id, "Archived", "Gmail/Archived", root.id);
     const jobs = database.ensureFolder(archive.id, "Jobs", "Gmail/Jobs", root.id);
+    const trash = database.ensureFolder(archive.id, "Trash", "Gmail/Trash", root.id);
     const connection = database.createGmailConnection({
       email: "owner@example.test",
       archiveId: archive.id,
@@ -718,27 +719,55 @@ describe("GmailService", () => {
     });
     services.push({ gmail, imports, database });
 
-    await gmail.syncMessageState(firstMessageId, { isRead: true, isStarred: true });
+    await gmail.syncMessagesState([firstMessageId, secondMessageId], { isRead: true });
+    await gmail.syncMessageState(firstMessageId, { isStarred: true });
     await gmail.syncMessagesMove([firstMessageId, secondMessageId], archived.id);
     database.moveMessage(firstMessageId, archived.id);
     await gmail.syncMessageMove(firstMessageId, jobs.id);
 
     expect(requests[0]).toEqual({
-      ids: ["gmail-1"],
-      addLabelIds: ["STARRED"],
+      ids: expect.arrayContaining(["gmail-1", "gmail-2"]),
+      addLabelIds: [],
       removeLabelIds: ["UNREAD"]
     });
-    expect(requests[1]).toMatchObject({
+    expect(requests[0]?.ids).toHaveLength(2);
+    expect(requests[1]).toEqual({
+      ids: ["gmail-1"],
+      addLabelIds: ["STARRED"],
+      removeLabelIds: []
+    });
+    expect(requests[2]).toMatchObject({
       ids: expect.arrayContaining(["gmail-1", "gmail-2"]),
       addLabelIds: [],
       removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
     });
-    expect(requests[2]).toMatchObject({
+    expect(requests[3]).toMatchObject({
       ids: ["gmail-1"],
       addLabelIds: ["Label_Jobs"],
       removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
     });
     expect(createdLabel).toBe(true);
+
+    requests.length = 0;
+    database.moveMessage(firstMessageId, jobs.id);
+    database.moveMessage(secondMessageId, trash.id);
+    gmail.startMailboxReconciliation(connection.id);
+    const reconciled = await waitForReorganize(database, connection.id);
+
+    expect(reconciled.status).toBe("connected");
+    expect(reconciled.processedItems).toBe(2);
+    expect(requests).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ids: ["gmail-1"],
+        addLabelIds: ["Label_Jobs"],
+        removeLabelIds: expect.arrayContaining(["INBOX", "SPAM", "TRASH"])
+      }),
+      expect.objectContaining({
+        ids: ["gmail-2"],
+        addLabelIds: ["TRASH"],
+        removeLabelIds: expect.arrayContaining(["INBOX", "SPAM"])
+      })
+    ]));
   });
 
   it("reconciles local folder drift back to Gmail during a pull", async () => {

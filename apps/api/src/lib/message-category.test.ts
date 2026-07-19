@@ -1,5 +1,6 @@
+import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { describe, expect, it } from "vitest";
-import { classifyInboxCategory, gmailInboxCategory } from "./message-category.js";
+import { classifyInboxCategory, classifyInboxCategoryWithTabs, gmailInboxCategory } from "./message-category.js";
 
 describe("message categories", () => {
   it("uses Gmail category labels when available", () => {
@@ -52,5 +53,34 @@ describe("message categories", () => {
       bodyText: "Can we review this tomorrow?",
       headers: {}
     })).toBe("primary");
+  });
+
+  it("keeps a renamed strict tab keyword-only and matches short keywords as complete terms", () => {
+    const tabs = DEFAULT_INBOX_TABS.map((tab) => tab.id === "medical" ? {
+      ...tab,
+      label: "Jobs",
+      description: "Development jobs",
+      keywords: ["ai", "python", ".net", "aws", "c#", "job"],
+      keywordOnly: true
+    } : tab);
+
+    expect(classifyInboxCategoryWithTabs({
+      senderAddress: "recruiter@example.test",
+      subject: "AI Engineer job using Python and AWS",
+      bodyText: "C# and .NET experience preferred.",
+      headers: {}
+    }, tabs)).toBe("medical");
+    expect(classifyInboxCategoryWithTabs({
+      senderAddress: "clinic@example.test",
+      subject: "Doctor appointment available",
+      bodyText: "Details were sent by email.",
+      headers: {}
+    }, tabs)).toBe("primary");
+    expect(classifyInboxCategoryWithTabs({
+      senderAddress: "news@example.test",
+      subject: "Your email details are available",
+      bodyText: "General account information.",
+      headers: {}
+    }, tabs)).toBe("primary");
   });
 });

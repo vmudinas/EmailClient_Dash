@@ -33,6 +33,7 @@ describe("AiSettingsManager", () => {
       clearApiKey: false,
       enabled: true,
       model: "analysis-model",
+      concurrency: 3,
       dailyRequestLimit: 12,
       monthlyRequestLimit: 240
     });
@@ -40,6 +41,7 @@ describe("AiSettingsManager", () => {
     expect(manager.view(EMPTY_USAGE)).toMatchObject({
       activeProvider: "openai",
       enabled: true,
+      concurrency: 3,
       dailyRequestLimit: 12,
       monthlyRequestLimit: 240,
       providers: {
@@ -54,7 +56,7 @@ describe("AiSettingsManager", () => {
     });
 
     const reloaded = new AiSettingsManager(dataDir, {});
-    expect(reloaded.current()).toMatchObject({ apiKey: "sk-proj-local-secret-value", model: "analysis-model" });
+    expect(reloaded.current()).toMatchObject({ apiKey: "sk-proj-local-secret-value", model: "analysis-model", concurrency: 3 });
     reloaded.clearApiKey();
     expect(reloaded.view(EMPTY_USAGE)).toMatchObject({ enabled: false, providers: { openai: { configured: false } } });
   });

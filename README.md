@@ -29,6 +29,20 @@ The PIN is a temporary bootstrap credential. Change it under **Admin settings > 
 
 Keep the data directory on a local disk. SQLite databases and their WAL files should not be placed in iCloud Drive, Dropbox, a network share, or another live-synchronized folder.
 
+## Docker, Linux server, and Synology NAS
+
+A production-only multi-stage image, Compose stack, health check, persistent bind mount, and deploy/backup/restore scripts are available under [`deploy/`](deploy/README.md). The deployment supports normal Linux servers and Synology DSM 7 Container Manager without packaging Electron or copying development dependencies into the runtime image.
+
+For a quick Linux or SSH-enabled Synology deployment:
+
+```bash
+cp deploy/.env.example deploy/.env
+${EDITOR:-vi} deploy/.env
+./deploy/scripts/deploy.sh
+```
+
+Server-based Gmail authorization requires an HTTPS public origin and Google Web OAuth callback. See the deployment guide before moving an existing Gmail-connected installation.
+
 To run the Electron desktop shell:
 
 ```bash
@@ -130,7 +144,7 @@ Gmail uses the [Gmail API](https://developers.google.com/workspace/gmail/api/ref
 POP, IMAP, and SMTP are intentionally not used. Google requires the broad `https://mail.google.com/` scope for those protocols, which includes permanent-delete capability. The granular API scopes keep mailbox mutation off by default and, when explicitly enabled, allow label-based moves and state changes without granting permanent deletion.
 
 1. In Google Cloud, enable the Gmail API and configure the OAuth consent screen.
-2. Create an OAuth client with application type **Desktop app**.
+2. For a local launch, create an OAuth client with application type **Desktop app**. For a Docker/server launch accessed from another computer, use a **Web application** client and the HTTPS callback documented in [`deploy/README.md`](deploy/README.md).
 3. Download the OAuth JSON, then open **Admin settings > Gmail**, choose that file, and save the configuration. The saved credential file is `~/.archive-mail/gmail-oauth-settings.json`, is restricted to the local OS user, and the client secret is never returned by the API.
 
 Managed installations can use environment variables instead. Environment settings take precedence over the admin file and make the Gmail panel read-only:

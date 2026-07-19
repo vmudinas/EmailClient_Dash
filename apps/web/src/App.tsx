@@ -263,7 +263,7 @@ export function App() {
   const searchFolderId = filters.folderId === ALL_MAIL_SEARCH_SCOPE
     ? null
     : filters.folderId || selectedFolderId;
-  const visibleFolderId = searchTerm ? searchFolderId : selectedFolderId;
+  const visibleFolderId = searchFolderId;
   const visibleFolder = folders.find((folder) => folder.id === visibleFolderId) ?? null;
   const searchScopeLabel = filters.folderId === ALL_MAIL_SEARCH_SCOPE
     ? "Entire archive"
@@ -603,10 +603,15 @@ export function App() {
       } else {
         const [page, counts] = await Promise.all([api.listMessages({
           archiveId: selectedArchiveId,
-          folderId: selectedFolderId ?? undefined,
+          folderId: searchFolderId ?? undefined,
           isRead: showReadMessages ? undefined : false,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
           inboxCategory: showInboxCategories ? inboxCategory : undefined,
+          from: filters.from || undefined,
+          to: filters.to || undefined,
+          after: filters.after || undefined,
+          before: filters.before || undefined,
+          hasAttachment: filters.hasAttachment,
           cursor: append ? nextCursor ?? undefined : undefined,
           limit: 50
         }), countsPromise]);
@@ -1310,6 +1315,25 @@ export function App() {
         if (source.archiveId === selectedArchiveId) setFolders(availableFolders);
       }
       const senderAddress = source?.sender.address.trim() ?? "";
+      const isSpamDestination = destination
+        ? ["spam", "junk"].includes(destination.name.trim().toLowerCase())
+        : false;
+      if (isSpamDestination) {
+        if (!window.confirm(
+          `Move this message and every Inbox message from ${senderAddress || "this sender"} to Spam, and automatically send future imported Inbox messages from this sender to Spam? If Gmail mailbox sync is enabled, current Gmail messages move too.`
+        )) return;
+        const result = await api.markSenderAsSpam(messageId);
+        if (message?.id === messageId) setMessage(result.message);
+        await Promise.all([
+          refreshArchives(),
+          loadMessages(false),
+          selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+        ]);
+        showError(
+          `${result.senderAddress} will now go to ${result.spamFolderPath}. Moved ${result.movedMessages.toLocaleString()} matching message${result.movedMessages === 1 ? "" : "s"}.`
+        );
+        return;
+      }
       const moveAllFromSender = Boolean(senderAddress && destination) && window.confirm(
         `Move every email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there. If Gmail mailbox sync is enabled, current Gmail messages move too.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
       );
@@ -1471,10 +1495,15 @@ export function App() {
         } else {
           const page = await api.listMessages({
             archiveId: selectedArchiveId,
-            folderId: selectedFolderId ?? undefined,
+            folderId: searchFolderId ?? undefined,
             isRead: showReadMessages ? undefined : false,
             starred: selectedSmartMailbox === "starred" ? true : undefined,
             inboxCategory: showInboxCategories ? inboxCategory : undefined,
+            from: filters.from || undefined,
+            to: filters.to || undefined,
+            after: filters.after || undefined,
+            before: filters.before || undefined,
+            hasAttachment: filters.hasAttachment,
             cursor,
             limit
           });
@@ -1496,13 +1525,42 @@ export function App() {
 
   const clearBulkSelection = () => setBulkSelectedIds(new Set());
 
+  const bulkMarkRead = async () => {
+    if (!api || readOnly || bulkSelectedIds.size === 0) return;
+    const messageIds = [...bulkSelectedIds];
+    setBulkActionBusy(true);
+    try {
+      const result = await api.bulkMarkMessagesRead(messageIds);
+      if (message && messageIds.includes(message.id)) {
+        if (showReadMessages) {
+          setMessage({ ...message, state: { ...message.state, isRead: true } });
+        } else {
+          setSelectedMessageId(null);
+          setMessage(null);
+        }
+      }
+      setBulkSelectedIds(new Set());
+      await Promise.all([refreshMailboxCounts(), loadMessages(false)]);
+      showError(
+        `Marked ${result.updated.toLocaleString()} message${result.updated === 1 ? "" : "s"} as read`
+        + (result.alreadyRead ? `; ${result.alreadyRead.toLocaleString()} already read` : "")
+        + (result.failed ? `; ${result.failed.toLocaleString()} could not be updated` : "")
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Selected messages could not be marked read");
+    } finally {
+      setBulkActionBusy(false);
+    }
+  };
+
   const bulkMove = async (destination: BulkMoveDestination) => {
     if (!api || readOnly || bulkSelectedIds.size === 0) return;
     const messageIds = [...bulkSelectedIds];
     const { verb, noun } = BULK_MOVE_LABELS[destination];
-    if (!window.confirm(
-      `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${messageIds.length.toLocaleString()} selected message${messageIds.length === 1 ? "" : "s"}? They will be moved to ${noun}.`
-    )) return;
+    const confirmation = destination === "spam"
+      ? `Move the selected messages to Spam, move every matching Inbox message from their senders, and automatically send future imported Inbox messages from those senders to Spam? If Gmail mailbox sync is enabled, current Gmail messages move too.`
+      : `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${messageIds.length.toLocaleString()} selected message${messageIds.length === 1 ? "" : "s"}? They will be moved to ${noun}.`;
+    if (!window.confirm(confirmation)) return;
     setBulkActionBusy(true);
     try {
       const result = await api.bulkMoveMessages(messageIds, destination);
@@ -1516,10 +1574,11 @@ export function App() {
         loadMessages(false),
         selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
       ]);
-      showError(
-        `Moved ${result.moved.toLocaleString()} message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || noun}`
-        + (result.failed ? `, ${result.failed} could not be moved` : "")
-      );
+      showError(destination === "spam"
+        ? `Moved ${result.moved.toLocaleString()} matching message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || noun}; enabled ${result.senderRules.toLocaleString()} sender rule${result.senderRules === 1 ? "" : "s"}`
+          + (result.failed ? `; ${result.failed.toLocaleString()} could not be processed` : "")
+        : `Moved ${result.moved.toLocaleString()} message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || noun}`
+          + (result.failed ? `, ${result.failed} could not be moved` : ""));
     } catch (error) {
       showError(error instanceof Error ? error.message : "Selected messages could not be moved");
     } finally {
@@ -1575,13 +1634,17 @@ export function App() {
       showError("Destination mailbox could not be found");
       return;
     }
-    if (!window.confirm(
-      `Move ${messageIds.length.toLocaleString()} selected messages to ${destination.path}? If Gmail mailbox sync is enabled, the Gmail messages move too.`
-    )) return;
+    const isSpamDestination = ["spam", "junk"].includes(destination.name.trim().toLowerCase());
+    const confirmation = isSpamDestination
+      ? `Move the selected messages to Spam, move every matching Inbox message from their senders, and automatically send future imported Inbox messages from those senders to Spam? If Gmail mailbox sync is enabled, current Gmail messages move too.`
+      : `Move ${messageIds.length.toLocaleString()} selected messages to ${destination.path}? If Gmail mailbox sync is enabled, the Gmail messages move too.`;
+    if (!window.confirm(confirmation)) return;
 
     setMoveBusy(true);
     try {
-      const result = await api.bulkMoveMessagesToFolder(messageIds, folderId);
+      const result = isSpamDestination
+        ? await api.bulkMoveMessages(messageIds, "spam")
+        : await api.bulkMoveMessagesToFolder(messageIds, folderId);
       if (message && messageIds.includes(message.id)) {
         setSelectedMessageId(null);
         setMessage(null);
@@ -1592,11 +1655,13 @@ export function App() {
         loadMessages(false),
         selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
       ]);
-      showError(
-        `Moved ${result.moved.toLocaleString()} selected message${result.moved === 1 ? "" : "s"} to ${result.folderPath}`
-        + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
-        + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : "")
-      );
+      showError("folderPaths" in result
+        ? `Moved ${result.moved.toLocaleString()} matching message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || destination.path}; enabled ${result.senderRules.toLocaleString()} sender rule${result.senderRules === 1 ? "" : "s"}`
+          + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} selected already there` : "")
+          + (result.failed ? `; ${result.failed.toLocaleString()} could not be processed` : "")
+        : `Moved ${result.moved.toLocaleString()} selected message${result.moved === 1 ? "" : "s"} to ${result.folderPath}`
+          + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
+          + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : ""));
     } catch (error) {
       showError(error instanceof Error ? error.message : "Selected messages could not be moved");
     } finally {
@@ -2043,6 +2108,7 @@ export function App() {
               onBulkDelete={() => void bulkMove("trash")}
               onBulkArchive={() => void bulkMove("archived")}
               onBulkSpam={() => void bulkMove("spam")}
+              onBulkMarkRead={() => void bulkMarkRead()}
               onBulkAiFile={() => void bulkAiFile()}
               aiFilingBusy={aiFilingBusy}
               actionBusy={moveBusy || spamBusy}

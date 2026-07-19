@@ -161,12 +161,17 @@ function parseCredentials(value: unknown): PersistedGmailSettings {
   const installed = root.installed && typeof root.installed === "object"
     ? root.installed as Record<string, unknown>
     : null;
+  const web = root.web && typeof root.web === "object"
+    ? root.web as Record<string, unknown>
+    : null;
   const clientId = stringValue(root.clientId)
     ?? stringValue(root.client_id)
-    ?? stringValue(installed?.client_id);
+    ?? stringValue(installed?.client_id)
+    ?? stringValue(web?.client_id);
   const clientSecret = stringValue(root.clientSecret)
     ?? stringValue(root.client_secret)
-    ?? stringValue(installed?.client_secret);
+    ?? stringValue(installed?.client_secret)
+    ?? stringValue(web?.client_secret);
   if (!clientId) throw new Error("client_id is missing");
   const syncIntervalMinutes = Number.isInteger(root.syncIntervalMinutes) && Number(root.syncIntervalMinutes) >= 0
     ? Number(root.syncIntervalMinutes)

@@ -73,6 +73,106 @@ describe("Email API AI provider routes", () => {
   });
 });
 
+describe("Email API attachment routes", () => {
+  it("streams stored bytes with a previewable content type inferred from the filename", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const archive = runtime.database.createArchive({
+      name: "Attachments",
+      sourceType: "mbox",
+      fingerprint: "attachment-route",
+      sizeBytes: 0
+    });
+    const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const content = Buffer.from("%PDF-test");
+    const blob = await runtime.blobStore.put(content);
+    const messageId = runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "attachment-message",
+      internetMessageId: null,
+      subject: "Attachment",
+      sender: { name: null, address: "sender@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: null,
+      receivedAt: null,
+      bodyText: "See attachment.",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: content.byteLength,
+      attachments: [{
+        filename: "review.pdf",
+        contentType: "application/octet-stream",
+        sizeBytes: blob.sizeBytes,
+        contentId: null,
+        disposition: "attachment",
+        textStatus: "unsupported",
+        extractedText: "",
+        blob
+      }]
+    });
+    const attachment = runtime.database.getMessage(messageId)!.attachments[0]!;
+
+    const attachmentMessages = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages?archiveId=${archive.id}&hasAttachment=true`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(attachmentMessages.statusCode).toBe(200);
+    expect(attachmentMessages.json()).toMatchObject({
+      items: [expect.objectContaining({ id: messageId, attachmentCount: 1 })]
+    });
+
+    const messagesWithoutAttachments = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages?archiveId=${archive.id}&hasAttachment=false`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(messagesWithoutAttachments.statusCode).toBe(200);
+    expect(messagesWithoutAttachments.json()).toMatchObject({ items: [] });
+
+    const unauthorized = await runtime.app.inject({
+      method: "GET",
+      url: `/api/attachments/${attachment.id}/content`,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const response = await runtime.app.inject({
+      method: "GET",
+      url: `/api/attachments/${attachment.id}/content`,
+      headers,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("application/pdf");
+    expect(response.headers["content-length"]).toBe(String(content.byteLength));
+    expect(response.headers["cache-control"]).toBe("private, no-store");
+    expect(response.headers["content-disposition"]).toContain("review.pdf");
+    expect(response.rawPayload.equals(content)).toBe(true);
+  });
+});
+
 describe("Email API review queue routes", () => {
   it("persists a reviewed analysis and removes it from the queue", async () => {
     const dataDir = await temporaryDirectory();
@@ -916,7 +1016,7 @@ describe("Email API bulk message actions", () => {
     }));
     runtimes.push(runtime);
     await runtime.initialize();
-    const { archive, messageIds } = await setUpInboxMessages(runtime, 4);
+    const { archive, inbox, messageIds } = await setUpInboxMessages(runtime, 4);
 
     const unauthorized = await runtime.app.inject({
       method: "POST",
@@ -933,6 +1033,20 @@ describe("Email API bulk message actions", () => {
       payload: { username: "admin", pin: "2332" }
     });
     const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+
+    runtime.database.updateMessageState(messageIds[1]!, { isRead: true });
+    const markedRead = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/bulk-read",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        messageIds: [messageIds[0], messageIds[0], messageIds[1], "11111111-1111-4111-8111-111111111111"]
+      }
+    });
+    expect(markedRead.statusCode).toBe(200);
+    expect(markedRead.json()).toEqual({ updated: 1, alreadyRead: 1, failed: 1 });
+    expect(runtime.database.getMessage(messageIds[0]!)?.state.isRead).toBe(true);
 
     const trashed = await runtime.app.inject({
       method: "POST",
@@ -972,7 +1086,41 @@ describe("Email API bulk message actions", () => {
       payload: { messageIds: [messageIds[2], "11111111-1111-4111-8111-111111111111"], destination: "spam" }
     });
     expect(spammed.statusCode).toBe(200);
-    expect(spammed.json()).toMatchObject({ destination: "spam", folderPaths: ["Spam"], moved: 1, alreadyThere: 0, failed: 1 });
+    expect(spammed.json()).toMatchObject({
+      destination: "spam",
+      folderPaths: ["Spam"],
+      moved: 2,
+      alreadyThere: 0,
+      failed: 1,
+      senderRules: 1
+    });
+    expect(runtime.database.getMessage(messageIds[3]!)?.folderPath).toBe("Spam");
+    expect(runtime.database.getSenderFilingStatus(archive.id).rules).toEqual([
+      expect.objectContaining({
+        senderAddress: "sender@example.test",
+        ruleType: "spam",
+        folderPath: "Spam"
+      })
+    ]);
+    const futureSpamMessageId = runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "bulk-message-future",
+      internetMessageId: null,
+      subject: "Future bulk sender message",
+      sender: { name: "Sender", address: "sender@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-15T13:00:00.000Z",
+      receivedAt: "2026-07-15T13:00:00.000Z",
+      bodyText: "Future sender rule test body",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 10,
+      attachments: []
+    });
+    expect(runtime.database.getMessage(futureSpamMessageId)?.folderPath).toBe("Spam");
 
     const jobsFolder = runtime.database.createFolder(archive.id, "Jobs");
     const filed = await runtime.app.inject({
@@ -1108,7 +1256,8 @@ describe("Email API authorization", () => {
       port: 0,
       devAuthBypass: false,
       logger: false,
-      openAiApiKey: ""
+      openAiApiKey: "",
+      publicUrl: "https://mail.example.test"
     }));
     runtimes.push(runtime);
     await runtime.initialize();
@@ -1227,6 +1376,7 @@ describe("Email API authorization", () => {
     expect(gmailAuthorization.statusCode).toBe(200);
     const authorizationUrl = new URL((gmailAuthorization.json() as { authorizationUrl: string }).authorizationUrl);
     expect(authorizationUrl.searchParams.get("client_id")).toBe("route-test.apps.googleusercontent.com");
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe("https://mail.example.test/api/gmail/oauth/callback");
 
     const clearedGmail = await runtime.app.inject({
       method: "DELETE",
@@ -2198,6 +2348,99 @@ describe("Email API Inbox category routes", () => {
       remoteAddress: "127.0.0.1"
     });
     expect(reclassified.json()).toMatchObject({ scannedMessages: 2, changedMessages: 1 });
+  });
+});
+
+describe("Email API mailbox task routes", () => {
+  it("queues a smart-rule run and reports its completed progress", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({ dataDir, port: 0, devAuthBypass: false, logger: false }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = { authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}` };
+    const archive = runtime.database.createArchive({
+      name: "Smart rule task",
+      sourceType: "mbox",
+      fingerprint: "smart-rule-task-route",
+      sizeBytes: 0
+    });
+    const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "smart-rule-task-message",
+      internetMessageId: "<smart-rule-task@example.test>",
+      subject: "Invoice ready",
+      sender: { name: "Billing", address: "billing@example.test" },
+      to: [{ name: "Owner", address: "owner@example.test" }],
+      cc: [],
+      bcc: [],
+      sentAt: "2026-07-18T12:00:00.000Z",
+      receivedAt: "2026-07-18T12:00:00.000Z",
+      bodyText: "Your invoice is ready.",
+      bodyHtml: null,
+      headers: { "message-id": "<smart-rule-task@example.test>" },
+      sizeBytes: 22,
+      attachments: []
+    });
+    runtime.database.completeArchive(archive.id, 0);
+    const rule = runtime.database.createSmartMailRule({
+      archiveId: archive.id,
+      name: "Read invoices",
+      instruction: "Mark invoices read.",
+      conditions: {
+        match: "any",
+        senderContains: [],
+        subjectContains: ["invoice"],
+        bodyContains: [],
+        hasAttachments: null
+      },
+      targetFolderId: null,
+      markRead: true,
+      star: false,
+      enabled: true,
+      applyExisting: false
+    });
+
+    const queued = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/smart-mail-rules/run",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: { archiveId: archive.id, ruleIds: [rule.id], scope: "inbox" }
+    });
+    expect(queued.statusCode).toBe(202);
+    expect(queued.json()).toMatchObject({ status: "queued", totalRules: 1, totalMessages: 1 });
+    const taskId = (queued.json() as { id: string }).id;
+
+    let task: Record<string, unknown> = {};
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const response = await runtime.app.inject({
+        method: "GET",
+        url: `/api/admin/mailbox-tasks/${taskId}`,
+        headers,
+        remoteAddress: "127.0.0.1"
+      });
+      expect(response.statusCode).toBe(200);
+      task = response.json() as Record<string, unknown>;
+      if (!["queued", "running"].includes(String(task.status))) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+
+    expect(task).toMatchObject({
+      status: "completed",
+      completedRules: 1,
+      processedMessages: 1,
+      matchedMessages: 1,
+      markedReadMessages: 1
+    });
+    expect(runtime.database.getMessage(messageId)?.state.isRead).toBe(true);
   });
 });
 

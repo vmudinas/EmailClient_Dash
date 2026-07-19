@@ -5,6 +5,8 @@ export interface ApiConfig {
   dataDir: string;
   host: string;
   port: number;
+  publicUrl: string | null;
+  trustProxy: boolean;
   staticDir?: string;
   devAuthBypass: boolean;
   sessionLifetimeMinutes: number;
@@ -22,6 +24,12 @@ export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     dataDir: overrides.dataDir ?? process.env.EMAIL_CLIENT_DATA_DIR ?? resolve(homedir(), ".archive-mail"),
     host: overrides.host ?? process.env.EMAIL_CLIENT_HOST ?? "127.0.0.1",
     port: overrides.port ?? Number(process.env.EMAIL_CLIENT_PORT ?? 3001),
+    publicUrl: normalizePublicUrl(overrides.publicUrl !== undefined
+      ? overrides.publicUrl
+      : process.env.EMAIL_CLIENT_PUBLIC_URL),
+    trustProxy: overrides.trustProxy
+      ?? parseOptionalBoolean(process.env.EMAIL_CLIENT_TRUST_PROXY)
+      ?? false,
     staticDir: overrides.staticDir ?? process.env.EMAIL_CLIENT_WEB_DIR,
     devAuthBypass: overrides.devAuthBypass ?? process.env.EMAIL_CLIENT_DEV_AUTH_BYPASS === "1",
     sessionLifetimeMinutes: overrides.sessionLifetimeMinutes
@@ -46,6 +54,18 @@ export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
       ? overrides.deepSeekApiKey
       : process.env.DEEPSEEK_API_KEY ?? null
   };
+}
+
+function normalizePublicUrl(value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  const url = new URL(value.trim());
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("EMAIL_CLIENT_PUBLIC_URL must use http:// or https://");
+  }
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new Error("EMAIL_CLIENT_PUBLIC_URL must be an origin without credentials, a path, query, or hash");
+  }
+  return url.origin;
 }
 
 function parseOptionalInt(value: string | undefined): number | null {

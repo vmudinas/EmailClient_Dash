@@ -488,20 +488,18 @@ export function MessageReader({
           <section className="attachments-section">
             <div className="attachments-heading">
               <Paperclip size={16} />
-              <h2>{message.attachments.length} attachment{message.attachments.length === 1 ? "" : "s"}</h2>
+              <h2>{attachmentSectionLabel(message.attachments)}</h2>
             </div>
             <div className="attachment-list">
-              {message.attachments
-                .filter((attachment) => attachment.disposition !== "inline" || !attachment.contentId)
-                .map((attachment) => (
-                  <AttachmentRow
-                    key={attachment.id}
-                    attachment={attachment}
-                    api={api}
-                    onError={onError}
-                    onPreview={setPreviewAttachment}
-                  />
-                ))}
+              {message.attachments.map((attachment) => (
+                <AttachmentRow
+                  key={attachment.id}
+                  attachment={attachment}
+                  api={api}
+                  onError={onError}
+                  onPreview={setPreviewAttachment}
+                />
+              ))}
             </div>
           </section>
         )}
@@ -733,9 +731,7 @@ function AiMessageActions({
   const [foldersLoading, setFoldersLoading] = useState(false);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const visibleAttachments = message.attachments.filter(
-    (attachment) => attachment.disposition !== "inline" || !attachment.contentId
-  );
+  const downloadableAttachments = message.attachments;
   const unsubscribeUrl = extractUnsubscribeUrl(message.headers);
   const archived = /^(archive|archived)$/i.test(message.folderPath.split("/").at(-1) ?? "");
   const canSend = connections.some((connection) => connection.canSend);
@@ -778,14 +774,14 @@ function AiMessageActions({
   };
 
   const saveAllAttachments = async () => {
-    if (!api || visibleAttachments.length === 0) return;
+    if (!api || downloadableAttachments.length === 0) return;
     setAttachmentsBusy(true);
     try {
-      for (const attachment of visibleAttachments) {
+      for (const attachment of downloadableAttachments) {
         downloadBlob(await api.attachmentBlob(attachment.id), attachment.filename);
         await new Promise((resolve) => window.setTimeout(resolve, 75));
       }
-      onNotice(`Saved ${visibleAttachments.length} attachment${visibleAttachments.length === 1 ? "" : "s"}.`);
+      onNotice(`Saved ${downloadableAttachments.length} attachment${downloadableAttachments.length === 1 ? "" : "s"}.`);
       close();
     } catch (error) {
       onError(error instanceof Error ? error.message : "Attachments could not be saved");
@@ -900,10 +896,10 @@ function AiMessageActions({
                     <Check size={16} /><span><strong>Copy action item</strong><small>{analysis.actionSummary}</small></span>
                   </button>
                 )}
-                {visibleAttachments.length > 0 && (
+                {downloadableAttachments.length > 0 && (
                   <button className="ai-more-item" role="menuitem" disabled={attachmentsBusy} onClick={() => void saveAllAttachments()}>
                     {attachmentsBusy ? <LoaderCircle className="spin" size={16} /> : <FileDown size={16} />}
-                    <span><strong>Save all attachments</strong><small>{visibleAttachments.length} file{visibleAttachments.length === 1 ? "" : "s"}</small></span>
+                    <span><strong>Save all attachments</strong><small>{downloadableAttachments.length} file{downloadableAttachments.length === 1 ? "" : "s"}</small></span>
                   </button>
                 )}
                 {message.sender.address.includes("@") && (
@@ -1026,9 +1022,14 @@ function EmailFrame({
 }) {
   const [srcDoc, setSrcDoc] = useState("");
   const [mobileHtml, setMobileHtml] = useState("");
-  const [showRemoteImages, setShowRemoteImages] = useState(false);
+  const [remoteImagesMessageId, setRemoteImagesMessageId] = useState<string | null>(null);
   const [hasBlockedImages, setHasBlockedImages] = useState(false);
+  const [hasRemoteImages, setHasRemoteImages] = useState(false);
+  const [trustedSenders, setTrustedSenders] = useState<string[]>(readTrustedRemoteImageSenders);
   const mobile = useMediaQuery("(max-width: 800px)");
+  const senderAddress = message.sender.address.trim().toLowerCase();
+  const senderTrusted = Boolean(senderAddress) && trustedSenders.includes(senderAddress);
+  const showRemoteImages = remoteImagesMessageId === message.id || senderTrusted;
 
   useEffect(() => {
     let active = true;
@@ -1046,11 +1047,12 @@ function EmailFrame({
         // messages stored before that attribute existed.
         const remoteSrc = image.getAttribute("data-remote-src");
         const currentSrc = image.getAttribute("src") ?? "";
-        const isRemote = Boolean(remoteSrc) || /^https?:/i.test(currentSrc) || currentSrc.startsWith("//");
-        if (!isRemote) continue;
+        const remoteSource = remoteSrc
+          ?? (/^https?:/i.test(currentSrc) ? currentSrc : currentSrc.startsWith("//") ? `https:${currentSrc}` : null);
+        if (!remoteSource) continue;
         blockedImageFound = true;
-        if (showRemoteImages && remoteSrc) {
-          image.setAttribute("src", remoteSrc);
+        if (showRemoteImages) {
+          image.setAttribute("src", remoteSource);
         } else {
           image.removeAttribute("src");
           image.setAttribute("alt", image.getAttribute("alt") || "Remote image blocked");
@@ -1085,6 +1087,7 @@ function EmailFrame({
       }
 
       if (!active) return;
+      setHasRemoteImages(blockedImageFound);
       setHasBlockedImages(blockedImageFound && !showRemoteImages);
       setMobileHtml(document.body.innerHTML);
       const imgSrc = showRemoteImages ? "data: blob: https: http:" : "data: blob:";
@@ -1108,13 +1111,36 @@ function EmailFrame({
     };
   }, [api, message, mobile, onError, showRemoteImages]);
 
+  const alwaysShowForSender = () => {
+    if (!senderAddress) return;
+    const next = [...new Set([...trustedSenders, senderAddress])].sort();
+    writeTrustedRemoteImageSenders(next);
+    setTrustedSenders(next);
+    setRemoteImagesMessageId(message.id);
+  };
+
+  const blockSenderImages = () => {
+    const next = trustedSenders.filter((address) => address !== senderAddress);
+    writeTrustedRemoteImageSenders(next);
+    setTrustedSenders(next);
+    setRemoteImagesMessageId(null);
+  };
+
   return (
     <>
       {hasBlockedImages && (
-        <div className="image-block-banner">
+        <div className="image-block-banner" role="status">
           <ImageOff size={15} />
-          <span>Images are blocked to protect your privacy.</span>
-          <button className="text-button" onClick={() => setShowRemoteImages(true)}>Show images</button>
+          <span>Remote images are blocked because they can notify the sender when you open this email.</span>
+          <button type="button" className="secondary-button compact image-block-show" onClick={() => setRemoteImagesMessageId(message.id)}>Show images</button>
+          {senderAddress && <button type="button" className="secondary-button compact image-block-show" onClick={alwaysShowForSender}>Always for sender</button>}
+        </div>
+      )}
+      {hasRemoteImages && senderTrusted && !hasBlockedImages && (
+        <div className="image-block-banner images-allowed" role="status">
+          <Eye size={15} />
+          <span>Remote images are shown automatically for {message.sender.name || message.sender.address} on this device.</span>
+          <button type="button" className="text-button" onClick={blockSenderImages}>Block images</button>
         </div>
       )}
       {mobile ? (
@@ -1154,13 +1180,7 @@ function AttachmentRow({
     if (!api) return;
     setDownloading(true);
     try {
-      const blob = await api.attachmentBlob(attachment.id);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = attachment.filename;
-      anchor.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      downloadBlob(await api.attachmentBlob(attachment.id), attachment.filename);
     } catch (error) {
       onError(error instanceof Error ? error.message : "Attachment could not be downloaded");
     } finally {
@@ -1169,37 +1189,48 @@ function AttachmentRow({
   };
 
   return (
-    <div className="attachment-row">
-      <span className="attachment-file-icon"><Icon size={20} /></span>
-      <span className="attachment-copy">
-        <strong>{attachment.filename}</strong>
-        <span>
-          {formatBytes(attachment.sizeBytes)}
-          {attachment.textStatus === "ocr_indexed" ? " · OCR" : ""}
+    <div className={`attachment-row${attachment.disposition === "inline" ? " is-inline" : ""}`}>
+      <button
+        type="button"
+        className="attachment-open"
+        onClick={() => previewable ? onPreview(attachment) : void download()}
+        disabled={!api || downloading}
+        title={previewable ? `Preview ${attachment.filename}` : `Download ${attachment.filename}`}
+      >
+        <span className="attachment-file-icon"><Icon size={20} /></span>
+        <span className="attachment-copy">
+          <strong>{attachment.filename}</strong>
+          <span>
+            {formatBytes(attachment.sizeBytes)}
+            {attachment.disposition === "inline" ? " · Inline" : ""}
+            {attachment.textStatus === "ocr_indexed" ? " · OCR" : ""}
+          </span>
         </span>
-      </span>
+      </button>
       {attachment.textStatus === "indexed" || attachment.textStatus === "ocr_indexed"
         ? <Check className="indexed-check" size={15} aria-label="Search indexed" />
         : null}
       <span className="attachment-actions">
         {previewable && (
           <button
-            className="icon-button"
+            type="button"
+            className="secondary-button compact attachment-action"
             onClick={() => onPreview(attachment)}
             title="Preview attachment"
             aria-label={`Preview ${attachment.filename}`}
           >
-            <Eye size={17} />
+            <Eye size={16} /><span>Preview</span>
           </button>
         )}
         <button
-          className="icon-button"
+          type="button"
+          className="secondary-button compact attachment-action"
           onClick={() => void download()}
-          disabled={downloading}
+          disabled={!api || downloading}
           title="Download attachment"
           aria-label={`Download ${attachment.filename}`}
         >
-          {downloading ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+          {downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}<span>Download</span>
         </button>
       </span>
     </div>
@@ -1219,6 +1250,7 @@ function AttachmentPreviewDialog({
 }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     if (!attachment || !api) {
@@ -1247,14 +1279,30 @@ function AttachmentPreviewDialog({
   }, [attachment?.id, api]);
 
   if (!attachment) return null;
-  const isImage = attachment.contentType.startsWith("image/");
+  const isImage = isImageAttachment(attachment);
+  const download = async () => {
+    if (!api) return;
+    setDownloading(true);
+    try {
+      downloadBlob(await api.attachmentBlob(attachment.id), attachment.filename);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Attachment could not be downloaded");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="dialog attachment-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="attachment-preview-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
           <div><Eye size={20} /><h2 id="attachment-preview-title">{attachment.filename}</h2></div>
-          <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
+          <div className="attachment-preview-header-actions">
+            <button type="button" className="secondary-button compact" disabled={!api || downloading} onClick={() => void download()}>
+              {downloading ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} Download
+            </button>
+            <button type="button" className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
+          </div>
         </header>
         <div className="dialog-body attachment-preview-body">
           {loading || !objectUrl ? (
@@ -1262,7 +1310,7 @@ function AttachmentPreviewDialog({
           ) : isImage ? (
             <img className="attachment-preview-image" src={objectUrl} alt={attachment.filename} />
           ) : (
-            <iframe className="attachment-preview-frame" title={attachment.filename} src={objectUrl} />
+            <iframe className="attachment-preview-frame" title={attachment.filename} src={objectUrl} sandbox="" referrerPolicy="no-referrer" />
           )}
         </div>
       </section>
@@ -1271,9 +1319,29 @@ function AttachmentPreviewDialog({
 }
 
 function isPreviewableAttachment(attachment: Attachment): boolean {
-  const type = attachment.contentType;
+  const type = attachment.contentType.toLowerCase();
   const name = attachment.filename.toLowerCase();
-  return type.startsWith("image/") || type === "application/pdf" || name.endsWith(".pdf");
+  return isImageAttachment(attachment)
+    || type.startsWith("text/")
+    || type.startsWith("application/json")
+    || type.startsWith("application/xml")
+    || /\.(pdf|txt|text|log|md|csv|json|xml)$/.test(name);
+}
+
+function attachmentSectionLabel(attachments: Attachment[]): string {
+  const fileCount = attachments.filter(
+    (attachment) => attachment.disposition !== "inline" || !attachment.contentId
+  ).length;
+  const inlineCount = attachments.length - fileCount;
+  const parts: string[] = [];
+  if (fileCount > 0) parts.push(`${fileCount} attachment${fileCount === 1 ? "" : "s"}`);
+  if (inlineCount > 0) parts.push(`${inlineCount} inline image${inlineCount === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+function isImageAttachment(attachment: Attachment): boolean {
+  return attachment.contentType.toLowerCase().startsWith("image/")
+    || /\.(bmp|gif|jpe?g|png|webp)$/i.test(attachment.filename);
 }
 
 function attachmentIcon(attachment: Attachment) {
@@ -1312,6 +1380,27 @@ function downloadBlob(blob: Blob, filename: string): void {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+const TRUSTED_REMOTE_IMAGE_SENDERS_KEY = "archive-mail.trusted-remote-image-senders";
+
+function readTrustedRemoteImageSenders(): string[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TRUSTED_REMOTE_IMAGE_SENDERS_KEY) ?? "[]") as unknown;
+    return Array.isArray(parsed)
+      ? [...new Set(parsed.filter((value): value is string => typeof value === "string").map((value) => value.trim().toLowerCase()).filter(Boolean))]
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeTrustedRemoteImageSenders(senders: string[]): void {
+  try {
+    window.localStorage.setItem(TRUSTED_REMOTE_IMAGE_SENDERS_KEY, JSON.stringify(senders));
+  } catch {
+    // A blocked storage API should not prevent the one-time image reveal.
+  }
 }
 
 function extractUnsubscribeUrl(headers: Record<string, string>): string | null {

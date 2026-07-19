@@ -1,0 +1,23 @@
+services:
+  archive-mail:
+    build: .
+    container_name: archive-mail
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      # Required: config.ts defaults to 127.0.0.1, which is unreachable from outside
+      # the container. 0.0.0.0 lets Fastify accept connections through the port map.
+      EMAIL_CLIENT_HOST: "0.0.0.0"
+      EMAIL_CLIENT_DATA_DIR: "/data"
+      # Optional — uncomment and fill in (or set in a local .env file) to enable
+      # Gmail sync and AI features. Leave unset to run with local mail only.
+      # GMAIL_CLIENT_ID: ""
+      # GMAIL_CLIENT_SECRET: ""
+      # OPENAI_API_KEY: ""
+      # DEEPSEEK_API_KEY: ""
+    volumes:
+      # Point this at a real folder on the NAS's own volume (e.g. /volume1/docker/...),
+      # never at a Cloud Sync / Synology Drive folder — SQLite's WAL mode requires a
+      # locally-consistent filesystem.
+      - /volume1/docker/archive-mail/data:/data

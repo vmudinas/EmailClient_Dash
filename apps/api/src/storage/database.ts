@@ -81,6 +81,8 @@ import type {
   SmartMailRule,
   SmartMailRuleCreate,
   SmartMailRulePatch,
+  SmartMailRuleRunResult,
+  SmartMailRuleRunScope,
   TodoCreate,
   TodoItem,
   TodoPatch,
@@ -142,6 +144,11 @@ export interface ImportJobRecord {
   message: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface EmailDatabaseOptions {
+  migrate?: boolean;
+  recoverInterruptedJobs?: boolean;
 }
 
 export interface UploadSessionRecord extends UploadSession {
@@ -375,6 +382,11 @@ export interface MessageReplyContext {
   gmailThreadId: string | null;
 }
 
+export interface SmartMailRuleRunChunkResult extends SmartMailRuleRunResult {
+  nextCursor: string | null;
+  done: boolean;
+}
+
 export interface MessageAnalysisUpsertInput extends MessageAnalysisOutput {
   messageId: string;
   threadMessageCount?: number;
@@ -388,6 +400,11 @@ interface SearchQuery extends SearchFilters {
   q: string;
 }
 
+type MessageFilterOptions = Pick<
+  SearchFilters,
+  "archiveId" | "folderId" | "isRead" | "starred" | "inboxCategory" | "from" | "to" | "after" | "before" | "hasAttachment"
+>;
+
 type Row = Record<string, unknown>;
 
 export class EmailDatabase {
@@ -395,15 +412,15 @@ export class EmailDatabase {
   private readonly db: SqliteDatabase;
   private readonly inboxTabSettingsCache = new Map<string, InboxTabSettings>();
 
-  constructor(dataDir: string, filename = "archive-mail.sqlite") {
+  constructor(dataDir: string, filename = "archive-mail.sqlite", options: EmailDatabaseOptions = {}) {
     this.path = resolve(dataDir, filename);
     mkdirSync(dirname(this.path), { recursive: true });
     this.db = new BetterSqlite3(this.path);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.pragma("busy_timeout = 5000");
-    this.migrate();
-    this.recoverInterruptedJobs();
+    if (options.migrate !== false) this.migrate();
+    if (options.recoverInterruptedJobs !== false) this.recoverInterruptedJobs();
   }
 
   close(): void {
@@ -412,6 +429,17 @@ export class EmailDatabase {
 
   private migrate(): void {
     const version = this.db.pragma("user_version", { simple: true }) as number;
+    if (version < 32) {
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS archive_folder_insert_count;
+        DROP TRIGGER IF EXISTS archive_folder_delete_count;
+        DROP TRIGGER IF EXISTS archive_message_insert_count;
+        DROP TRIGGER IF EXISTS archive_message_delete_count;
+        DROP TRIGGER IF EXISTS folder_message_move_count;
+        DROP TRIGGER IF EXISTS message_state_insert_count;
+        DROP TRIGGER IF EXISTS message_state_update_count;
+      `);
+    }
     if (version < 1) {
       this.db.exec(`
       CREATE TABLE archives (
@@ -1553,6 +1581,162 @@ export class EmailDatabase {
         PRAGMA user_version = 31;
       `);
     }
+
+    const cachedMailboxCountsVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (cachedMailboxCountsVersion < 32) {
+      const archiveColumns = new Set(
+        (this.db.pragma("table_info(archives)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      const folderColumns = new Set(
+        (this.db.pragma("table_info(folders)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!archiveColumns.has("unread_count")) {
+        this.db.exec("ALTER TABLE archives ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0;");
+      }
+      if (!archiveColumns.has("starred_count")) {
+        this.db.exec("ALTER TABLE archives ADD COLUMN starred_count INTEGER NOT NULL DEFAULT 0;");
+      }
+      if (!archiveColumns.has("starred_unread_count")) {
+        this.db.exec("ALTER TABLE archives ADD COLUMN starred_unread_count INTEGER NOT NULL DEFAULT 0;");
+      }
+      if (!folderColumns.has("unread_count")) {
+        this.db.exec("ALTER TABLE folders ADD COLUMN unread_count INTEGER NOT NULL DEFAULT 0;");
+      }
+      this.db.exec(`
+        UPDATE archives SET
+          message_count = (SELECT COUNT(*) FROM messages m WHERE m.archive_id = archives.id),
+          folder_count = (SELECT COUNT(*) FROM folders f WHERE f.archive_id = archives.id),
+          attachment_count = (
+            SELECT COALESCE(SUM(m.attachment_count), 0) FROM messages m WHERE m.archive_id = archives.id
+          ),
+          unread_count = (
+            SELECT COUNT(*) FROM messages m
+            JOIN message_state s ON s.message_id = m.id
+            WHERE m.archive_id = archives.id AND s.is_read = 0
+          ),
+          starred_count = (
+            SELECT COUNT(*) FROM messages m
+            JOIN message_state s ON s.message_id = m.id
+            WHERE m.archive_id = archives.id AND s.is_starred = 1
+          ),
+          starred_unread_count = (
+            SELECT COUNT(*) FROM messages m
+            JOIN message_state s ON s.message_id = m.id
+            WHERE m.archive_id = archives.id AND s.is_starred = 1 AND s.is_read = 0
+          );
+
+        UPDATE folders SET
+          message_count = (SELECT COUNT(*) FROM messages m WHERE m.folder_id = folders.id),
+          unread_count = (
+            SELECT COUNT(*) FROM messages m
+            JOIN message_state s ON s.message_id = m.id
+            WHERE m.folder_id = folders.id AND s.is_read = 0
+          );
+
+        CREATE TRIGGER archive_folder_insert_count
+        AFTER INSERT ON folders BEGIN
+          UPDATE archives SET folder_count = folder_count + 1 WHERE id = NEW.archive_id;
+        END;
+
+        CREATE TRIGGER archive_folder_delete_count
+        AFTER DELETE ON folders BEGIN
+          UPDATE archives SET folder_count = MAX(0, folder_count - 1) WHERE id = OLD.archive_id;
+        END;
+
+        CREATE TRIGGER archive_message_insert_count
+        AFTER INSERT ON messages BEGIN
+          UPDATE archives SET
+            message_count = message_count + 1,
+            attachment_count = attachment_count + NEW.attachment_count
+          WHERE id = NEW.archive_id;
+          UPDATE folders SET message_count = message_count + 1 WHERE id = NEW.folder_id;
+        END;
+
+        CREATE TRIGGER archive_message_delete_count
+        BEFORE DELETE ON messages BEGIN
+          UPDATE archives SET
+            message_count = MAX(0, message_count - 1),
+            attachment_count = MAX(0, attachment_count - OLD.attachment_count),
+            unread_count = MAX(0, unread_count - COALESCE((
+              SELECT CASE WHEN is_read = 0 THEN 1 ELSE 0 END FROM message_state WHERE message_id = OLD.id
+            ), 0)),
+            starred_count = MAX(0, starred_count - COALESCE((
+              SELECT CASE WHEN is_starred = 1 THEN 1 ELSE 0 END FROM message_state WHERE message_id = OLD.id
+            ), 0)),
+            starred_unread_count = MAX(0, starred_unread_count - COALESCE((
+              SELECT CASE WHEN is_starred = 1 AND is_read = 0 THEN 1 ELSE 0 END
+              FROM message_state WHERE message_id = OLD.id
+            ), 0))
+          WHERE id = OLD.archive_id;
+          UPDATE folders SET
+            message_count = MAX(0, message_count - 1),
+            unread_count = MAX(0, unread_count - COALESCE((
+              SELECT CASE WHEN is_read = 0 THEN 1 ELSE 0 END FROM message_state WHERE message_id = OLD.id
+            ), 0))
+          WHERE id = OLD.folder_id;
+        END;
+
+        CREATE TRIGGER folder_message_move_count
+        AFTER UPDATE OF folder_id ON messages
+        WHEN OLD.folder_id != NEW.folder_id BEGIN
+          UPDATE folders SET
+            message_count = MAX(0, message_count - 1),
+            unread_count = MAX(0, unread_count - COALESCE((
+              SELECT CASE WHEN is_read = 0 THEN 1 ELSE 0 END FROM message_state WHERE message_id = NEW.id
+            ), 0))
+          WHERE id = OLD.folder_id;
+          UPDATE folders SET
+            message_count = message_count + 1,
+            unread_count = unread_count + COALESCE((
+              SELECT CASE WHEN is_read = 0 THEN 1 ELSE 0 END FROM message_state WHERE message_id = NEW.id
+            ), 0)
+          WHERE id = NEW.folder_id;
+        END;
+
+        CREATE TRIGGER message_state_insert_count
+        AFTER INSERT ON message_state BEGIN
+          UPDATE archives SET
+            unread_count = unread_count + CASE WHEN NEW.is_read = 0 THEN 1 ELSE 0 END,
+            starred_count = starred_count + CASE WHEN NEW.is_starred = 1 THEN 1 ELSE 0 END,
+            starred_unread_count = starred_unread_count
+              + CASE WHEN NEW.is_starred = 1 AND NEW.is_read = 0 THEN 1 ELSE 0 END
+          WHERE id = (SELECT archive_id FROM messages WHERE id = NEW.message_id);
+          UPDATE folders SET
+            unread_count = unread_count + CASE WHEN NEW.is_read = 0 THEN 1 ELSE 0 END
+          WHERE id = (SELECT folder_id FROM messages WHERE id = NEW.message_id);
+        END;
+
+        CREATE TRIGGER message_state_update_count
+        AFTER UPDATE OF is_read, is_starred ON message_state BEGIN
+          UPDATE archives SET
+            unread_count = MAX(0, unread_count
+              + CASE WHEN NEW.is_read = 0 THEN 1 ELSE 0 END
+              - CASE WHEN OLD.is_read = 0 THEN 1 ELSE 0 END),
+            starred_count = MAX(0, starred_count
+              + CASE WHEN NEW.is_starred = 1 THEN 1 ELSE 0 END
+              - CASE WHEN OLD.is_starred = 1 THEN 1 ELSE 0 END),
+            starred_unread_count = MAX(0, starred_unread_count
+              + CASE WHEN NEW.is_starred = 1 AND NEW.is_read = 0 THEN 1 ELSE 0 END
+              - CASE WHEN OLD.is_starred = 1 AND OLD.is_read = 0 THEN 1 ELSE 0 END)
+          WHERE id = (SELECT archive_id FROM messages WHERE id = NEW.message_id);
+          UPDATE folders SET
+            unread_count = MAX(0, unread_count
+              + CASE WHEN NEW.is_read = 0 THEN 1 ELSE 0 END
+              - CASE WHEN OLD.is_read = 0 THEN 1 ELSE 0 END)
+          WHERE id = (SELECT folder_id FROM messages WHERE id = NEW.message_id);
+        END;
+
+        CREATE INDEX IF NOT EXISTS messages_folder_keyset_idx
+          ON messages(folder_id, COALESCE(received_at, sent_at, '') DESC, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS messages_folder_category_keyset_idx
+          ON messages(folder_id, inbox_category, COALESCE(received_at, sent_at, '') DESC, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS messages_archive_keyset_idx
+          ON messages(archive_id, COALESCE(received_at, sent_at, '') DESC, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS message_follow_ups_conversation_status_idx
+          ON message_follow_ups(conversation_key, status);
+        PRAGMA user_version = 32;
+      `);
+    }
   }
 
   private reclassifyInboxCategories(): void {
@@ -2050,28 +2234,12 @@ export class EmailDatabase {
   getArchive(id: string): Archive | null {
     const row = this.db.prepare(`
       SELECT a.*,
-        (SELECT COUNT(*) FROM messages m WHERE m.archive_id = a.id) AS live_message_count,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.archive_id = a.id AND s.is_read = 0
-        ) AS live_unread_count,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.archive_id = a.id AND s.is_starred = 1
-        ) AS live_starred_count,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.archive_id = a.id AND s.is_starred = 1 AND s.is_read = 0
-        ) AS live_starred_unread_count,
-        (SELECT COUNT(*) FROM folders f WHERE f.archive_id = a.id) AS live_folder_count,
-        (
-          SELECT COUNT(*) FROM attachments att
-          JOIN messages m ON m.id = att.message_id
-          WHERE m.archive_id = a.id
-        ) AS live_attachment_count
+        a.message_count AS live_message_count,
+        a.unread_count AS live_unread_count,
+        a.starred_count AS live_starred_count,
+        a.starred_unread_count AS live_starred_unread_count,
+        a.folder_count AS live_folder_count,
+        a.attachment_count AS live_attachment_count
       FROM archives a WHERE a.id = ?
     `).get(id) as Row | undefined;
     return row ? this.mapArchive(row) : null;
@@ -2091,28 +2259,12 @@ export class EmailDatabase {
   listArchives(): Archive[] {
     return (this.db.prepare(`
       SELECT a.*,
-        (SELECT COUNT(*) FROM messages m WHERE m.archive_id = a.id) AS live_message_count,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.archive_id = a.id AND s.is_read = 0
-        ) AS live_unread_count,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.archive_id = a.id AND s.is_starred = 1
-        ) AS live_starred_count,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.archive_id = a.id AND s.is_starred = 1 AND s.is_read = 0
-        ) AS live_starred_unread_count,
-        (SELECT COUNT(*) FROM folders f WHERE f.archive_id = a.id) AS live_folder_count,
-        (
-          SELECT COUNT(*) FROM attachments att
-          JOIN messages m ON m.id = att.message_id
-          WHERE m.archive_id = a.id
-        ) AS live_attachment_count
+        a.message_count AS live_message_count,
+        a.unread_count AS live_unread_count,
+        a.starred_count AS live_starred_count,
+        a.starred_unread_count AS live_starred_unread_count,
+        a.folder_count AS live_folder_count,
+        a.attachment_count AS live_attachment_count
       FROM archives a
       WHERE a.status != 'failed'
       ORDER BY COALESCE(a.imported_at, a.created_at) DESC
@@ -2138,6 +2290,18 @@ export class EmailDatabase {
           JOIN messages m ON m.id = a.message_id
           WHERE m.archive_id = archives.id
         ),
+        unread_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = archives.id AND s.is_read = 0
+        ),
+        starred_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = archives.id AND s.is_starred = 1
+        ),
+        starred_unread_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = archives.id AND s.is_starred = 1 AND s.is_read = 0
+        ),
         error_count = ?,
         imported_at = ?
       WHERE id = ?
@@ -2154,13 +2318,29 @@ export class EmailDatabase {
           SELECT COUNT(*) FROM attachments a
           JOIN messages m ON m.id = a.message_id
           WHERE m.archive_id = archives.id
+        ),
+        unread_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = archives.id AND s.is_read = 0
+        ),
+        starred_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = archives.id AND s.is_starred = 1
+        ),
+        starred_unread_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.archive_id = archives.id AND s.is_starred = 1 AND s.is_read = 0
         )
       WHERE id = ?
     `).run(id);
     this.db.prepare(`
-      UPDATE folders SET message_count = (
-        SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
-      ) WHERE archive_id = ?
+      UPDATE folders SET
+        message_count = (SELECT COUNT(*) FROM messages WHERE folder_id = folders.id),
+        unread_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.folder_id = folders.id AND s.is_read = 0
+        )
+      WHERE archive_id = ?
     `).run(id);
     const archive = this.getArchive(id);
     if (!archive) throw new Error("Archive not found");
@@ -3944,21 +4124,91 @@ export class EmailDatabase {
   }
 
   applySmartMailRuleToExisting(id: string): number {
+    return this.runSmartMailRule(id, "inbox").matchedMessages;
+  }
+
+  runSmartMailRule(id: string, scope: SmartMailRuleRunScope): SmartMailRuleRunResult {
+    let cursor: string | null = null;
+    let scannedMessages = 0;
+    let matchedMessages = 0;
+    let movedMessages = 0;
+    let markedReadMessages = 0;
+    let starredMessages = 0;
+    let result: SmartMailRuleRunChunkResult;
+    do {
+      result = this.runSmartMailRuleChunk(id, scope, cursor, 500);
+      cursor = result.nextCursor;
+      scannedMessages += result.scannedMessages;
+      matchedMessages += result.matchedMessages;
+      movedMessages += result.movedMessages;
+      markedReadMessages += result.markedReadMessages;
+      starredMessages += result.starredMessages;
+    } while (!result.done);
+    if (movedMessages > 0) this.refreshArchiveFolderMessageCounts(result.rule.archiveId);
+    return {
+      rule: result.rule,
+      scope,
+      scannedMessages,
+      matchedMessages,
+      movedMessages,
+      markedReadMessages,
+      starredMessages
+    };
+  }
+
+  countSmartMailRuleCandidates(id: string, scope: SmartMailRuleRunScope): number {
     const rule = this.getSmartMailRule(id);
     if (!rule) throw new Error("Mail rule not found");
-    if (!rule.enabled) return 0;
-    const rows = this.db.prepare(`
-      SELECT m.id, m.sender_address, m.subject, m.body_text, m.has_attachments
+    if (!rule.enabled) throw new Error("Enable the mail rule before running it");
+    const folderCondition = scope === "inbox" ? "AND lower(trim(f.name)) = 'inbox'" : "";
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count
       FROM messages m
       JOIN folders f ON f.id = m.folder_id
-      WHERE m.archive_id = ? AND lower(trim(f.name)) = 'inbox'
-    `).all(rule.archiveId) as Row[];
-    const matching = rows.filter((row) => smartMailRuleMatches(rule, {
+      WHERE m.archive_id = ? ${folderCondition}
+    `).get(rule.archiveId) as Row;
+    return Number(row.count);
+  }
+
+  runSmartMailRuleChunk(
+    id: string,
+    scope: SmartMailRuleRunScope,
+    afterMessageId: string | null,
+    limit: number
+  ): SmartMailRuleRunChunkResult {
+    const batchLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const rule = this.getSmartMailRule(id);
+    if (!rule) throw new Error("Mail rule not found");
+    if (!rule.enabled) throw new Error("Enable the mail rule before running it");
+    const folderCondition = scope === "inbox" ? "AND lower(trim(f.name)) = 'inbox'" : "";
+    const cursorCondition = afterMessageId ? "AND m.id > ?" : "";
+    const params = afterMessageId ? [rule.archiveId, afterMessageId, batchLimit + 1] : [rule.archiveId, batchLimit + 1];
+    const rows = this.db.prepare(`
+      SELECT m.id, m.folder_id, m.sender_address, m.subject, m.body_text, m.has_attachments,
+        COALESCE(s.is_read, 0) AS is_read, COALESCE(s.is_starred, 0) AS is_starred
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      LEFT JOIN message_state s ON s.message_id = m.id
+      WHERE m.archive_id = ? ${folderCondition} ${cursorCondition}
+      ORDER BY m.id
+      LIMIT ?
+    `).all(...params) as Row[];
+    const batch = rows.slice(0, batchLimit);
+    const matching = batch.filter((row) => smartMailRuleMatches(rule, {
       senderAddress: String(row.sender_address ?? ""),
       subject: String(row.subject ?? ""),
       bodyText: String(row.body_text ?? ""),
       hasAttachments: Boolean(row.has_attachments)
     }));
+    const movedMessages = rule.targetFolderId
+      ? matching.filter((row) => String(row.folder_id) !== rule.targetFolderId).length
+      : 0;
+    const markedReadMessages = rule.markRead
+      ? matching.filter((row) => !Boolean(row.is_read)).length
+      : 0;
+    const starredMessages = rule.star
+      ? matching.filter((row) => !Boolean(row.is_starred)).length
+      : 0;
     const apply = this.db.transaction(() => {
       for (const row of matching) {
         const messageId = String(row.id);
@@ -3983,15 +4233,32 @@ export class EmailDatabase {
           UPDATE smart_mail_rules
           SET matched_messages = matched_messages + ?, updated_at = ? WHERE id = ?
         `).run(matching.length, new Date().toISOString(), id);
-        this.db.prepare(`
-          UPDATE folders SET message_count = (
-            SELECT COUNT(*) FROM messages WHERE folder_id = folders.id
-          ) WHERE archive_id = ?
-        `).run(rule.archiveId);
       }
     });
     apply();
-    return matching.length;
+    return {
+      rule: this.getSmartMailRule(id)!,
+      scope,
+      scannedMessages: batch.length,
+      matchedMessages: matching.length,
+      movedMessages,
+      markedReadMessages,
+      starredMessages,
+      nextCursor: batch.at(-1) ? String(batch.at(-1)!.id) : null,
+      done: rows.length <= batchLimit
+    };
+  }
+
+  refreshArchiveFolderMessageCounts(archiveId: string): void {
+    this.db.prepare(`
+      UPDATE folders SET
+        message_count = (SELECT COUNT(*) FROM messages WHERE folder_id = folders.id),
+        unread_count = (
+          SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id
+          WHERE m.folder_id = folders.id AND s.is_read = 0
+        )
+      WHERE archive_id = ?
+    `).run(archiveId);
   }
 
   private smartMailRuleSelect(): string {
@@ -4294,6 +4561,36 @@ export class EmailDatabase {
     return targets;
   }
 
+  getGmailMessageMutationTargetsForConnection(connectionId: string): GmailMessageMutationTarget[] {
+    const connection = this.getGmailConnectionRecord(connectionId);
+    if (!connection) return [];
+    const prefix = `gmail:${connection.email.trim().toLowerCase()}:`;
+    const rows = this.db.prepare(`
+      SELECT m.id, m.folder_id, m.source_key, m.headers_json, f.path AS folder_path
+      FROM messages m
+      JOIN folders f ON f.id = m.folder_id
+      WHERE m.archive_id = ? AND substr(m.source_key, 1, ?) = ?
+      ORDER BY m.id
+    `).all(connection.archiveId, prefix.length, prefix) as Row[];
+    return rows.flatMap((row) => {
+      const sourceKey = String(row.source_key);
+      const gmailMessageId = sourceKey.slice(prefix.length);
+      if (!gmailMessageId) return [];
+      const headers = parseJson<Record<string, string>>(row.headers_json, {});
+      return [{
+        messageId: String(row.id),
+        gmailMessageId,
+        connection,
+        currentFolderId: String(row.folder_id),
+        currentFolderPath: String(row.folder_path),
+        labelIds: (headers["x-archive-mail-gmail-label-ids"] ?? "")
+          .split(",")
+          .map((labelId) => labelId.trim())
+          .filter(Boolean)
+      }];
+    });
+  }
+
   getGmailMessageMutationTargetsByGmailIds(
     connectionId: string,
     gmailMessageIds: string[]
@@ -4547,11 +4844,7 @@ export class EmailDatabase {
   getFolder(id: string): Folder | null {
     const row = this.db.prepare(`
       SELECT f.*,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.folder_id = f.id AND s.is_read = 0
-        ) AS live_unread_count
+        f.unread_count AS live_unread_count
       FROM folders f WHERE f.id = ?
     `).get(id) as Row | undefined;
     return row ? this.mapFolder(row) : null;
@@ -4560,11 +4853,7 @@ export class EmailDatabase {
   listFolders(archiveId: string): Folder[] {
     return (this.db.prepare(`
       SELECT f.*,
-        (
-          SELECT COUNT(*) FROM messages m
-          JOIN message_state s ON s.message_id = m.id
-          WHERE m.folder_id = f.id AND s.is_read = 0
-        ) AS live_unread_count
+        f.unread_count AS live_unread_count
       FROM folders f WHERE f.archive_id = ? ORDER BY f.path COLLATE NOCASE
     `).all(archiveId) as Row[]).map((row) => this.mapFolder(row));
   }
@@ -4951,9 +5240,6 @@ export class EmailDatabase {
         `).run(attachmentId, id, attachment.filename, attachment.extractedText);
       }
 
-      this.db.prepare(`
-        UPDATE folders SET message_count = message_count + 1 WHERE id = ?
-      `).run(effectiveFolderId);
       return id;
     });
 
@@ -4977,38 +5263,19 @@ export class EmailDatabase {
     return result.changes > 0;
   }
 
-  listMessages(options: {
-    archiveId?: string;
-    folderId?: string;
-    isRead?: boolean;
-    starred?: boolean;
-    inboxCategory?: InboxCategory;
-    cursor?: string;
-    limit?: number;
-  }): CursorPage<MessageSummary> {
+  listMessages(options: Omit<SearchFilters, "sort">): CursorPage<MessageSummary> {
     const limit = clampLimit(options.limit);
-    const offset = decodeOffset(options.cursor);
+    const cursor = decodeMessageCursor(options.cursor);
     const conditions: string[] = [];
     const params: unknown[] = [];
-    if (options.archiveId) {
-      conditions.push("m.archive_id = ?");
-      params.push(options.archiveId);
-    }
-    if (options.folderId) {
-      conditions.push("m.folder_id = ?");
-      params.push(options.folderId);
-    }
-    if (options.isRead !== undefined) {
-      conditions.push("COALESCE(s.is_read, 0) = ?");
-      params.push(options.isRead ? 1 : 0);
-    }
-    if (options.starred !== undefined) {
-      conditions.push("COALESCE(s.is_starred, 0) = ?");
-      params.push(options.starred ? 1 : 0);
-    }
-    if (options.inboxCategory) {
-      conditions.push("m.inbox_category = ?");
-      params.push(options.inboxCategory);
+    appendMessageFilters(options, conditions, params);
+    if (cursor) {
+      conditions.push(`(
+        COALESCE(m.received_at, m.sent_at, '') < ?
+        OR (COALESCE(m.received_at, m.sent_at, '') = ? AND m.created_at < ?)
+        OR (COALESCE(m.received_at, m.sent_at, '') = ? AND m.created_at = ? AND m.id < ?)
+      )`);
+      params.push(cursor.date, cursor.date, cursor.createdAt, cursor.date, cursor.createdAt, cursor.id);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.db.prepare(`
@@ -5016,15 +5283,18 @@ export class EmailDatabase {
       ${MESSAGE_SUMMARY_JOINS}
       ${where}
       ORDER BY
-        CASE WHEN COALESCE(m.received_at, m.sent_at) IS NULL THEN 1 ELSE 0 END,
-        COALESCE(m.received_at, m.sent_at) DESC,
+        COALESCE(m.received_at, m.sent_at, '') DESC,
         m.created_at DESC,
         m.id DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limit + 1, offset) as Row[];
+      LIMIT ?
+    `).all(...params, limit + 1) as Row[];
     const hasMore = rows.length > limit;
-    const items = rows.slice(0, limit).map((row) => this.mapMessageSummary(row));
-    return { items, nextCursor: hasMore ? encodeOffset(offset + limit) : null };
+    const pageRows = rows.slice(0, limit);
+    const items = pageRows.map((row) => this.mapMessageSummary(row));
+    return {
+      items,
+      nextCursor: hasMore && pageRows.length > 0 ? encodeMessageCursor(pageRows.at(-1)!) : null
+    };
   }
 
   countInboxCategories(options: { archiveId?: string; folderId?: string; isRead?: boolean }): InboxCategoryCounts {
@@ -5144,7 +5414,7 @@ export class EmailDatabase {
     const settings = this.getInboxTabSettings(archiveId);
     if (!settings.aiEnabled) return null;
     const choices = settings.tabs
-      .filter((tab) => tab.enabled)
+      .filter((tab) => tab.enabled && !tab.keywordOnly)
       .sort((left, right) => left.position - right.position)
       .map((tab) => `${tab.id} (${tab.label}): ${tab.description}`)
       .join("; ");
@@ -5165,8 +5435,9 @@ export class EmailDatabase {
     if (!row || String(row.folder_name).trim().toLowerCase() !== "inbox") return null;
     const settings = this.getInboxTabSettings(String(row.archive_id));
     if (!settings.aiEnabled || confidence < settings.aiConfidenceThreshold) return null;
+    if (settings.tabs.find((tab) => tab.id === String(row.inbox_category))?.keywordOnly) return null;
     const normalizedCategories = categories.map(normalizeInboxTabName);
-    const tab = settings.tabs.find((candidate) => candidate.enabled && normalizedCategories.some((category) => (
+    const tab = settings.tabs.find((candidate) => candidate.enabled && !candidate.keywordOnly && normalizedCategories.some((category) => (
       category === normalizeInboxTabName(candidate.id) || category === normalizeInboxTabName(candidate.label)
     )));
     if (!tab) return null;
@@ -5519,46 +5790,7 @@ export class EmailDatabase {
     const filters: string[] = [];
     const filterParams: unknown[] = [];
 
-    if (options.archiveId) {
-      filters.push("m.archive_id = ?");
-      filterParams.push(options.archiveId);
-    }
-    if (options.folderId) {
-      filters.push("m.folder_id = ?");
-      filterParams.push(options.folderId);
-    }
-    if (options.isRead !== undefined) {
-      filters.push("COALESCE(s.is_read, 0) = ?");
-      filterParams.push(options.isRead ? 1 : 0);
-    }
-    if (options.starred !== undefined) {
-      filters.push("COALESCE(s.is_starred, 0) = ?");
-      filterParams.push(options.starred ? 1 : 0);
-    }
-    if (options.inboxCategory) {
-      filters.push("m.inbox_category = ?");
-      filterParams.push(options.inboxCategory);
-    }
-    if (options.from) {
-      filters.push("lower(m.sender_address || ' ' || COALESCE(m.sender_name, '')) LIKE ?");
-      filterParams.push(`%${options.from.toLowerCase()}%`);
-    }
-    if (options.to) {
-      filters.push("lower(m.recipients_text) LIKE ?");
-      filterParams.push(`%${options.to.toLowerCase()}%`);
-    }
-    if (options.after) {
-      filters.push("COALESCE(m.received_at, m.sent_at) >= ?");
-      filterParams.push(options.after);
-    }
-    if (options.before) {
-      filters.push("COALESCE(m.received_at, m.sent_at) <= ?");
-      filterParams.push(options.before);
-    }
-    if (options.hasAttachment !== undefined) {
-      filters.push("m.has_attachments = ?");
-      filterParams.push(options.hasAttachment ? 1 : 0);
-    }
+    appendMessageFilters(options, filters, filterParams);
 
     const filterSql = filters.length ? `AND ${filters.join(" AND ")}` : "";
     const sortSql = options.sort === "newest"
@@ -6475,6 +6707,7 @@ export class EmailDatabase {
   }
 
   private mapMessageSummary(row: Row): MessageSummary {
+    const attachmentCount = Number(row.attachment_count);
     return {
       id: String(row.id),
       archiveId: String(row.archive_id),
@@ -6489,8 +6722,8 @@ export class EmailDatabase {
       sentAt: row.sent_at ? String(row.sent_at) : null,
       receivedAt: row.received_at ? String(row.received_at) : null,
       preview: previewText(String(row.body_text ?? "")),
-      hasAttachments: Boolean(row.has_attachments),
-      attachmentCount: Number(row.attachment_count),
+      hasAttachments: attachmentCount > 0,
+      attachmentCount,
       inboxCategory: row.inbox_category as InboxCategory,
       hasAiAnalysis: Boolean(row.has_ai_analysis),
       hasCalendarEvent: Boolean(row.has_calendar_event),
@@ -6619,7 +6852,8 @@ function normalizeInboxTabs(storedTabs: readonly InboxTabDefinition[]): InboxTab
       id: defaultTab.id,
       enabled: defaultTab.id === "primary" ? true : stored?.enabled ?? defaultTab.enabled,
       keywords: [...(stored?.keywords ?? defaultTab.keywords)],
-      senderDomains: [...(stored?.senderDomains ?? defaultTab.senderDomains)]
+      senderDomains: [...(stored?.senderDomains ?? defaultTab.senderDomains)],
+      keywordOnly: stored?.keywordOnly ?? defaultTab.keywordOnly
     };
   }).sort((left, right) => left.position - right.position);
 }
@@ -6650,9 +6884,18 @@ const MESSAGE_SUMMARY_COLUMNS = `
   m.to_json,
   m.sent_at,
   m.received_at,
+  COALESCE(m.received_at, m.sent_at, '') AS sort_date,
+  m.created_at AS message_created_at,
   substr(m.body_text, 1, 2000) AS body_text,
-  m.has_attachments,
-  m.attachment_count,
+  (
+    SELECT COUNT(*) FROM attachments summary_attachment
+    WHERE summary_attachment.message_id = m.id
+      AND (
+        summary_attachment.disposition != 'inline'
+        OR summary_attachment.content_id IS NULL
+        OR trim(summary_attachment.content_id) = ''
+      )
+  ) AS attachment_count,
   m.inbox_category,
   EXISTS(SELECT 1 FROM ai_message_analysis analysis WHERE analysis.message_id = m.id) AS has_ai_analysis,
   EXISTS(SELECT 1 FROM message_calendar_events linked_event WHERE linked_event.message_id = m.id) AS has_calendar_event,
@@ -6715,6 +6958,60 @@ function previewText(value: string): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
+function appendMessageFilters(
+  options: MessageFilterOptions,
+  conditions: string[],
+  params: unknown[]
+): void {
+  if (options.archiveId) {
+    conditions.push("m.archive_id = ?");
+    params.push(options.archiveId);
+  }
+  if (options.folderId) {
+    conditions.push("m.folder_id = ?");
+    params.push(options.folderId);
+  }
+  if (options.isRead !== undefined) {
+    conditions.push("COALESCE(s.is_read, 0) = ?");
+    params.push(options.isRead ? 1 : 0);
+  }
+  if (options.starred !== undefined) {
+    conditions.push("COALESCE(s.is_starred, 0) = ?");
+    params.push(options.starred ? 1 : 0);
+  }
+  if (options.inboxCategory) {
+    conditions.push("m.inbox_category = ?");
+    params.push(options.inboxCategory);
+  }
+  if (options.from) {
+    conditions.push("lower(m.sender_address || ' ' || COALESCE(m.sender_name, '')) LIKE ?");
+    params.push(`%${options.from.toLowerCase()}%`);
+  }
+  if (options.to) {
+    conditions.push("lower(m.recipients_text) LIKE ?");
+    params.push(`%${options.to.toLowerCase()}%`);
+  }
+  if (options.after) {
+    conditions.push("COALESCE(m.received_at, m.sent_at) >= ?");
+    params.push(options.after);
+  }
+  if (options.before) {
+    conditions.push("COALESCE(m.received_at, m.sent_at) <= ?");
+    params.push(options.before);
+  }
+  if (options.hasAttachment !== undefined) {
+    conditions.push(`${options.hasAttachment ? "" : "NOT "}EXISTS (
+      SELECT 1 FROM attachments filtered_attachment
+      WHERE filtered_attachment.message_id = m.id
+        AND (
+          filtered_attachment.disposition != 'inline'
+          OR filtered_attachment.content_id IS NULL
+          OR trim(filtered_attachment.content_id) = ''
+        )
+    )`);
+  }
+}
+
 function clampLimit(limit?: number): number {
   if (!Number.isFinite(limit)) return 50;
   return Math.min(100, Math.max(1, Math.trunc(limit!)));
@@ -6733,6 +7030,34 @@ function decodeOffset(cursor?: string): number {
     return Number.isInteger(parsed.offset) && parsed.offset! >= 0 ? parsed.offset! : 0;
   } catch {
     return 0;
+  }
+}
+
+interface MessagePageCursor {
+  date: string;
+  createdAt: string;
+  id: string;
+}
+
+function encodeMessageCursor(row: Row): string {
+  return Buffer.from(JSON.stringify({
+    date: String(row.sort_date ?? ""),
+    createdAt: String(row.message_created_at ?? ""),
+    id: String(row.id)
+  } satisfies MessagePageCursor), "utf8").toString("base64url");
+}
+
+function decodeMessageCursor(cursor?: string): MessagePageCursor | null {
+  if (!cursor) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<MessagePageCursor>;
+    return typeof parsed.date === "string"
+      && typeof parsed.createdAt === "string"
+      && typeof parsed.id === "string"
+      ? { date: parsed.date, createdAt: parsed.createdAt, id: parsed.id }
+      : null;
+  } catch {
+    return null;
   }
 }
 

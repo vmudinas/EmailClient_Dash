@@ -33,6 +33,7 @@ const BULK_SELECTION_PROPS = {
   onBulkDelete: vi.fn(),
   onBulkArchive: vi.fn(),
   onBulkSpam: vi.fn(),
+  onBulkMarkRead: vi.fn(),
   onBulkAiFile: vi.fn(),
   aiFilingBusy: false,
   actionBusy: false,
@@ -344,6 +345,7 @@ describe("MessageList bulk selection", () => {
     const onBulkArchive = vi.fn();
     const onBulkSpam = vi.fn();
     const onBulkDelete = vi.fn();
+    const onBulkMarkRead = vi.fn();
     const onBulkAiFile = vi.fn();
     const onClearSelection = vi.fn();
     render(
@@ -365,6 +367,7 @@ describe("MessageList bulk selection", () => {
         onBulkArchive={onBulkArchive}
         onBulkSpam={onBulkSpam}
         onBulkDelete={onBulkDelete}
+        onBulkMarkRead={onBulkMarkRead}
         onBulkAiFile={onBulkAiFile}
         onClearSelection={onClearSelection}
       />
@@ -373,6 +376,8 @@ describe("MessageList bulk selection", () => {
     expect(screen.getByText("1 selected")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "AI file selected messages" }));
     expect(onBulkAiFile).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Mark selected as read" }));
+    expect(onBulkMarkRead).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Move selected to Archive" }));
     expect(onBulkArchive).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Move selected to Spam" }));
@@ -381,6 +386,33 @@ describe("MessageList bulk selection", () => {
     expect(onBulkDelete).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
     expect(onClearSelection).toHaveBeenCalledOnce();
+  });
+
+  it("offers mailbox-wide selection after every loaded message is checked", () => {
+    const onSelectEntireView = vi.fn();
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }, { message: OTHER_MESSAGE }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={true}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+        selectedIds={new Set([MESSAGE.id, OTHER_MESSAGE.id])}
+        onSelectEntireView={onSelectEntireView}
+      />
+    );
+
+    expect(screen.getByText("All 2 loaded messages are selected.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Select all available in Inbox (up to 500)" }));
+    expect(onSelectEntireView).toHaveBeenCalledOnce();
   });
 
   it("disables bulk actions while a bulk move is in progress", () => {
