@@ -92,6 +92,31 @@ After that one-time root-task setup, every deployment is one command from the re
 
 The command asks for the Synology SSH password once, uploads a clean snapshot without local dependencies, build output, Git metadata, or `deploy/.env`, preserves the existing NAS environment file, writes a deployment request for the scheduled root task, waits for the health check, and prints the build result. Override `ARCHIVE_MAIL_NAS_HOST`, `ARCHIVE_MAIL_NAS_APP_DIR`, or `ARCHIVE_MAIL_NAS_BACKUP_DIR` when deploying to a different NAS or path. SSH keys can remove the password prompt, but the script never stores a password.
 
+### Passwordless-sudo rebuild (alternative to the scheduled task)
+
+Instead of the every-minute scheduled task, the SSH account can be allowed to run exactly one root-owned rebuild script without a password. `push-synology.sh` detects this automatically: when the sudo rule exists it rebuilds directly over the same SSH connection and streams the build output live; otherwise it falls back to the deployment-request marker and the scheduled task.
+
+The sudo rule must point at a **root-owned copy outside the app tree**. The copy under `/volume1/docker/archive-mail/app` is replaced by every upload, so a rule targeting it would let the SSH account run arbitrary code as root. One-time setup, as root on the NAS (`sudo -i`):
+
+```bash
+cp /volume1/docker/archive-mail/app/deploy/scripts/synology-rebuild.sh /usr/local/bin/archive-mail-rebuild.sh
+chown root:root /usr/local/bin/archive-mail-rebuild.sh
+chmod 755 /usr/local/bin/archive-mail-rebuild.sh
+cat > /etc/sudoers.d/archive-mail <<'EOF'
+gliukaz ALL=(root) NOPASSWD: /usr/local/bin/archive-mail-rebuild.sh
+EOF
+chmod 440 /etc/sudoers.d/archive-mail
+visudo -c
+```
+
+Replace `gliukaz` with the SSH account name. `visudo -c` must report the files parse correctly before closing the root shell.
+
+Notes:
+
+- The root-owned copy is a deliberate snapshot. When `deploy/scripts/synology-rebuild.sh` changes in the repository, refresh it with the same `cp`/`chown`/`chmod` as root; `push-synology.sh` prints a warning when the two copies differ but continues with the installed one. Requiring root to approve script changes is the security property, not an inconvenience.
+- A DSM major update can reset `/etc/sudoers.d`. If a later push falls back to the scheduled-task flow unexpectedly, re-run the one-time setup.
+- With the sudo rule in place, the `Archive Mail deployment` scheduled task is redundant and can be disabled or deleted; leaving it enabled is harmless since it exits immediately unless a request marker exists.
+
 Synology documents Project creation and Compose operations in its [Container Manager Project guide](https://kb.synology.com/en-global/DSM/help/ContainerManager/docker_project?version=7).
 
 ## Reverse proxy and HTTPS

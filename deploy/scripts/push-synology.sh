@@ -78,6 +78,24 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
     trap - EXIT HUP INT TERM
   "
 
+REBUILD_BIN=/usr/local/bin/archive-mail-rebuild.sh
+if remote "sudo -n -l $REBUILD_BIN" >/dev/null 2>&1; then
+  echo "Passwordless rebuild is configured. Rebuilding directly..."
+  local_hash=$(shasum -a 256 "$REPOSITORY_DIR/deploy/scripts/synology-rebuild.sh" | cut -d' ' -f1)
+  remote_hash=$(remote "sha256sum $REBUILD_BIN 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
+  if [ -n "$remote_hash" ] && [ "$remote_hash" != "$local_hash" ]; then
+    echo "Warning: $REBUILD_BIN on the NAS differs from deploy/scripts/synology-rebuild.sh." >&2
+    echo "Refresh the root-owned copy when convenient (see deploy/README.md)." >&2
+  fi
+  if remote "sudo -n $REBUILD_BIN"; then
+    echo "Deployment completed successfully."
+    exit 0
+  fi
+  echo "Direct rebuild failed." >&2
+  exit 1
+fi
+
+echo "Passwordless rebuild is not configured; requesting the scheduled deployment task instead."
 remote "
   set -eu
   mkdir -p '$NAS_BACKUP_DIR'

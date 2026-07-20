@@ -8,6 +8,11 @@ fi
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 DEPLOY_DIR=$(dirname "$SCRIPT_DIR")
+if [ ! -f "$DEPLOY_DIR/compose.yaml" ]; then
+  # Running from the root-owned copy outside the app tree (the passwordless-sudo
+  # setup in deploy/README.md); fall back to the standard NAS layout.
+  DEPLOY_DIR=/volume1/docker/archive-mail/app/deploy
+fi
 COMPOSE_FILE="$DEPLOY_DIR/compose.yaml"
 ENV_FILE=${ARCHIVE_MAIL_ENV_FILE:-"$DEPLOY_DIR/.env"}
 DOCKER_BIN=${DOCKER_BIN:-/usr/local/bin/docker}
@@ -21,9 +26,13 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
+RESOLVED_DOCKER_BIN="$DOCKER_BIN"
 set -a
 . "$ENV_FILE"
 set +a
+# .env configures the app, not this script — never let a user-writable file
+# redirect which binary this root script executes.
+DOCKER_BIN="$RESOLVED_DOCKER_BIN"
 
 compose() {
   "$DOCKER_BIN" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
