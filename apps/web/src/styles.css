@@ -722,6 +722,16 @@ textarea:focus-visible {
   gap: 2px;
 }
 
+.folder-filter-empty {
+  margin: 6px 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.unread-folder-filter.active {
+  color: var(--green);
+}
+
 .archive-row {
   position: relative;
 }

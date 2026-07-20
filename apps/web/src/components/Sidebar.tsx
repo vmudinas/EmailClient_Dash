@@ -7,6 +7,7 @@ import {
   FolderOpen,
   FolderPlus,
   Inbox,
+  ListFilter,
   LoaderCircle,
   MailCheck,
   Pause,
@@ -99,9 +100,11 @@ export function Sidebar({
 }: SidebarProps) {
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId);
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => loadCollapsedFolders());
+  const [unreadFoldersOnly, setUnreadFoldersOnly] = useState<boolean>(() => loadUnreadFoldersOnly());
   const [dropFolderId, setDropFolderId] = useState<string | null>(null);
   const [draggedFolderId, setDraggedFolderId] = useState<string | null>(null);
   useEffect(() => { saveCollapsedFolders(collapsedFolderIds); }, [collapsedFolderIds]);
+  useEffect(() => { saveUnreadFoldersOnly(unreadFoldersOnly); }, [unreadFoldersOnly]);
   const toggleFolderCollapsed = (folderId: string) => {
     setCollapsedFolderIds((current) => {
       const next = new Set(current);
@@ -118,8 +121,29 @@ export function Sidebar({
     }
     return map;
   }, [folders]);
+  // While the unread filter is on, a folder stays visible when it has unread
+  // mail, is an ancestor of one that does (the tree must stay connected), or
+  // is the current selection (filtering away the open folder would be jarring).
+  const unreadVisibleFolderIds = useMemo(() => {
+    if (!unreadFoldersOnly) return null;
+    const byId = new Map(folders.map((folder) => [folder.id, folder]));
+    const visible = new Set<string>();
+    const includeWithAncestors = (folder: Folder | undefined) => {
+      let current = folder;
+      while (current && !visible.has(current.id)) {
+        visible.add(current.id);
+        current = current.parentId ? byId.get(current.parentId) : undefined;
+      }
+    };
+    for (const folder of folders) {
+      if (folder.unreadCount > 0) includeWithAncestors(folder);
+    }
+    if (selectedFolderId) includeWithAncestors(byId.get(selectedFolderId));
+    return visible;
+  }, [folders, unreadFoldersOnly, selectedFolderId]);
   const renderFolders = (parentId: string | null, depth: number): ReactElement[] => (
     (childrenByParent.get(parentId) ?? []).flatMap((folder) => {
+      if (unreadVisibleFolderIds && !unreadVisibleFolderIds.has(folder.id)) return [];
       const children = childrenByParent.get(folder.id) ?? [];
       const hasChildren = children.length > 0;
       const isCollapsed = collapsedFolderIds.has(folder.id);
@@ -316,6 +340,15 @@ export function Sidebar({
               <span>Folders</span>
               <span className="section-actions">
                 <span className="section-count">{selectedArchive.folderCount}</span>
+                <button
+                  className={`icon-button subtle unread-folder-filter ${unreadFoldersOnly ? "active" : ""}`}
+                  onClick={() => setUnreadFoldersOnly((current) => !current)}
+                  title={unreadFoldersOnly ? "Show all folders" : "Show only folders with unread mail"}
+                  aria-label={unreadFoldersOnly ? "Show all folders" : "Show only folders with unread mail"}
+                  aria-pressed={unreadFoldersOnly}
+                >
+                  <ListFilter size={15} />
+                </button>
                 {!readOnly && selectedArchive.status !== "importing" && (
                   <button className="icon-button subtle" onClick={onCreateFolder} title="Create mailbox" aria-label="Create mailbox"><FolderPlus size={15} /></button>
                 )}
@@ -350,6 +383,9 @@ export function Sidebar({
                 </span>
               </button>
               {renderFolders(null, 0)}
+              {unreadVisibleFolderIds && unreadVisibleFolderIds.size === 0 && (
+                <p className="folder-filter-empty">Every folder is read. Showing folders with unread mail only.</p>
+              )}
             </nav>
           </>
         )}
@@ -423,6 +459,24 @@ function saveCollapsedFolders(ids: Set<string>): void {
     localStorage.setItem(COLLAPSED_FOLDERS_STORAGE_KEY, JSON.stringify([...ids]));
   } catch {
     // Private browsing / storage quota — expand/collapse state just won't persist.
+  }
+}
+
+const UNREAD_FOLDERS_ONLY_STORAGE_KEY = "archive-mail-unread-folders-only";
+
+function loadUnreadFoldersOnly(): boolean {
+  try {
+    return localStorage.getItem(UNREAD_FOLDERS_ONLY_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveUnreadFoldersOnly(enabled: boolean): void {
+  try {
+    localStorage.setItem(UNREAD_FOLDERS_ONLY_STORAGE_KEY, enabled ? "1" : "0");
+  } catch {
+    // Private browsing / storage quota — the filter just won't persist.
   }
 }
 

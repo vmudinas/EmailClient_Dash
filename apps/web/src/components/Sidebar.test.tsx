@@ -143,6 +143,38 @@ describe("Sidebar archive and mailbox actions", () => {
     expect(screen.getAllByLabelText("3 unread, 4 total")).toHaveLength(2);
   });
 
+  it("filters the tree to folders with unread mail, keeping read ancestors of unread children", () => {
+    const parent: Folder = { ...SAVED, id: "folder-parent", name: "Projects", path: "Projects" };
+    const unreadChild: Folder = {
+      ...INBOX,
+      id: "folder-child",
+      parentId: parent.id,
+      name: "Invoices",
+      path: "Projects/Invoices",
+      unreadCount: 2
+    };
+    renderSidebar({ folders: [INBOX, SAVED, parent, unreadChild] });
+
+    expect(screen.getByTitle("Saved")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Show only folders with unread mail" }));
+
+    expect(screen.getByTitle("Inbox")).toBeTruthy();
+    expect(screen.queryByTitle("Saved")).toBeNull();
+    expect(screen.getByTitle("Projects")).toBeTruthy();
+    expect(screen.getByTitle("Invoices")).toBeTruthy();
+    expect(screen.getByText("All mail")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all folders" }));
+    expect(screen.getByTitle("Saved")).toBeTruthy();
+  });
+
+  it("keeps the selected read folder visible while the unread filter is on", () => {
+    renderSidebar({ folders: [INBOX, SAVED], selectedFolderId: SAVED.id });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show only folders with unread mail" }));
+    expect(screen.getByTitle("Saved")).toBeTruthy();
+  });
+
   it("allows active archive removal but hides mailbox mutations until import finishes", () => {
     renderSidebar({
       archives: [{ ...READY_ARCHIVE, status: "importing", name: "Active archive" }]
