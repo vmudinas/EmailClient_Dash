@@ -89,9 +89,10 @@ import type {
   TopContact,
   UploadSession,
   UploadStatus,
+  UserScreenId,
   UserSummary
 } from "@email-client/shared";
-import { DEFAULT_INBOX_TABS } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS, USER_SCREEN_IDS } from "@email-client/shared";
 import type { StoredBlob } from "./blob-store.js";
 
 const EMPTY_STATE: LocalMessageState = {
@@ -271,6 +272,7 @@ export interface UserCreateRecordInput {
   pinHash: string;
   pinSalt: string;
   mustChangePin?: boolean;
+  allowedScreens?: UserScreenId[] | null;
 }
 
 export interface UserUpdateRecordInput {
@@ -280,6 +282,7 @@ export interface UserUpdateRecordInput {
   pinHash?: string;
   pinSalt?: string;
   mustChangePin?: boolean;
+  allowedScreens?: UserScreenId[] | null;
 }
 
 export interface AuthSessionRecord {
@@ -1799,6 +1802,19 @@ export class EmailDatabase {
       const administrator = this.primaryAdminUserId();
       if (administrator) this.claimUnownedUserData(administrator);
     }
+
+    const screenAccessVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (screenAccessVersion < 34) {
+      const userColumns = new Set(
+        (this.db.pragma("table_info(users)") as Array<{ name: string }>).map((column) => column.name)
+      );
+      if (!userColumns.has("allowed_screens")) {
+        // NULL grants every screen, so accounts created before this migration
+        // keep their full access.
+        this.db.exec("ALTER TABLE users ADD COLUMN allowed_screens TEXT;");
+      }
+      this.db.exec("PRAGMA user_version = 34;");
+    }
   }
 
   private reclassifyInboxCategories(): void {
@@ -2033,8 +2049,8 @@ export class EmailDatabase {
     this.db.prepare(`
       INSERT INTO users (
         id, username, display_name, role, pin_hash, pin_salt,
-        is_active, must_change_pin, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        is_active, must_change_pin, allowed_screens, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
     `).run(
       id,
       input.username.trim().toLowerCase(),
@@ -2043,6 +2059,7 @@ export class EmailDatabase {
       input.pinHash,
       input.pinSalt,
       input.mustChangePin ? 1 : 0,
+      input.allowedScreens == null ? null : JSON.stringify(input.allowedScreens),
       now,
       now
     );
@@ -2241,6 +2258,9 @@ export class EmailDatabase {
     if (update.pinHash !== undefined) set("pin_hash", update.pinHash);
     if (update.pinSalt !== undefined) set("pin_salt", update.pinSalt);
     if (update.mustChangePin !== undefined) set("must_change_pin", update.mustChangePin ? 1 : 0);
+    if (update.allowedScreens !== undefined) {
+      set("allowed_screens", update.allowedScreens === null ? null : JSON.stringify(update.allowedScreens));
+    }
     if (fields.length === 0) return current;
     set("updated_at", new Date().toISOString());
     this.db.prepare(`UPDATE users SET ${fields.join(", ")} WHERE id = ?`).run(...values, id);
@@ -6683,6 +6703,7 @@ export class EmailDatabase {
       role: row.role as AccountRole,
       isActive: Boolean(row.is_active),
       mustChangePin: Boolean(row.must_change_pin),
+      allowedScreens: parseAllowedScreens(row.allowed_screens),
       lastLoginAt: row.last_login_at ? String(row.last_login_at) : null,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at)
@@ -7545,6 +7566,20 @@ function referencedMessageIds(headers: Record<string, string>): string[] {
 
 function normalizeInternetMessageId(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function parseAllowedScreens(value: unknown): UserScreenId[] | null {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return null;
+    const screens = parsed.filter((screen): screen is UserScreenId =>
+      typeof screen === "string" && (USER_SCREEN_IDS as readonly string[]).includes(screen));
+    return screens;
+  } catch {
+    // An unreadable value must not lock the account out of every screen.
+    return null;
+  }
 }
 
 function headerValue(headers: Record<string, string>, name: string): string | null {

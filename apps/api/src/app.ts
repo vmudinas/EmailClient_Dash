@@ -60,6 +60,7 @@ import {
   todoCreateSchema,
   todoPatchSchema,
   uploadSessionCreateSchema,
+  userCanAccessScreen,
   userCreateSchema,
   userUpdateSchema,
   type AdminSettings,
@@ -74,7 +75,8 @@ import {
   type ImportOptions,
   type InboxCategory,
   type SessionRole,
-  type SharingState
+  type SharingState,
+  type UserScreenId
 } from "@email-client/shared";
 import type { ApiConfig } from "./config.js";
 import { loadConfig } from "./config.js";
@@ -161,6 +163,35 @@ const BULK_DESTINATION_CREATE_NAME: Record<BulkMoveDestination, string> = {
   archived: "Archived",
   spam: "Spam"
 };
+
+// Maps route patterns to the admin-configurable screen a standard user account
+// must be granted before using them. Mail routes (archives, folders, messages,
+// search) intentionally return null: Mail is every active account's baseline.
+// Read-only lookup routes feeding other screens' dialogs (/api/reply-styles,
+// /api/resumes, /api/inbox-tabs, /api/gmail/connections) also stay open.
+function screenForRoute(route: string): UserScreenId | null {
+  if (route.startsWith("/api/calendar/")
+    || route.startsWith("/api/todos")
+    || route.startsWith("/api/admin/calendar/accounts")
+    || route.endsWith("/calendar-events")) return "calendar";
+  if (route.startsWith("/api/drafts")
+    || route.endsWith("/send")
+    || route.endsWith("/send-as")) return "compose";
+  if (route.startsWith("/api/ai/")
+    || route.includes("/ai/")
+    || route.endsWith("/ai")
+    || route.startsWith("/api/admin/ai-schedules")) return "ai";
+  if (route.startsWith("/api/uploads")
+    || route.startsWith("/api/import-jobs")
+    || route.startsWith("/api/gmail/oauth/")) return "import";
+  if (route.startsWith("/api/admin/reply-styles")
+    || route.startsWith("/api/admin/resumes")
+    || route.startsWith("/api/admin/sender-filing")
+    || route.startsWith("/api/admin/smart-mail-rules")
+    || route.startsWith("/api/admin/inbox-tabs")
+    || route.startsWith("/api/admin/mailbox-tasks")) return "settings";
+  return null;
+}
 
 export interface StartedApi {
   runtime: EmailApiRuntime;
@@ -408,6 +439,15 @@ export class EmailApiRuntime {
       const userId = this.currentUserId(request);
       if (!userId) return;
       const route = request.routeOptions.url || request.url.split("?", 1)[0]!;
+      const session = this.resolveSession(request);
+      if (session?.role === "user") {
+        const screen = screenForRoute(route);
+        if (screen && !userCanAccessScreen(session.user, screen)) {
+          return reply.code(403).send({
+            error: "Access to this feature is disabled for your account. Ask an administrator to enable it."
+          });
+        }
+      }
       if (route.startsWith("/api/admin/users/")) return;
       const params = (request.params ?? {}) as Record<string, unknown>;
       const checks: Array<[Parameters<EmailStore["ownsResource"]>[1], unknown]> = [

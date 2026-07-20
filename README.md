@@ -124,6 +124,7 @@ The first-run `admin` account uses PIN `2332`. Login attempts are throttled per 
 
 - create named administrator or standard user accounts;
 - enable or disable users, change roles, and reset PINs;
+- choose which screens each standard user can open (Calendar, Compose & Drafts, AI tools, Import, Personal settings) — Mail is always available, hidden screens are also blocked by the service, and administrators always have every screen;
 - change their own PIN, which revokes every existing session for that user;
 - inspect and export audit history.
 

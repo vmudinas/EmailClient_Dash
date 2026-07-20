@@ -9,6 +9,7 @@ import {
 } from "electron";
 import {
   importOptionsSchema,
+  userCanAccessScreen,
   type ImportOptions
 } from "@email-client/shared";
 import {
@@ -94,6 +95,9 @@ function registerIpc(api: StartedApi): void {
 
   ipcMain.handle("archive:select-and-import", async (_event, rawOptions: ImportOptions, accessToken: string) => {
     return api.runtime.runDesktopAction(accessToken, "desktop.archive.select_and_import", async (session) => {
+      if (!userCanAccessScreen(session.user, "import")) {
+        throw new Error("Import access is disabled for this account. Ask an administrator to enable it.");
+      }
       const options = importOptionsSchema.parse(rawOptions);
       const selected = await dialog.showOpenDialog(mainWindow!, {
         title: "Import email archive",

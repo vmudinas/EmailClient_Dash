@@ -147,7 +147,10 @@ export class AuthService {
       role: input.role,
       pinHash: hashed.hash,
       pinSalt: hashed.salt,
-      mustChangePin: false
+      mustChangePin: false,
+      // Administrators always see every screen; screen restrictions only make
+      // sense for standard user accounts.
+      allowedScreens: input.role === "admin" ? null : input.allowedScreens ?? null
     });
   }
 
@@ -163,13 +166,18 @@ export class AuthService {
     }
 
     const hashed = update.pin ? hashPin(update.pin) : null;
+    const targetRole = update.role ?? current.role;
+    const allowedScreens = targetRole === "admin"
+      ? (update.role === "admin" || update.allowedScreens !== undefined ? null : undefined)
+      : update.allowedScreens;
     const user = this.database.updateUser(id, {
       displayName: update.displayName,
       role: update.role,
       isActive: update.isActive,
       pinHash: hashed?.hash,
       pinSalt: hashed?.salt,
-      mustChangePin: hashed ? false : undefined
+      mustChangePin: hashed ? false : undefined,
+      allowedScreens
     });
     this.database.revokeUserSessions(id);
     return user;

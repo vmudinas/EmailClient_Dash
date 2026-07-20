@@ -2698,6 +2698,111 @@ describe("Email API mailbox task routes", () => {
   });
 });
 
+describe("Email API per-user screen access", () => {
+  it("lets only admins manage users and enforces admin-granted screens", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const adminLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const adminHeaders = { authorization: `Bearer ${(adminLogin.json() as { accessToken: string }).accessToken}` };
+
+    const invalidScreen = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { username: "casey", displayName: "Casey", role: "user", pin: "4521", allowedScreens: ["not-a-screen"] }
+    });
+    expect(invalidScreen.statusCode).toBe(400);
+
+    const created = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { username: "casey", displayName: "Casey", role: "user", pin: "4521", allowedScreens: ["calendar"] }
+    });
+    expect(created.statusCode).toBe(200);
+    const caseyId = (created.json() as { id: string; allowedScreens: string[] }).id;
+    expect(created.json()).toMatchObject({ allowedScreens: ["calendar"] });
+
+    const login = async () => {
+      const result = await runtime.app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        remoteAddress: "127.0.0.1",
+        payload: { username: "casey", pin: "4521" }
+      });
+      return { authorization: `Bearer ${(result.json() as { accessToken: string }).accessToken}` };
+    };
+    let caseyHeaders = await login();
+    const request = (url: string, headers: Record<string, string>) =>
+      runtime.app.inject({ method: "GET", url, headers, remoteAddress: "127.0.0.1" });
+
+    const manageUsers = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: caseyHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { username: "rogue", displayName: "Rogue", role: "admin", pin: "9999" }
+    });
+    expect(manageUsers.statusCode).toBe(403);
+    const editUsers = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${caseyId}`,
+      headers: caseyHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { allowedScreens: null }
+    });
+    expect(editUsers.statusCode).toBe(403);
+
+    expect((await request("/api/archives", caseyHeaders)).statusCode).toBe(200);
+    expect((await request("/api/todos?start=2026-07-01&end=2026-07-31", caseyHeaders)).statusCode).toBe(200);
+    expect((await request("/api/drafts", caseyHeaders)).statusCode).toBe(403);
+    expect((await request("/api/ai/review-queue", caseyHeaders)).statusCode).toBe(403);
+    expect((await request("/api/uploads", caseyHeaders)).statusCode).toBe(403);
+    expect((await request("/api/import-jobs", caseyHeaders)).statusCode).toBe(403);
+
+    const widened = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${caseyId}`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { allowedScreens: ["calendar", "compose"] }
+    });
+    expect(widened.statusCode).toBe(200);
+    expect(widened.json()).toMatchObject({ allowedScreens: ["calendar", "compose"] });
+
+    expect((await request("/api/drafts", caseyHeaders)).statusCode).toBe(401);
+    caseyHeaders = await login();
+    expect((await request("/api/drafts", caseyHeaders)).statusCode).toBe(200);
+    expect((await request("/api/ai/review-queue", caseyHeaders)).statusCode).toBe(403);
+
+    const promoted = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${caseyId}`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { role: "admin" }
+    });
+    expect(promoted.statusCode).toBe(200);
+    expect(promoted.json()).toMatchObject({ role: "admin", allowedScreens: null });
+  });
+});
+
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "archive-mail-api-"));
   directories.push(directory);

@@ -1047,6 +1047,21 @@ export interface RuntimeConfig {
   platform: "desktop" | "browser" | "mobile";
 }
 
+export const USER_SCREEN_IDS = ["calendar", "compose", "ai", "import", "settings"] as const;
+export type UserScreenId = typeof USER_SCREEN_IDS[number];
+
+export const USER_SCREENS: ReadonlyArray<{
+  id: UserScreenId;
+  label: string;
+  description: string;
+}> = [
+  { id: "calendar", label: "Calendar", description: "Calendar view, events, and to-dos." },
+  { id: "compose", label: "Compose & Drafts", description: "Write, save, and send email." },
+  { id: "ai", label: "AI tools", description: "AI review queue, analysis, and reply drafts." },
+  { id: "import", label: "Import", description: "Import PST and MBOX archives." },
+  { id: "settings", label: "Personal settings", description: "Rules, reply styles, inbox tabs, résumés, and calendar accounts." }
+];
+
 export interface UserSummary {
   id: string;
   username: string;
@@ -1054,9 +1069,19 @@ export interface UserSummary {
   role: AccountRole;
   isActive: boolean;
   mustChangePin: boolean;
+  /** Screens a non-admin account may open. null grants every screen; Mail is always available. */
+  allowedScreens: UserScreenId[] | null;
   lastLoginAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export function userCanAccessScreen(
+  user: Pick<UserSummary, "role" | "allowedScreens">,
+  screen: UserScreenId
+): boolean {
+  if (user.role === "admin") return true;
+  return !user.allowedScreens || user.allowedScreens.includes(screen);
 }
 
 export interface AuthSessionInfo {
@@ -1504,11 +1529,16 @@ export const pinChangeSchema = z.object({
 
 export type PinChange = z.infer<typeof pinChangeSchema>;
 
+const allowedScreensSchema = z.array(z.enum(USER_SCREEN_IDS))
+  .max(USER_SCREEN_IDS.length)
+  .transform((screens) => [...new Set(screens)]);
+
 export const userCreateSchema = z.object({
   username: usernameSchema,
   displayName: z.string().trim().min(1).max(120),
   role: z.enum(["admin", "user"]),
-  pin: pinSchema
+  pin: pinSchema,
+  allowedScreens: allowedScreensSchema.nullable().optional()
 }).strict();
 
 export type UserCreate = z.infer<typeof userCreateSchema>;
@@ -1517,7 +1547,8 @@ export const userUpdateSchema = z.object({
   displayName: z.string().trim().min(1).max(120).optional(),
   role: z.enum(["admin", "user"]).optional(),
   isActive: z.boolean().optional(),
-  pin: pinSchema.optional()
+  pin: pinSchema.optional(),
+  allowedScreens: allowedScreensSchema.nullable().optional()
 }).strict().refine(
   (value) => Object.keys(value).length > 0,
   "At least one user setting is required"

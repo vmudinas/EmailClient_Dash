@@ -1367,6 +1367,7 @@ const USERS: UserSummary[] = [{
   role: "admin",
   isActive: true,
   mustChangePin: true,
+  allowedScreens: null,
   lastLoginAt: null,
   createdAt: "2026-07-13T00:00:00.000Z",
   updatedAt: "2026-07-13T00:00:00.000Z"
@@ -1388,6 +1389,7 @@ const USER_SESSION: AuthSessionInfo = {
     role: "user",
     isActive: true,
     mustChangePin: false,
+    allowedScreens: null,
     lastLoginAt: null,
     createdAt: "2026-07-13T00:00:00.000Z",
     updatedAt: "2026-07-13T00:00:00.000Z"
