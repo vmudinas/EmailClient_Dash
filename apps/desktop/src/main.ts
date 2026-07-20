@@ -105,8 +105,6 @@ function registerIpc(api: StartedApi): void {
         ]
       });
       if (selected.canceled || !selected.filePaths[0]) return null;
-      // Without an explicit owner the archive would fall back to the primary
-      // admin's workspace instead of the signed-in desktop user's.
       return api.runtime.imports.startImport(
         selected.filePaths[0],
         options,
@@ -118,17 +116,26 @@ function registerIpc(api: StartedApi): void {
   });
 
   ipcMain.handle("import:cancel", (_event, jobId: string, accessToken: string) => {
-    return api.runtime.runDesktopAction(accessToken, "desktop.import.cancel", () => {
+    return api.runtime.runDesktopAction(accessToken, "desktop.import.cancel", (session) => {
+      if (!api.runtime.database.ownsResource(session.user.id, "import-job", jobId)) {
+        throw new Error("Import job not found");
+      }
       return api.runtime.imports.cancelImport(jobId);
     });
   });
   ipcMain.handle("import:resume", (_event, jobId: string, accessToken: string) => {
-    return api.runtime.runDesktopAction(accessToken, "desktop.import.resume", () => {
+    return api.runtime.runDesktopAction(accessToken, "desktop.import.resume", (session) => {
+      if (!api.runtime.database.ownsResource(session.user.id, "import-job", jobId)) {
+        throw new Error("Import job not found");
+      }
       return api.runtime.imports.resumeImport(jobId);
     });
   });
   ipcMain.handle("archive:remove", async (_event, archiveId: string, accessToken: string) => {
-    await api.runtime.runDesktopAction(accessToken, "desktop.archive.remove", () => {
+    await api.runtime.runDesktopAction(accessToken, "desktop.archive.remove", (session) => {
+      if (!api.runtime.database.ownsResource(session.user.id, "archive", archiveId)) {
+        throw new Error("Archive not found");
+      }
       return api.runtime.removeArchive(archiveId);
     });
   });
