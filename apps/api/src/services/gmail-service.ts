@@ -35,6 +35,7 @@ const INBOX_RECONCILIATION_INTERVAL_MS = 60 * 60 * 1000;
 
 interface PendingAuthorization {
   request: GmailAuthRequest;
+  ownerUserId: string | null;
   verifier: string;
   redirectUri: string;
   expiresAt: number;
@@ -200,8 +201,8 @@ export class GmailService {
     }
   }
 
-  listConnections(): GmailConnection[] {
-    return this.database.listGmailConnections();
+  listConnections(ownerUserId?: string): GmailConnection[] {
+    return this.database.listGmailConnections(ownerUserId);
   }
 
   async accessTokenForConnection(connectionId: string, signal: AbortSignal): Promise<string> {
@@ -214,13 +215,13 @@ export class GmailService {
     return this.accessToken(connection, signal);
   }
 
-  startAuthorization(request: GmailAuthRequest): GmailAuthStart {
+  startAuthorization(request: GmailAuthRequest, ownerUserId: string | null = null): GmailAuthStart {
     if (!this.clientId) {
       throw new GmailConfigurationError(
         "Gmail is not configured. Open Admin settings, choose Gmail, and load a Google Desktop OAuth JSON file."
       );
     }
-    this.validateDestination(request);
+    this.validateDestination(request, ownerUserId);
     this.removeExpiredAuthorizations();
 
     const state = randomBytes(32).toString("base64url");
@@ -230,6 +231,7 @@ export class GmailService {
     const expiresAt = Date.now() + 10 * 60 * 1000;
     this.pending.set(state, {
       request,
+      ownerUserId,
       verifier,
       redirectUri,
       expiresAt,
@@ -276,9 +278,10 @@ export class GmailService {
 
     let createdArchiveId: string | null = null;
     try {
-      const destination = this.resolveDestination(pending.request, profile.emailAddress);
+      const destination = this.resolveDestination(pending.request, profile.emailAddress, pending.ownerUserId);
       createdArchiveId = destination.createdArchiveId;
       const connection = this.database.createGmailConnection({
+        ownerUserId: pending.ownerUserId,
         email: profile.emailAddress,
         archiveId: destination.archiveId,
         folderId: destination.folderId,
@@ -424,7 +427,7 @@ export class GmailService {
       let processedMessages = skippedMessages;
       for (const group of mutations.values()) {
         throwIfAborted(controller.signal);
-        await this.modifyTargets(connection, group.targets, group.mutation, accessToken, controller.signal);
+        await this.modifyTargets(connection, group.targets, group.mutation, controller.signal);
         appliedMessages += group.targets.length;
         processedMessages += group.targets.length;
         this.database.updateGmailSync(connectionId, {
@@ -716,7 +719,7 @@ export class GmailService {
         byMutation.set(key, group);
       }
       for (const group of byMutation.values()) {
-        await this.modifyTargets(connection, group.targets, group.mutation, accessToken, signal);
+        await this.modifyTargets(connection, group.targets, group.mutation, signal);
       }
       this.recordMailboxMutation(connection, "message_move", connectionTargets.length, {
         targetFolderId,
@@ -732,21 +735,28 @@ export class GmailService {
     );
   }
 
+  // Re-reads the connection row so refreshes persisted by any call site are shared,
+  // and accessToken() only contacts Google when under a minute of validity remains.
+  // Long syncs and reconciliations must resolve their token this way at each use
+  // instead of capturing the string once: a large mailbox takes longer than the
+  // roughly one-hour token lifetime, and a captured token 401s near the end.
+  private async freshAccessToken(connectionId: string, signal: AbortSignal): Promise<string> {
+    return this.accessToken(this.requireConnection(connectionId), signal);
+  }
+
   private async modifyTargets(
     connection: GmailConnectionRecord,
     targets: GmailMessageMutationTarget[],
     mutation: GmailLabelMutation,
-    existingAccessToken?: string,
     existingSignal?: AbortSignal
   ): Promise<void> {
     if (targets.length === 0 || (mutation.addLabelIds.length === 0 && mutation.removeLabelIds.length === 0)) return;
     const signal = existingSignal ?? AbortSignal.timeout(60_000);
-    const accessToken = existingAccessToken ?? await this.accessToken(connection, signal);
     for (let index = 0; index < targets.length; index += 1_000) {
       const ids = targets.slice(index, index + 1_000).map((target) => target.gmailMessageId);
       await this.gmailJson<unknown>(
         `${GMAIL_API}/users/me/messages/batchModify`,
-        accessToken,
+        await this.freshAccessToken(connection.id, signal),
         signal,
         {
           method: "POST",
@@ -1056,7 +1066,7 @@ export class GmailService {
           const exists = this.database.hasMessage(connection.archiveId, sourceKey);
           const rawMessage = await this.gmailJson<GmailRawMessage>(
             `${GMAIL_API}/users/me/messages/${encodeURIComponent(messageId)}?format=${exists ? "metadata" : "raw"}`,
-            accessToken,
+            await this.freshAccessToken(connectionId, controller.signal),
             controller.signal
           );
           const labelIds = rawMessage.labelIds ?? [];
@@ -1119,7 +1129,7 @@ export class GmailService {
           connection,
           mailboxReconciliationCandidates,
           labelsById,
-          accessToken,
+          await this.freshAccessToken(connectionId, controller.signal),
           controller.signal
         );
       }
@@ -1129,7 +1139,7 @@ export class GmailService {
           await this.reconcileKnownRemoteInbox(
             connection,
             labelsById,
-            accessToken,
+            await this.freshAccessToken(connectionId, controller.signal),
             controller.signal,
             new Set(mailboxReconciliationCandidates.map((candidate) => candidate.gmailMessageId))
           );
@@ -1268,7 +1278,7 @@ export class GmailService {
 
     let reconciledMessages = 0;
     for (const group of mutations.values()) {
-      await this.modifyTargets(connection, group.targets, group.mutation, accessToken, signal);
+      await this.modifyTargets(connection, group.targets, group.mutation, signal);
       reconciledMessages += group.targets.length;
     }
     if (reconciledMessages > 0) {
@@ -1332,7 +1342,7 @@ export class GmailService {
 
     let reconciledMessages = 0;
     for (const group of mutations.values()) {
-      await this.modifyTargets(connection, group.targets, group.mutation, accessToken, signal);
+      await this.modifyTargets(connection, group.targets, group.mutation, signal);
       reconciledMessages += group.targets.length;
     }
     this.database.recordDiagnostic({
@@ -1592,12 +1602,14 @@ export class GmailService {
 
   private resolveDestination(
     request: GmailAuthRequest,
-    email: string
+    email: string,
+    ownerUserId: string | null
   ): { archiveId: string; folderId: string; createdArchiveId: string | null } {
     let archiveId = request.archiveId ?? null;
     let createdArchiveId: string | null = null;
     if (!archiveId) {
       const archive = this.database.createArchive({
+        ownerUserId,
         name: request.archiveName || `Gmail - ${email}`,
         sourceType: "gmail",
         fingerprint: `gmail:${randomUUID()}`,
@@ -1623,10 +1635,13 @@ export class GmailService {
     return { archiveId, folderId, createdArchiveId };
   }
 
-  private validateDestination(request: GmailAuthRequest): void {
+  private validateDestination(request: GmailAuthRequest, ownerUserId: string | null): void {
     if (!request.archiveId) return;
     const archive = this.database.getArchive(request.archiveId);
     if (!archive) throw new Error("The selected destination archive no longer exists");
+    if (ownerUserId && !this.database.ownsResource(ownerUserId, "archive", archive.id)) {
+      throw new Error("The selected destination archive no longer exists");
+    }
     if (archive.status === "importing" || archive.status === "failed") {
       throw new Error("Choose an archive that has finished importing");
     }

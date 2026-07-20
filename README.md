@@ -4,6 +4,10 @@ Archive Mail is a local React and Electron email archive reader. PST and MBOX in
 
 AI-powered message analysis (OpenAI or DeepSeek) is available manually and through configurable scheduled agents. The client also stores manual drafts and can schedule work-related reply drafts, with an optional resume attachment for development opportunities. Every generated draft remains local until a user reviews and sends it. A ChatGPT or DeepSeek chat subscription cannot be used directly as API credit.
 
+## Product roadmap
+
+The planned multi-page Property Management and Tenant Portal expansion is documented in [`docs/property-management/README.md`](docs/property-management/README.md). The plan covers navigation, roles, tenant isolation, properties, leases, documents, service requests, rent ledgers, payments, reminders, deployment, and phased delivery.
+
 ## Run it
 
 Requirements: Node.js 22 or newer.
@@ -106,11 +110,15 @@ At widths up to 800px, Archive Mail uses separate folder, message, and reader sc
 
 Compose, review, import, and admin dialogs use the full viewport on phones. Calendar switches to an agenda view; calendar selection, the highlighted monthly date picker, and the local to-do list open as touch-friendly sheets. Admin settings use section-level navigation instead of the desktop side menu. On narrow phones the news ticker is hidden so the message area retains usable height; the stock ticker remains visible.
 
-The desktop QR/LAN sharing flow is still intentionally read-only. Making archive, compose, calendar, or admin mutations from a separate phone requires a future authenticated HTTPS deployment rather than weakening the paired viewer role.
+The desktop QR/LAN sharing flow is intentionally read-only. A Docker/server deployment can opt in to normal username/PIN login from another device with `EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true`; use it only on a trusted LAN or behind HTTPS. Paired QR sessions remain read-only.
 
 ## Login, users, and audit
 
 Archive Mail requires a named user and PIN on every service/application launch. PINs are stored with a random salt and scrypt hash. Session tokens are stored only as SHA-256 hashes, bound to the login IP address, and revoked when the service starts, a PIN changes, or an administrator changes that user.
+
+Each named user has a private workspace. Archives, imported messages and attachments, Gmail connections, Apple and Google calendars, drafts, to-dos, resumes, reply styles, inbox tabs, sender rules, smart rules, AI review state, and diagnostics are visible only to their owner. A new standard user starts with an empty workspace and uses **Personal settings** to connect their own Gmail or Apple calendar and configure their own mail preferences. Provider credentials and other service-wide settings remain administrator-managed.
+
+When an existing installation first upgrades to the private-workspace database schema, all legacy unowned data is assigned to the first active administrator so no existing mail or configuration is lost. New resources are owned by the user who creates or connects them. This migration runs automatically when the API starts; no manual database command is required.
 
 The first-run `admin` account uses PIN `2332`. Login attempts are throttled per IP address. Under **Admin settings** an administrator can:
 
@@ -121,7 +129,7 @@ The first-run `admin` account uses PIN `2332`. Login attempts are throttled per 
 
 The audit table is separate from Diagnostics and is not removed by **Clear logs**. Every API request and privileged Electron operation records the named user when available, effective role, timestamp, action, HTTP result, direct client IP address, route, and user agent. Request bodies, PINs, bearer tokens, Gmail tokens, and email content are not stored in audit details.
 
-LAN viewers must have both a current QR pairing link and a valid Archive Mail username/PIN. Their effective session remains read-only even when the account is an administrator.
+LAN viewers using desktop sharing must have both a current QR pairing link and a valid Archive Mail username/PIN. Their effective session remains read-only even when the account is an administrator. When `EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true`, users may instead sign in directly and receive their configured role without a pairing link.
 
 ## Database adapters and connection settings
 

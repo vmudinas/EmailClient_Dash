@@ -401,6 +401,83 @@ export class EmailApiRuntime {
     }, (_request, body, done) => {
       done(null, body);
     });
+    this.app.addHook("preHandler", async (request, reply) => {
+      if (!request.url.startsWith("/api/")
+        || request.url.startsWith("/api/auth/")
+        || request.url.startsWith("/api/health")) return;
+      const userId = this.currentUserId(request);
+      if (!userId) return;
+      const route = request.routeOptions.url || request.url.split("?", 1)[0]!;
+      if (route.startsWith("/api/admin/users/")) return;
+      const params = (request.params ?? {}) as Record<string, unknown>;
+      const checks: Array<[Parameters<EmailStore["ownsResource"]>[1], unknown]> = [
+        ["archive", params.archiveId],
+        ["folder", params.folderId],
+        ["message", params.messageId],
+        ["attachment", params.attachmentId],
+        ["gmail-connection", params.connectionId],
+        ["calendar-account", params.accountId],
+        ["todo", params.todoId],
+        ["upload", params.uploadId],
+        ["draft", params.draftId],
+        ["resume", params.resumeId],
+        ["reply-style", params.styleId],
+        ["ai-schedule", params.scheduleId],
+        ["follow-up", params.followUpId]
+      ];
+      if (typeof params.jobId === "string") {
+        checks.push([route.startsWith("/api/ai/jobs/") ? "ai-job" : "import-job", params.jobId]);
+      }
+      if (typeof params.ruleId === "string") {
+        checks.push([route.includes("smart-mail-rules") ? "smart-rule" : "sender-rule", params.ruleId]);
+      }
+      const query = request.query && typeof request.query === "object"
+        ? request.query as Record<string, unknown>
+        : null;
+      if (query) {
+        checks.push(["archive", query.archiveId], ["folder", query.folderId]);
+      }
+      const body = request.body && typeof request.body === "object"
+        ? request.body as Record<string, unknown>
+        : null;
+      if (body) {
+        checks.push(
+          ["archive", body.archiveId],
+          ["archive", body.targetArchiveId],
+          ["archive", body.replaceArchiveId],
+          ["folder", body.folderId],
+          ["folder", body.parentId],
+          ["folder", body.targetFolderId],
+          ["folder", body.destinationFolderId],
+          ["message", body.messageId],
+          ["message", body.sourceMessageId],
+          ["gmail-connection", body.connectionId],
+          ["gmail-connection", body.gmailConnectionId],
+          ["resume", body.resumeId],
+          ["reply-style", body.replyStyleId]
+        );
+        if (Array.isArray(body.messageIds)) {
+          const messageIds = body.messageIds.filter((id): id is string => typeof id === "string");
+          if (!this.database.ownsAllResources(userId, "message", messageIds)) {
+            return reply.code(404).send({ error: "Resource not found" });
+          }
+        }
+        if (Array.isArray(body.ruleIds)) {
+          const ruleIds = body.ruleIds.filter((id): id is string => typeof id === "string");
+          if (ruleIds.some((id) => this.database.resourceExists("smart-rule", id)
+            && !this.database.ownsResource(userId, "smart-rule", id))) {
+            return reply.code(404).send({ error: "Resource not found" });
+          }
+        }
+      }
+      for (const [resource, id] of checks) {
+        if (typeof id === "string" && id
+          && this.database.resourceExists(resource, id)
+          && !this.database.ownsResource(userId, resource, id)) {
+          return reply.code(404).send({ error: "Resource not found" });
+        }
+      }
+    });
     this.app.addHook("onResponse", async (request, reply) => {
       if (!request.url.startsWith("/api/")
         || request.url.startsWith("/api/auth/")
@@ -419,7 +496,8 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: "Enter a valid username and 4 to 12 digit PIN" });
       }
       const remote = !isLoopback(request.ip);
-      if (remote && !this.isValidPairingToken(parsed.data.pairingToken)) {
+      const pairedViewer = remote && this.isValidPairingToken(parsed.data.pairingToken);
+      if (remote && !pairedViewer && !this.config.allowRemoteLogin) {
         this.recordAuthAudit(request, null, "auth.login", 403, false, { reason: "pairing_required" });
         return reply.code(403).send({ error: "A valid desktop pairing link is required" });
       }
@@ -429,8 +507,8 @@ export class EmailApiRuntime {
           pin: parsed.data.pin,
           ipAddress: request.ip,
           userAgent: request.headers["user-agent"] ?? null,
-          roleCap: remote ? "viewer" : undefined,
-          expiresAtCap: remote ? this.shareExpiresAt : null
+          roleCap: pairedViewer ? "viewer" : undefined,
+          expiresAtCap: pairedViewer ? this.shareExpiresAt : null
         });
         const session = this.auth.authenticate(result.accessToken, request.ip);
         this.recordAuthAudit(request, session, "auth.login", 200, true);
@@ -478,7 +556,7 @@ export class EmailApiRuntime {
 
     this.app.get("/api/archives", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
-      return this.database.listArchives();
+      return this.database.listArchives(this.currentUserId(request) ?? undefined);
     });
 
     this.app.delete<{ Params: { archiveId: string } }>(
@@ -720,6 +798,7 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: "Invalid inbox category" });
       }
       return this.database.listMessages({
+        ownerUserId: this.currentUserId(request) ?? undefined,
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
         isRead: optionalBoolean(request.query.isRead),
@@ -740,6 +819,7 @@ export class EmailApiRuntime {
     }>("/api/messages/category-counts", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
       return this.database.countInboxCategories({
+        ownerUserId: this.currentUserId(request) ?? undefined,
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
         isRead: optionalBoolean(request.query.isRead)
@@ -760,7 +840,7 @@ export class EmailApiRuntime {
     this.app.patch<{ Params: { archiveId: string }; Body: unknown }>(
       "/api/admin/inbox-tabs/:archiveId",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         const parsed = inboxTabSettingsUpdateSchema.safeParse(request.body);
         if (!parsed.success) {
           return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid Inbox tab settings" });
@@ -788,7 +868,7 @@ export class EmailApiRuntime {
     this.app.post<{ Params: { archiveId: string } }>(
       "/api/admin/inbox-tabs/:archiveId/reclassify",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         try {
           const result = this.database.reclassifyInboxMessages(request.params.archiveId);
           this.database.recordDiagnostic({
@@ -838,6 +918,7 @@ export class EmailApiRuntime {
       }
       return this.database.search({
         q: query,
+        ownerUserId: this.currentUserId(request) ?? undefined,
         archiveId: request.query.archiveId,
         folderId: request.query.folderId,
         isRead: optionalBoolean(request.query.isRead),
@@ -896,7 +977,10 @@ export class EmailApiRuntime {
       if (status && !["pending", "completed", "dismissed"].includes(status)) {
         return reply.code(400).send({ error: "Choose a valid follow-up status" });
       }
-      return this.database.listMessageFollowUps(status as "pending" | "completed" | "dismissed" | undefined);
+      return this.database.listMessageFollowUps(
+        status as "pending" | "completed" | "dismissed" | undefined,
+        this.currentUserId(request) ?? undefined
+      );
     });
 
     this.app.patch<{ Params: { followUpId: string }; Body: unknown }>(
@@ -1342,12 +1426,12 @@ export class EmailApiRuntime {
 
     this.app.get("/api/ai/review-queue", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
-      return this.database.getAiReviewQueue();
+      return this.database.getAiReviewQueue(100, this.currentUserId(request) ?? undefined);
     });
 
     this.app.post("/api/ai/review-queue/review-all", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
-      return this.database.markAllMessageAnalysesReviewed();
+      return this.database.markAllMessageAnalysesReviewed(this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Params: { messageId: string } }>(
@@ -1364,7 +1448,7 @@ export class EmailApiRuntime {
 
     this.app.get("/api/reply-styles", async (request, reply) => {
       if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
-      return this.database.listReplyStyles();
+      return this.database.listReplyStyles(this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Params: { jobId: string } }>(
@@ -1402,7 +1486,7 @@ export class EmailApiRuntime {
 
     this.app.get("/api/gmail/connections", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
-      return this.gmail.listConnections();
+      return this.gmail.listConnections(this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Body: unknown }>("/api/gmail/oauth/start", async (request, reply) => {
@@ -1412,10 +1496,11 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid Gmail destination" });
       }
       try {
-        return this.gmail.startAuthorization(parsed.data);
+        return this.gmail.startAuthorization(parsed.data, this.currentUserId(request));
       } catch (error) {
         const message = error instanceof Error ? error.message : "Gmail authorization could not start";
         this.database.recordDiagnostic({
+          ownerUserId: this.currentUserId(request),
           level: "error",
           category: "gmail",
           message,
@@ -1565,12 +1650,12 @@ export class EmailApiRuntime {
 
     this.app.get("/api/drafts", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
-      return this.drafts.list();
+      return this.drafts.list(this.currentUserId(request) ?? undefined);
     });
 
     this.app.get("/api/resumes", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
-      return this.resumes.list();
+      return this.resumes.list(this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Body: unknown }>("/api/drafts", async (request, reply) => {
@@ -1580,7 +1665,7 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid draft" });
       }
       try {
-        return this.drafts.create(parsed.data);
+        return this.drafts.create(parsed.data, this.currentUserId(request));
       } catch (error) {
         return reply.code(400).send({ error: error instanceof Error ? error.message : "Draft could not be saved" });
       }
@@ -1638,7 +1723,12 @@ export class EmailApiRuntime {
           return reply.code(400).send({ error: "timeMin and timeMax query parameters are required" });
         }
         try {
-          return await this.calendar.listEvents(request.params.connectionId, timeMin, timeMax);
+          return await this.calendar.listEvents(
+            request.params.connectionId,
+            timeMin,
+            timeMax,
+            this.currentUserId(request) ?? undefined
+          );
         } catch (error) {
           return this.calendarErrorReply(reply, error);
         }
@@ -1648,7 +1738,7 @@ export class EmailApiRuntime {
     this.app.get("/api/calendar/sources", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
       try {
-        return await this.calendar.listSources();
+        return await this.calendar.listSources(this.currentUserId(request) ?? undefined);
       } catch (error) {
         return this.calendarErrorReply(reply, error);
       }
@@ -1664,7 +1754,12 @@ export class EmailApiRuntime {
           return reply.code(400).send({ error: "timeMin and timeMax query parameters are required" });
         }
         try {
-          return await this.calendar.listSourceEvents(request.params.sourceId, timeMin, timeMax);
+          return await this.calendar.listSourceEvents(
+            request.params.sourceId,
+            timeMin,
+            timeMax,
+            this.currentUserId(request) ?? undefined
+          );
         } catch (error) {
           return this.calendarErrorReply(reply, error);
         }
@@ -1680,7 +1775,11 @@ export class EmailApiRuntime {
           return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
         }
         try {
-          return await this.calendar.createSourceEvent(request.params.sourceId, parsed.data);
+          return await this.calendar.createSourceEvent(
+            request.params.sourceId,
+            parsed.data,
+            this.currentUserId(request) ?? undefined
+          );
         } catch (error) {
           return this.calendarErrorReply(reply, error);
         }
@@ -1696,7 +1795,12 @@ export class EmailApiRuntime {
           return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
         }
         try {
-          return await this.calendar.updateSourceEvent(request.params.sourceId, request.params.eventId, parsed.data);
+          return await this.calendar.updateSourceEvent(
+            request.params.sourceId,
+            request.params.eventId,
+            parsed.data,
+            this.currentUserId(request) ?? undefined
+          );
         } catch (error) {
           return this.calendarErrorReply(reply, error);
         }
@@ -1708,7 +1812,11 @@ export class EmailApiRuntime {
       async (request, reply) => {
         if (!this.requireRole(request, reply, ["local", "admin"])) return;
         try {
-          await this.calendar.deleteSourceEvent(request.params.sourceId, request.params.eventId);
+          await this.calendar.deleteSourceEvent(
+            request.params.sourceId,
+            request.params.eventId,
+            this.currentUserId(request) ?? undefined
+          );
           return reply.code(204).send();
         } catch (error) {
           return this.calendarErrorReply(reply, error);
@@ -1728,7 +1836,11 @@ export class EmailApiRuntime {
           return reply.code(404).send({ error: "Message not found" });
         }
         try {
-          const created = await this.calendar.createEvent(parsed.data.connectionId, parsed.data.event);
+          const created = await this.calendar.createEvent(
+            parsed.data.connectionId,
+            parsed.data.event,
+            this.currentUserId(request) ?? undefined
+          );
           this.database.linkMessageCalendarEvent(request.params.messageId, parsed.data.connectionId, created);
           return created;
         } catch (error) {
@@ -1746,7 +1858,11 @@ export class EmailApiRuntime {
           return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
         }
         try {
-          return await this.calendar.createEvent(request.params.connectionId, parsed.data);
+          return await this.calendar.createEvent(
+            request.params.connectionId,
+            parsed.data,
+            this.currentUserId(request) ?? undefined
+          );
         } catch (error) {
           return this.calendarErrorReply(reply, error);
         }
@@ -1762,7 +1878,12 @@ export class EmailApiRuntime {
           return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid calendar event" });
         }
         try {
-          return await this.calendar.updateEvent(request.params.connectionId, request.params.eventId, parsed.data);
+          return await this.calendar.updateEvent(
+            request.params.connectionId,
+            request.params.eventId,
+            parsed.data,
+            this.currentUserId(request) ?? undefined
+          );
         } catch (error) {
           return this.calendarErrorReply(reply, error);
         }
@@ -1774,7 +1895,11 @@ export class EmailApiRuntime {
       async (request, reply) => {
         if (!this.requireRole(request, reply, ["local", "admin"])) return;
         try {
-          await this.calendar.deleteEvent(request.params.connectionId, request.params.eventId);
+          await this.calendar.deleteEvent(
+            request.params.connectionId,
+            request.params.eventId,
+            this.currentUserId(request) ?? undefined
+          );
           this.database.unlinkMessageCalendarEvent(request.params.connectionId, request.params.eventId);
           return reply.code(204).send();
         } catch (error) {
@@ -1790,7 +1915,7 @@ export class EmailApiRuntime {
       if (!start || !end) {
         return reply.code(400).send({ error: "start and end query parameters are required" });
       }
-      return this.database.listTodos(start, end);
+      return this.database.listTodos(start, end, this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Body: unknown }>("/api/todos", async (request, reply) => {
@@ -1799,7 +1924,7 @@ export class EmailApiRuntime {
       if (!parsed.success) {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid to-do item" });
       }
-      return reply.code(201).send(this.database.createTodo(parsed.data));
+      return reply.code(201).send(this.database.createTodo(parsed.data, this.currentUserId(request)));
     });
 
     this.app.patch<{ Params: { todoId: string }; Body: unknown }>(
@@ -1826,7 +1951,7 @@ export class EmailApiRuntime {
 
     this.app.get("/api/import-jobs", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
-      return this.database.listImportJobs();
+      return this.database.listImportJobs(this.currentUserId(request) ?? undefined);
     });
 
     this.app.get<{ Params: { jobId: string } }>(
@@ -1889,7 +2014,13 @@ export class EmailApiRuntime {
       const options = importOptionsSchema.safeParse(request.body.options ?? {});
       if (!options.success) return reply.code(400).send({ error: "Invalid import options" });
       try {
-        return await this.imports.startImport(request.body.sourcePath, options.data);
+        return await this.imports.startImport(
+          request.body.sourcePath,
+          options.data,
+          false,
+          basename(request.body.sourcePath),
+          this.currentUserId(request)
+        );
       } catch (error) {
         return reply.code(400).send({
           error: error instanceof Error ? error.message : "Import could not be started"
@@ -1904,7 +2035,7 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid upload" });
       }
       try {
-        return await this.uploads.createOrResume(parsed.data);
+        return await this.uploads.createOrResume(parsed.data, this.currentUserId(request));
       } catch (error) {
         if (error instanceof UploadValidationError) {
           return reply.code(400).send({ error: error.message });
@@ -1915,7 +2046,7 @@ export class EmailApiRuntime {
 
     this.app.get("/api/uploads", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
-      return this.uploads.list();
+      return this.uploads.list(this.currentUserId(request) ?? undefined);
     });
 
     this.app.get<{ Params: { uploadId: string } }>(
@@ -1991,31 +2122,37 @@ export class EmailApiRuntime {
       Querystring: { level?: string; category?: string; jobId?: string; limit?: string };
     }>("/api/diagnostics", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const userId = this.currentUserId(request) ?? undefined;
+      const includeGlobal = Boolean(userId && userId === this.database.primaryAdminUserId());
       return {
         events: this.database.listDiagnostics({
           level: diagnosticLevel(request.query.level),
           category: diagnosticCategory(request.query.category),
           jobId: request.query.jobId,
-          limit: optionalNumber(request.query.limit)
+          limit: optionalNumber(request.query.limit),
+          ownerUserId: userId,
+          includeGlobal
         }),
-        importJobs: this.database.listImportJobs(),
-        uploads: this.database.listUploadSessions(100),
-        gmailConnections: this.gmail.listConnections(),
-        aiJobs: this.database.listAiJobs(300).map(redactAiJobPrompt)
+        importJobs: this.database.listImportJobs(userId),
+        uploads: this.database.listUploadSessions(100, userId),
+        gmailConnections: this.gmail.listConnections(userId),
+        aiJobs: this.database.listAiJobs(300, userId).map(redactAiJobPrompt)
       };
     });
 
     this.app.get("/api/diagnostics/export", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      if (!this.requireRole(request, reply, ["admin"])) return;
       const exportedAt = new Date().toISOString();
+      const userId = this.currentUserId(request) ?? undefined;
+      const includeGlobal = Boolean(userId && userId === this.database.primaryAdminUserId());
       const payload = {
         exportedAt,
         databasePath: this.database.path,
-        events: this.database.listAllDiagnostics(),
-        importJobs: this.database.listImportJobs(),
-        uploads: this.database.listUploadSessions(200),
-        gmailConnections: this.gmail.listConnections(),
-        aiJobs: this.database.listAiJobs(1_000).map(redactAiJobPrompt)
+        events: this.database.listAllDiagnostics(userId, includeGlobal),
+        importJobs: this.database.listImportJobs(userId),
+        uploads: this.database.listUploadSessions(200, userId),
+        gmailConnections: this.gmail.listConnections(userId),
+        aiJobs: this.database.listAiJobs(1_000, userId).map(redactAiJobPrompt)
       };
       reply.header("Content-Type", "application/json; charset=utf-8");
       reply.header("Content-Disposition", `attachment; filename="email-client-diagnostics-${exportedAt.slice(0, 10)}.json"`);
@@ -2024,7 +2161,9 @@ export class EmailApiRuntime {
 
     this.app.delete("/api/diagnostics", async (request, reply) => {
       if (!this.requireRole(request, reply, ["local", "admin"])) return;
-      this.database.clearDiagnostics();
+      const userId = this.currentUserId(request) ?? undefined;
+      const includeGlobal = Boolean(userId && userId === this.database.primaryAdminUserId());
+      this.database.clearDiagnostics(userId, includeGlobal);
       return reply.code(204).send();
     });
 
@@ -2033,6 +2172,7 @@ export class EmailApiRuntime {
       const parsed = clientDiagnosticSchema.safeParse(request.body);
       if (!parsed.success) return reply.code(400).send({ error: "Invalid diagnostic event" });
       return this.database.recordDiagnostic({
+        ownerUserId: this.currentUserId(request),
         level: parsed.data.level,
         category: "client",
         message: parsed.data.message,
@@ -2205,18 +2345,21 @@ export class EmailApiRuntime {
     });
 
     this.app.get("/api/admin/calendar/accounts", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
-      return this.calendar.listAppleAccounts();
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      return this.calendar.listAppleAccounts(this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Body: unknown }>("/api/admin/calendar/accounts", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = appleCalendarAccountCreateSchema.safeParse(request.body);
       if (!parsed.success) {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter valid Apple Calendar credentials" });
       }
       try {
-        return reply.code(201).send(await this.calendar.connectAppleAccount(parsed.data));
+        return reply.code(201).send(await this.calendar.connectAppleAccount(
+          parsed.data,
+          this.currentUserId(request)
+        ));
       } catch (error) {
         return reply.code(400).send({
           error: error instanceof Error ? error.message : "Apple Calendar authorization failed"
@@ -2225,7 +2368,7 @@ export class EmailApiRuntime {
     });
 
     this.app.delete<{ Params: { accountId: string } }>("/api/admin/calendar/accounts/:accountId", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const removed = this.calendar.disconnectAppleAccount(request.params.accountId);
       if (!removed) return reply.code(404).send({ error: "Apple Calendar account not found" });
       return reply.code(204).send();
@@ -2366,15 +2509,15 @@ export class EmailApiRuntime {
 
     this.app.get("/api/admin/ai-schedules", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
-      return this.database.listAiSchedules();
+      return this.database.listAiSchedules(this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Body: unknown }>("/api/admin/reply-styles", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = replyStyleCreateSchema.safeParse(request.body);
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid reply style" });
       try {
-        return this.database.createReplyStyle(parsed.data);
+        return this.database.createReplyStyle(parsed.data, this.currentUserId(request));
       } catch (error) {
         return reply.code(409).send({ error: error instanceof Error ? error.message : "Reply style could not be created" });
       }
@@ -2383,7 +2526,7 @@ export class EmailApiRuntime {
     this.app.patch<{ Params: { styleId: string }; Body: unknown }>(
       "/api/admin/reply-styles/:styleId",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         const parsed = replyStylePatchSchema.safeParse(request.body);
         if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid reply style update" });
         try {
@@ -2397,7 +2540,7 @@ export class EmailApiRuntime {
     this.app.delete<{ Params: { styleId: string } }>(
       "/api/admin/reply-styles/:styleId",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         return this.database.deleteReplyStyle(request.params.styleId)
           ? reply.code(204).send()
           : reply.code(404).send({ error: "Reply style not found" });
@@ -2405,12 +2548,15 @@ export class EmailApiRuntime {
     );
 
     this.app.get<{ Querystring: { archiveId?: string } }>("/api/admin/smart-mail-rules", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
-      return this.database.listSmartMailRules(request.query.archiveId);
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      return this.database.listSmartMailRules(
+        request.query.archiveId,
+        this.currentUserId(request) ?? undefined
+      );
     });
 
     this.app.post<{ Body: unknown }>("/api/admin/smart-mail-rules/suggest", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = smartMailRuleSuggestionRequestSchema.safeParse(request.body);
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Describe a valid mail rule" });
       try {
@@ -2423,7 +2569,7 @@ export class EmailApiRuntime {
     });
 
     this.app.post<{ Body: unknown }>("/api/admin/smart-mail-rules", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = smartMailRuleCreateSchema.safeParse(request.body);
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid mail rule" });
       try {
@@ -2436,7 +2582,7 @@ export class EmailApiRuntime {
     this.app.patch<{ Params: { ruleId: string }; Body: unknown }>(
       "/api/admin/smart-mail-rules/:ruleId",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         const parsed = smartMailRulePatchSchema.safeParse(request.body);
         if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid mail rule update" });
         try {
@@ -2450,7 +2596,7 @@ export class EmailApiRuntime {
     this.app.post<{ Params: { ruleId: string }; Body: unknown }>(
       "/api/admin/smart-mail-rules/:ruleId/run",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         const parsed = smartMailRuleRunSchema.safeParse(request.body ?? {});
         if (!parsed.success) {
           return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose a valid rule scope" });
@@ -2471,7 +2617,7 @@ export class EmailApiRuntime {
     );
 
     this.app.post<{ Body: unknown }>("/api/admin/smart-mail-rules/run", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = smartMailRuleBatchRunSchema.safeParse(request.body);
       if (!parsed.success) {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Choose valid mail rules and scope" });
@@ -2484,14 +2630,23 @@ export class EmailApiRuntime {
     });
 
     this.app.get<{ Params: { taskId: string } }>("/api/admin/mailbox-tasks/:taskId", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const task = this.mailboxTasks.getTask(request.params.taskId);
+      const userId = this.currentUserId(request);
+      if (task && userId && !this.database.ownsResource(userId, "archive", task.archiveId)) {
+        return reply.code(404).send({ error: "Mailbox task not found" });
+      }
       return task ?? reply.code(404).send({ error: "Mailbox task not found" });
     });
 
     this.app.post<{ Params: { taskId: string } }>("/api/admin/mailbox-tasks/:taskId/cancel", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       try {
+        const task = this.mailboxTasks.getTask(request.params.taskId);
+        const userId = this.currentUserId(request);
+        if (!task || (userId && !this.database.ownsResource(userId, "archive", task.archiveId))) {
+          return reply.code(404).send({ error: "Mailbox task not found" });
+        }
         return this.mailboxTasks.cancelTask(request.params.taskId);
       } catch (error) {
         return reply.code(404).send({ error: error instanceof Error ? error.message : "Mailbox task not found" });
@@ -2501,7 +2656,7 @@ export class EmailApiRuntime {
     this.app.delete<{ Params: { ruleId: string } }>(
       "/api/admin/smart-mail-rules/:ruleId",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         return this.database.deleteSmartMailRule(request.params.ruleId)
           ? reply.code(204).send()
           : reply.code(404).send({ error: "Mail rule not found" });
@@ -2509,19 +2664,24 @@ export class EmailApiRuntime {
     );
 
     this.app.get("/api/admin/resumes", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
-      return this.resumes.list();
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      return this.resumes.list(this.currentUserId(request) ?? undefined);
     });
 
     this.app.post<{ Querystring: { filename?: string; name?: string }; Body: unknown }>(
       "/api/admin/resumes",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         if (!request.query.filename || !Buffer.isBuffer(request.body)) {
           return reply.code(400).send({ error: "Choose a resume file" });
         }
         try {
-          return await this.resumes.upload(request.query.filename, request.body, request.query.name);
+          return await this.resumes.upload(
+            request.query.filename,
+            request.body,
+            request.query.name,
+            this.currentUserId(request)
+          );
         } catch (error) {
           const status = error instanceof ResumeValidationError ? 400 : 500;
           return reply.code(status).send({
@@ -2534,7 +2694,7 @@ export class EmailApiRuntime {
     this.app.get<{ Params: { resumeId: string } }>(
       "/api/admin/resumes/:resumeId/download",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         try {
           const { asset, content } = await this.resumes.read(request.params.resumeId);
           reply.header("Content-Type", asset.contentType);
@@ -2549,7 +2709,7 @@ export class EmailApiRuntime {
     );
 
     this.app.delete<{ Params: { resumeId: string } }>("/api/admin/resumes/:resumeId", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       try {
         await this.resumes.remove(request.params.resumeId);
         return reply.code(204).send();
@@ -2567,7 +2727,7 @@ export class EmailApiRuntime {
         return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Enter a valid AI schedule" });
       }
       try {
-        const schedule = this.database.createAiSchedule(parsed.data);
+        const schedule = this.database.createAiSchedule(parsed.data, this.currentUserId(request));
         this.database.recordDiagnostic({
           level: "info",
           category: "ai",
@@ -2617,7 +2777,7 @@ export class EmailApiRuntime {
     );
 
     this.app.get<{ Querystring: { archiveId?: string } }>("/api/admin/sender-filing", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = senderFilingArchiveSchema.safeParse({ archiveId: request.query.archiveId });
       if (!parsed.success) return reply.code(400).send({ error: "Choose a valid archive" });
       try {
@@ -2628,7 +2788,7 @@ export class EmailApiRuntime {
     });
 
     this.app.post<{ Body: unknown }>("/api/admin/sender-filing/organize", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = senderFilingArchiveSchema.safeParse(request.body);
       if (!parsed.success) return reply.code(400).send({ error: "Choose a valid archive" });
       try {
@@ -2655,7 +2815,7 @@ export class EmailApiRuntime {
     this.app.patch<{ Params: { ruleId: string }; Body: unknown }>(
       "/api/admin/sender-filing/rules/:ruleId",
       async (request, reply) => {
-        if (!this.requireRole(request, reply, ["admin"])) return;
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
         const parsed = messageMoveSchema.safeParse(request.body);
         if (!parsed.success) return reply.code(400).send({ error: "Choose a valid destination mailbox" });
         try {
@@ -2682,7 +2842,7 @@ export class EmailApiRuntime {
     );
 
     this.app.delete<{ Querystring: { archiveId?: string } }>("/api/admin/sender-filing", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["admin"])) return;
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
       const parsed = senderFilingArchiveSchema.safeParse({ archiveId: request.query.archiveId });
       if (!parsed.success) return reply.code(400).send({ error: "Choose a valid archive" });
       try {
@@ -2702,7 +2862,7 @@ export class EmailApiRuntime {
 
     this.app.get("/api/admin/insights", async (request, reply) => {
       if (!this.requireRole(request, reply, ["admin"])) return;
-      return this.database.getAdminInsights();
+      return this.database.getAdminInsights(this.currentUserId(request) ?? undefined);
     });
 
     this.app.get("/api/admin/users", async (request, reply) => {
@@ -2772,7 +2932,7 @@ export class EmailApiRuntime {
     });
 
     this.app.get("/api/sharing", async (request, reply) => {
-      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      if (!this.requireRole(request, reply, ["admin"])) return;
       return this.getSharingState();
     });
 
@@ -2865,6 +3025,12 @@ export class EmailApiRuntime {
     if (loopback && bearer === this.adminToken) return "admin";
     if (loopback && bearer === this.localToken) return "local";
     return null;
+  }
+
+  private currentUserId(request: FastifyRequest): string | null {
+    const session = this.resolveSession(request);
+    if (session) return session.user.id;
+    return this.resolveRole(request) ? this.database.primaryAdminUserId() : null;
   }
 
   private resolveSession(request: FastifyRequest): AuthSessionRecord | null {

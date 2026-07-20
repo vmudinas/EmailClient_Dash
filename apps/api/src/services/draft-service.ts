@@ -18,8 +18,8 @@ export class DraftService {
     private readonly settings: DraftSettingsManager
   ) {}
 
-  list(): EmailDraft[] {
-    return this.database.listEmailDrafts().map((draft) => this.applyIdentity(draft));
+  list(ownerUserId?: string): EmailDraft[] {
+    return this.database.listEmailDrafts(ownerUserId).map((draft) => this.applyIdentity(draft));
   }
 
   get(id: string): EmailDraft {
@@ -28,14 +28,14 @@ export class DraftService {
     return this.applyIdentity(draft);
   }
 
-  create(input: EmailDraftCreate): EmailDraft {
+  create(input: EmailDraftCreate, ownerUserId: string | null = null): EmailDraft {
     const identity = this.settings.current();
     return this.applyIdentity(this.database.createEmailDraft({
       ...input,
       fromAddress: input.fromAddress ?? identity.defaultFromAddress,
       subject: applyDraftSenderName(input.subject, identity.senderName),
       bodyText: applyDraftSenderName(input.bodyText, identity.senderName)
-    }));
+    }, ownerUserId));
   }
 
   update(id: string, input: EmailDraftUpdate): EmailDraft {

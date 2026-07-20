@@ -121,6 +121,15 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "audit", label: "Audit", icon: ScrollText }
 ];
 
+const PERSONAL_MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
+  { id: "calendars", label: "Calendars", icon: CalendarDays },
+  { id: "reply-styles", label: "Reply styles", icon: Sparkles },
+  { id: "sender-filing", label: "Sender rules", icon: ListFilter },
+  { id: "smart-rules", label: "Smart rules", icon: MailCheck },
+  { id: "inbox-tabs", label: "Inbox tabs", icon: ListFilter },
+  { id: "resumes", label: "Resumes", icon: Paperclip }
+];
+
 export function SettingsDialog({
   open,
   api,
@@ -136,6 +145,8 @@ export function SettingsDialog({
   onNewsSettingsChanged,
   onInboxTabSettingsChanged
 }: SettingsDialogProps) {
+  const isAdmin = session.role === "admin";
+  const menu = isAdmin ? MENU : PERSONAL_MENU;
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [users, setUsers] = useState<UserSummary[]>([]);
@@ -146,7 +157,7 @@ export function SettingsDialog({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(true);
 
   const loadAdminData = useCallback(async () => {
-    if (!api) return;
+    if (!api || !isAdmin) return;
     setLoading(true);
     setError("");
     try {
@@ -161,14 +172,15 @@ export function SettingsDialog({
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, isAdmin]);
 
   useEffect(() => {
     if (open) {
       setMobileMenuOpen(true);
-      void loadAdminData();
+      setSection(isAdmin ? "database" : "calendars");
+      if (isAdmin) void loadAdminData();
     }
-  }, [open, loadAdminData]);
+  }, [open, isAdmin, loadAdminData]);
 
   if (!open) return null;
 
@@ -181,12 +193,12 @@ export function SettingsDialog({
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section className={`dialog settings-dialog ${mobileMenuOpen ? "mobile-settings-menu-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
-          <div><Settings size={20} /><h2 id="settings-title">Admin settings</h2></div>
+          <div><Settings size={20} /><h2 id="settings-title">{isAdmin ? "Admin settings" : "Personal settings"}</h2></div>
           <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
         </header>
         <div className="settings-layout">
           <nav className="settings-menu" aria-label="Settings panels">
-            {MENU.map((item) => {
+            {menu.map((item) => {
               const Icon = item.icon;
               return (
                 <button key={item.id} className={section === item.id ? "selected" : ""} onClick={() => { setSection(item.id); setMobileMenuOpen(false); setError(""); setNotice(""); }}>
@@ -198,12 +210,12 @@ export function SettingsDialog({
           <article className="settings-content">
             <button className="settings-mobile-section-trigger mobile-only" onClick={() => setMobileMenuOpen(true)}>
               {(() => {
-                const selectedItem = MENU.find((item) => item.id === section) ?? MENU[0]!;
+                const selectedItem = menu.find((item) => item.id === section) ?? menu[0]!;
                 const Icon = selectedItem.icon;
                 return <><Icon size={18} /><span>{selectedItem.label}</span><ChevronRight size={17} /></>;
               })()}
             </button>
-            {loading && !settings && section !== "tools" ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
+            {isAdmin && loading && !settings && section !== "tools" ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
               <>
                 {section === "tools" && (
                   <AdminToolsPanel
@@ -3357,7 +3369,7 @@ function UsersPanel({
       setUsername("");
       setDisplayName("");
       setPin("");
-      onNotice(`User ${created.username} created.`);
+      onNotice(`User ${created.username} created with an empty private mail and calendar workspace.`);
     } catch (createError) {
       onError(errorText(createError));
     } finally {
@@ -3390,7 +3402,7 @@ function UsersPanel({
   return (
     <>
       <h3>Users</h3>
-      <p>Named accounts make audit records attributable. Administrators manage users and settings; users can manage mail but cannot open this panel.</p>
+      <p>Each named account has a private mail and calendar workspace. Administrators manage users and service settings; users manage their own connections, archives, calendars, drafts, rules, and preferences.</p>
       <div className="settings-table-wrap">
         <table className="settings-table">
           <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead>

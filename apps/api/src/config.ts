@@ -9,6 +9,7 @@ export interface ApiConfig {
   trustProxy: boolean;
   staticDir?: string;
   devAuthBypass: boolean;
+  allowRemoteLogin: boolean;
   sessionLifetimeMinutes: number;
   logger: boolean;
   gmailClientId: string | null;
@@ -32,6 +33,9 @@ export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
       ?? false,
     staticDir: overrides.staticDir ?? process.env.EMAIL_CLIENT_WEB_DIR,
     devAuthBypass: overrides.devAuthBypass ?? process.env.EMAIL_CLIENT_DEV_AUTH_BYPASS === "1",
+    allowRemoteLogin: overrides.allowRemoteLogin
+      ?? parseOptionalBoolean(process.env.EMAIL_CLIENT_ALLOW_REMOTE_LOGIN)
+      ?? false,
     sessionLifetimeMinutes: overrides.sessionLifetimeMinutes
       ?? Math.max(15, Number(process.env.EMAIL_CLIENT_SESSION_MINUTES ?? 720)),
     logger: overrides.logger ?? process.env.NODE_ENV !== "test",

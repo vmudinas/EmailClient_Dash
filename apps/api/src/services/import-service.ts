@@ -49,7 +49,8 @@ export class ImportService {
     sourcePath: string,
     options: ImportOptions,
     temporarySource = false,
-    sourceName = basename(sourcePath)
+    sourceName = basename(sourcePath),
+    ownerUserId: string | null = null
   ): Promise<ImportJob> {
     const sourceType = sourceTypeFromPath(sourcePath);
     const file = await stat(sourcePath);
@@ -58,6 +59,7 @@ export class ImportService {
     const archiveId = randomUUID();
     this.database.createArchive({
       id: archiveId,
+      ownerUserId,
       name: sourceName,
       sourceType,
       fingerprint: `pending:${archiveId}`,
@@ -314,7 +316,10 @@ export class ImportService {
       );
       this.database.updateArchiveFingerprint(job.archiveId, fingerprint.hash, file.size);
 
-      const existing = this.database.findReadyArchiveByFingerprint(fingerprint.hash);
+      const existing = this.database.findReadyArchiveByFingerprint(
+        fingerprint.hash,
+        this.database.getArchiveOwnerUserId(job.archiveId)
+      );
       const replacing = this.database.getReplaceArchiveId(job.archiveId);
       if (existing && existing.id !== replacing) {
         throw new Error(`This archive is already imported as "${existing.name}"`);

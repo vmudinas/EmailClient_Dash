@@ -2013,10 +2013,10 @@ export function App() {
               <MailPlus size={18} />
             </button>
           )}
-          {isAdmin && (
-            <button className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)} title="Open admin settings" aria-label="Open admin settings">
+          {!readOnly && (
+            <button className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)} title={isAdmin ? "Open admin settings" : "Open personal settings"} aria-label={isAdmin ? "Open admin settings" : "Open personal settings"}>
               <SettingsIcon size={18} />
-              {pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
+              {isAdmin && pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
             </button>
           )}
           {!readOnly && (
@@ -2201,7 +2201,7 @@ export function App() {
               <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>
               <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>
               {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
-              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>Admin</span>{pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
+              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>{isAdmin ? "Admin" : "Settings"}</span>{isAdmin && pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
               {electron && isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
             </div>
             <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>
@@ -2374,7 +2374,7 @@ export function App() {
         />
       )}
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
-      {isAdmin && (
+      {!readOnly && (
         <SettingsDialog
           open={settingsOpen}
           api={api}

@@ -19,6 +19,36 @@ import { SettingsDialog } from "./SettingsDialog.js";
 afterEach(cleanup);
 
 describe("SettingsDialog", () => {
+  it("shows private account settings without loading administrator configuration", async () => {
+    const adminSettings = vi.fn().mockResolvedValue(SETTINGS);
+    const listUsers = vi.fn().mockResolvedValue(USERS);
+    const api = {
+      adminSettings,
+      listUsers,
+      listGmailConnections: vi.fn().mockResolvedValue([]),
+      listCalendarAccounts: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={USER_SESSION}
+        onClose={vi.fn()}
+        onSignedOut={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("dialog", { name: "Personal settings" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Calendars" }).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Smart rules" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Database" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Users" })).toBeNull();
+    await waitFor(() => expect(screen.getByText(/No Google accounts connected/)).toBeTruthy());
+    expect(adminSettings).not.toHaveBeenCalled();
+    expect(listUsers).not.toHaveBeenCalled();
+  });
+
   it("opens the guide and diagnostics from Admin tools", async () => {
     const onOpenGuide = vi.fn();
     const onOpenDiagnostics = vi.fn();
@@ -1346,6 +1376,23 @@ const SESSION: AuthSessionInfo = {
   id: "session-1",
   user: USERS[0]!,
   role: "admin",
+  expiresAt: "2026-07-13T12:00:00.000Z"
+};
+
+const USER_SESSION: AuthSessionInfo = {
+  id: "session-user",
+  user: {
+    id: "user-private",
+    username: "casey",
+    displayName: "Casey",
+    role: "user",
+    isActive: true,
+    mustChangePin: false,
+    lastLoginAt: null,
+    createdAt: "2026-07-13T00:00:00.000Z",
+    updatedAt: "2026-07-13T00:00:00.000Z"
+  },
+  role: "user",
   expiresAt: "2026-07-13T12:00:00.000Z"
 };
 

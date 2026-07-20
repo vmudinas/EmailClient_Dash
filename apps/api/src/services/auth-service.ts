@@ -54,9 +54,14 @@ export class AuthService {
   initialize(): void {
     this.database.purgeExpiredSessions();
     this.database.revokeAllSessions();
-    if (this.database.listUsers().length > 0) return;
+    const users = this.database.listUsers();
+    if (users.length > 0) {
+      const administrator = users.find((user) => user.role === "admin" && user.isActive);
+      if (administrator) this.database.claimUnownedUserData(administrator.id);
+      return;
+    }
     const hashed = hashPin(DEFAULT_ADMIN_PIN);
-    this.database.createUser({
+    const administrator = this.database.createUser({
       username: DEFAULT_ADMIN_USERNAME,
       displayName: "Administrator",
       role: "admin",
@@ -64,6 +69,7 @@ export class AuthService {
       pinSalt: hashed.salt,
       mustChangePin: true
     });
+    this.database.claimUnownedUserData(administrator.id);
   }
 
   login(input: LoginInput): AuthLoginResult {

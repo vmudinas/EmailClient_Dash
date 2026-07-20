@@ -104,8 +104,14 @@ const EMPTY_STATE: LocalMessageState = {
 
 export const UNKNOWN_DATE_FOLDER_NAME = "Unknown date";
 
+export type OwnedResource = "archive" | "folder" | "message" | "attachment" | "gmail-connection"
+  | "calendar-account" | "todo" | "upload" | "import-job" | "draft"
+  | "resume" | "reply-style" | "ai-schedule" | "follow-up" | "ai-job"
+  | "smart-rule" | "sender-rule";
+
 export interface ArchiveCreateInput {
   id?: string;
+  ownerUserId?: string | null;
   name: string;
   sourceType: ArchiveSourceType;
   fingerprint: string;
@@ -154,9 +160,11 @@ export interface EmailDatabaseOptions {
 export interface UploadSessionRecord extends UploadSession {
   clientKey: string;
   tempPath: string;
+  ownerUserId: string | null;
 }
 
 export interface DiagnosticInput {
+  ownerUserId?: string | null;
   level: DiagnosticLevel;
   category: DiagnosticCategory;
   message: string;
@@ -169,6 +177,7 @@ export interface DiagnosticInput {
 
 export interface GmailConnectionCreateInput {
   id?: string;
+  ownerUserId?: string | null;
   email: string;
   archiveId: string;
   folderId: string;
@@ -205,6 +214,7 @@ export interface GmailMessageFolderState {
 
 export interface CalendarAccountCreateInput {
   id?: string;
+  ownerUserId?: string | null;
   label: string;
   username: string;
   serverUrl: string;
@@ -339,6 +349,7 @@ export interface AiJobCreateInput {
 
 export interface ResumeAssetCreateInput {
   id?: string;
+  ownerUserId?: string | null;
   name: string;
   filename: string;
   contentType: string;
@@ -351,6 +362,7 @@ export interface ResumeAssetRecord extends ResumeAsset {
 }
 
 export interface AutomatedDraftCreateInput {
+  ownerUserId?: string | null;
   connectionId: string;
   sourceMessageId: string;
   scheduleId: string | null;
@@ -398,6 +410,7 @@ export interface MessageAnalysisUpsertInput extends MessageAnalysisOutput {
 
 interface SearchQuery extends SearchFilters {
   q: string;
+  ownerUserId?: string;
 }
 
 type MessageFilterOptions = Pick<
@@ -418,7 +431,11 @@ export class EmailDatabase {
     this.db = new BetterSqlite3(this.path);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
-    this.db.pragma("busy_timeout = 5000");
+    // The import and mailbox-task worker threads open their own connections to this
+    // file, and on slow disks (e.g. a NAS) one of their chunk transactions can hold
+    // the write lock well past 5s — long enough that concurrent writers were failing
+    // with SQLITE_BUSY instead of waiting their turn.
+    this.db.pragma("busy_timeout = 30000");
     if (options.migrate !== false) this.migrate();
     if (options.recoverInterruptedJobs !== false) this.recoverInterruptedJobs();
   }
@@ -1737,6 +1754,51 @@ export class EmailDatabase {
         PRAGMA user_version = 32;
       `);
     }
+
+    const privateWorkspacesVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (privateWorkspacesVersion < 33) {
+      const addOwnerColumn = (table: string) => {
+        const columns = new Set(
+          (this.db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((column) => column.name)
+        );
+        if (!columns.has("owner_user_id")) {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN owner_user_id TEXT;`);
+        }
+      };
+      for (const table of [
+        "archives",
+        "gmail_connections",
+        "calendar_accounts",
+        "todos",
+        "upload_sessions",
+        "resume_assets",
+        "email_drafts",
+        "reply_styles",
+        "ai_schedules",
+        "diagnostic_events"
+      ]) addOwnerColumn(table);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS archives_owner_idx ON archives(owner_user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS gmail_connections_owner_idx ON gmail_connections(owner_user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS calendar_accounts_owner_idx ON calendar_accounts(owner_user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS todos_owner_date_idx ON todos(owner_user_id, todo_date, position);
+        CREATE INDEX IF NOT EXISTS upload_sessions_owner_idx ON upload_sessions(owner_user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS resume_assets_owner_idx ON resume_assets(owner_user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS email_drafts_owner_idx ON email_drafts(owner_user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS ai_schedules_owner_idx ON ai_schedules(owner_user_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS diagnostic_events_owner_idx ON diagnostic_events(owner_user_id, created_at DESC);
+        DROP INDEX IF EXISTS reply_styles_name_idx;
+        DROP INDEX IF EXISTS reply_styles_default_idx;
+        CREATE UNIQUE INDEX IF NOT EXISTS reply_styles_owner_name_idx
+          ON reply_styles(owner_user_id, lower(name));
+        CREATE UNIQUE INDEX IF NOT EXISTS reply_styles_owner_default_idx
+          ON reply_styles(owner_user_id, is_default)
+          WHERE is_default = 1;
+        PRAGMA user_version = 33;
+      `);
+      const administrator = this.primaryAdminUserId();
+      if (administrator) this.claimUnownedUserData(administrator);
+    }
   }
 
   private reclassifyInboxCategories(): void {
@@ -2009,6 +2071,154 @@ export class EmailDatabase {
     `).all() as Row[]).map((row) => this.mapUser(row));
   }
 
+  primaryAdminUserId(): string | null {
+    const row = this.db.prepare(`
+      SELECT id FROM users
+      WHERE role = 'admin' AND is_active = 1
+      ORDER BY created_at, id
+      LIMIT 1
+    `).get() as Row | undefined;
+    return row ? String(row.id) : null;
+  }
+
+  claimUnownedUserData(userId: string): void {
+    const claim = this.db.transaction(() => {
+      this.db.prepare("UPDATE archives SET owner_user_id = ? WHERE owner_user_id IS NULL").run(userId);
+      this.db.prepare(`
+        UPDATE gmail_connections
+        SET owner_user_id = COALESCE(
+          (SELECT owner_user_id FROM archives WHERE id = gmail_connections.archive_id),
+          ?
+        )
+        WHERE owner_user_id IS NULL
+      `).run(userId);
+      this.db.prepare(`
+        UPDATE upload_sessions
+        SET owner_user_id = COALESCE(
+          (
+            SELECT a.owner_user_id
+            FROM import_jobs j
+            JOIN archives a ON a.id = j.archive_id
+            WHERE j.id = upload_sessions.job_id
+          ),
+          ?
+        )
+        WHERE owner_user_id IS NULL
+      `).run(userId);
+      this.db.prepare(`
+        UPDATE ai_schedules
+        SET owner_user_id = COALESCE(
+          (
+            SELECT a.owner_user_id
+            FROM folders f
+            JOIN archives a ON a.id = f.archive_id
+            WHERE f.id = ai_schedules.folder_id
+          ),
+          ?
+        )
+        WHERE owner_user_id IS NULL
+      `).run(userId);
+      this.db.prepare(`
+        UPDATE email_drafts
+        SET owner_user_id = COALESCE(
+          (
+            SELECT a.owner_user_id
+            FROM gmail_connections c
+            JOIN archives a ON a.id = c.archive_id
+            WHERE c.id = email_drafts.connection_id
+          ),
+          ?
+        )
+        WHERE owner_user_id IS NULL
+      `).run(userId);
+      this.db.prepare(`
+        UPDATE diagnostic_events
+        SET owner_user_id = COALESCE(
+          (SELECT owner_user_id FROM archives WHERE id = diagnostic_events.archive_id),
+          (
+            SELECT a.owner_user_id
+            FROM import_jobs j
+            JOIN archives a ON a.id = j.archive_id
+            WHERE j.id = diagnostic_events.job_id
+          ),
+          ?
+        )
+        WHERE owner_user_id IS NULL
+      `).run(userId);
+      for (const table of ["calendar_accounts", "todos", "resume_assets", "reply_styles"]) {
+        this.db.prepare(`UPDATE ${table} SET owner_user_id = ? WHERE owner_user_id IS NULL`).run(userId);
+      }
+    });
+    claim();
+  }
+
+  ownsResource(
+    userId: string,
+    resource: OwnedResource,
+    id: string
+  ): boolean {
+    const queries: Record<typeof resource, string> = {
+      archive: "SELECT 1 FROM archives WHERE id = ? AND owner_user_id = ?",
+      folder: `SELECT 1 FROM folders f JOIN archives a ON a.id = f.archive_id
+        WHERE f.id = ? AND a.owner_user_id = ?`,
+      message: `SELECT 1 FROM messages m JOIN archives a ON a.id = m.archive_id
+        WHERE m.id = ? AND a.owner_user_id = ?`,
+      attachment: `SELECT 1 FROM attachments x JOIN messages m ON m.id = x.message_id
+        JOIN archives a ON a.id = m.archive_id WHERE x.id = ? AND a.owner_user_id = ?`,
+      "gmail-connection": `SELECT 1 FROM gmail_connections c JOIN archives a ON a.id = c.archive_id
+        WHERE c.id = ? AND a.owner_user_id = ? AND c.owner_user_id = ?`,
+      "calendar-account": "SELECT 1 FROM calendar_accounts WHERE id = ? AND owner_user_id = ?",
+      todo: "SELECT 1 FROM todos WHERE id = ? AND owner_user_id = ?",
+      upload: "SELECT 1 FROM upload_sessions WHERE id = ? AND owner_user_id = ?",
+      "import-job": `SELECT 1 FROM import_jobs j JOIN archives a ON a.id = j.archive_id
+        WHERE j.id = ? AND a.owner_user_id = ?`,
+      draft: "SELECT 1 FROM email_drafts WHERE id = ? AND owner_user_id = ?",
+      resume: "SELECT 1 FROM resume_assets WHERE id = ? AND owner_user_id = ?",
+      "reply-style": "SELECT 1 FROM reply_styles WHERE id = ? AND owner_user_id = ?",
+      "ai-schedule": "SELECT 1 FROM ai_schedules WHERE id = ? AND owner_user_id = ?",
+      "follow-up": `SELECT 1 FROM message_follow_ups u JOIN messages m ON m.id = u.message_id
+        JOIN archives a ON a.id = m.archive_id WHERE u.id = ? AND a.owner_user_id = ?`,
+      "ai-job": `SELECT 1 FROM ai_jobs j JOIN messages m ON m.id = j.message_id
+        JOIN archives a ON a.id = m.archive_id WHERE j.id = ? AND a.owner_user_id = ?`,
+      "smart-rule": `SELECT 1 FROM smart_mail_rules r JOIN archives a ON a.id = r.archive_id
+        WHERE r.id = ? AND a.owner_user_id = ?`,
+      "sender-rule": `SELECT 1 FROM sender_filing_rules r JOIN archives a ON a.id = r.archive_id
+        WHERE r.id = ? AND a.owner_user_id = ?`
+    };
+    const query = queries[resource];
+    const params = resource === "gmail-connection" ? [id, userId, userId] : [id, userId];
+    return Boolean(this.db.prepare(query).get(...params));
+  }
+
+  resourceExists(resource: OwnedResource, id: string): boolean {
+    const queries: Record<OwnedResource, string> = {
+      archive: "SELECT 1 FROM archives WHERE id = ?",
+      folder: "SELECT 1 FROM folders WHERE id = ?",
+      message: "SELECT 1 FROM messages WHERE id = ?",
+      attachment: "SELECT 1 FROM attachments WHERE id = ?",
+      "gmail-connection": "SELECT 1 FROM gmail_connections WHERE id = ?",
+      "calendar-account": "SELECT 1 FROM calendar_accounts WHERE id = ?",
+      todo: "SELECT 1 FROM todos WHERE id = ?",
+      upload: "SELECT 1 FROM upload_sessions WHERE id = ?",
+      "import-job": "SELECT 1 FROM import_jobs WHERE id = ?",
+      draft: "SELECT 1 FROM email_drafts WHERE id = ?",
+      resume: "SELECT 1 FROM resume_assets WHERE id = ?",
+      "reply-style": "SELECT 1 FROM reply_styles WHERE id = ?",
+      "ai-schedule": "SELECT 1 FROM ai_schedules WHERE id = ?",
+      "follow-up": "SELECT 1 FROM message_follow_ups WHERE id = ?",
+      "ai-job": "SELECT 1 FROM ai_jobs WHERE id = ?",
+      "smart-rule": "SELECT 1 FROM smart_mail_rules WHERE id = ?",
+      "sender-rule": "SELECT 1 FROM sender_filing_rules WHERE id = ?"
+    };
+    return Boolean(this.db.prepare(queries[resource]).get(id));
+  }
+
+  ownsAllResources(userId: string, resource: "message" | "archive" | "folder", ids: string[]): boolean {
+    return [...new Set(ids)].every((id) => (
+      !this.resourceExists(resource, id) || this.ownsResource(userId, resource, id)
+    ));
+  }
+
   countActiveAdmins(): number {
     const row = this.db.prepare(`
       SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND is_active = 1
@@ -2202,25 +2412,28 @@ export class EmailDatabase {
     `).all(safeLimit) as Row[]).map((row) => this.mapAudit(row));
   }
 
-  findReadyArchiveByFingerprint(fingerprint: string): Archive | null {
+  findReadyArchiveByFingerprint(fingerprint: string, ownerUserId?: string | null): Archive | null {
     const row = this.db.prepare(`
       SELECT * FROM archives
       WHERE fingerprint = ? AND status IN ('ready', 'ready_with_errors')
+        ${ownerUserId ? "AND owner_user_id = ?" : ""}
       ORDER BY imported_at DESC LIMIT 1
-    `).get(fingerprint) as Row | undefined;
+    `).get(...(ownerUserId ? [fingerprint, ownerUserId] : [fingerprint])) as Row | undefined;
     return row ? this.mapArchive(row) : null;
   }
 
   createArchive(input: ArchiveCreateInput): Archive {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
+    const ownerUserId = input.ownerUserId ?? this.primaryAdminUserId();
     this.db.prepare(`
       INSERT INTO archives (
-        id, name, source_type, fingerprint, size_bytes, status,
+        id, owner_user_id, name, source_type, fingerprint, size_bytes, status,
         replace_archive_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, 'importing', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'importing', ?, ?)
     `).run(
       id,
+      ownerUserId,
       input.name,
       input.sourceType,
       input.fingerprint,
@@ -2245,6 +2458,11 @@ export class EmailDatabase {
     return row ? this.mapArchive(row) : null;
   }
 
+  getArchiveOwnerUserId(id: string): string | null {
+    const row = this.db.prepare("SELECT owner_user_id FROM archives WHERE id = ?").get(id) as Row | undefined;
+    return row?.owner_user_id ? String(row.owner_user_id) : null;
+  }
+
   getReplaceArchiveId(id: string): string | null {
     const row = this.db.prepare("SELECT replace_archive_id FROM archives WHERE id = ?").get(id) as Row | undefined;
     return row?.replace_archive_id ? String(row.replace_archive_id) : null;
@@ -2256,7 +2474,7 @@ export class EmailDatabase {
     `).run(fingerprint, sizeBytes, id);
   }
 
-  listArchives(): Archive[] {
+  listArchives(ownerUserId?: string): Archive[] {
     return (this.db.prepare(`
       SELECT a.*,
         a.message_count AS live_message_count,
@@ -2267,8 +2485,9 @@ export class EmailDatabase {
         a.attachment_count AS live_attachment_count
       FROM archives a
       WHERE a.status != 'failed'
+        ${ownerUserId ? "AND a.owner_user_id = ?" : ""}
       ORDER BY COALESCE(a.imported_at, a.created_at) DESC
-    `).all() as Row[]).map((row) => this.mapArchive(row));
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[]).map((row) => this.mapArchive(row));
   }
 
   renameArchive(id: string, name: string): Archive {
@@ -2407,10 +2626,13 @@ export class EmailDatabase {
     }));
   }
 
-  listImportJobs(): ImportJob[] {
+  listImportJobs(ownerUserId?: string): ImportJob[] {
     return (this.db.prepare(`
-      SELECT * FROM import_jobs ORDER BY updated_at DESC LIMIT 25
-    `).all() as Row[]).map((row) => this.mapImportJob(row));
+      SELECT j.* FROM import_jobs j
+      JOIN archives a ON a.id = j.archive_id
+      ${ownerUserId ? "WHERE a.owner_user_id = ?" : ""}
+      ORDER BY j.updated_at DESC LIMIT 25
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[]).map((row) => this.mapImportJob(row));
   }
 
   deleteImportJob(id: string): boolean {
@@ -2490,6 +2712,7 @@ export class EmailDatabase {
 
   createUploadSession(input: {
     id?: string;
+    ownerUserId?: string | null;
     clientKey: string;
     filename: string;
     sizeBytes: number;
@@ -2498,13 +2721,15 @@ export class EmailDatabase {
   }): UploadSession {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
+    const ownerUserId = input.ownerUserId ?? this.primaryAdminUserId();
     this.db.prepare(`
       INSERT INTO upload_sessions (
-        id, client_key, filename, expected_size, temp_path, status,
+        id, owner_user_id, client_key, filename, expected_size, temp_path, status,
         ocr_enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'uploading', ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'uploading', ?, ?, ?)
     `).run(
       id,
+      ownerUserId,
       input.clientKey,
       input.filename,
       input.sizeBytes,
@@ -2527,29 +2752,34 @@ export class EmailDatabase {
     return {
       ...this.mapUploadSession(row),
       clientKey: String(row.client_key),
-      tempPath: String(row.temp_path)
+      tempPath: String(row.temp_path),
+      ownerUserId: row.owner_user_id ? String(row.owner_user_id) : null
     };
   }
 
-  findResumableUpload(clientKey: string): UploadSessionRecord | null {
+  findResumableUpload(clientKey: string, ownerUserId?: string | null): UploadSessionRecord | null {
     const row = this.db.prepare(`
       SELECT * FROM upload_sessions
       WHERE client_key = ? AND status IN ('uploading', 'ready', 'failed')
+        ${ownerUserId ? "AND owner_user_id = ?" : ""}
       ORDER BY updated_at DESC LIMIT 1
-    `).get(clientKey) as Row | undefined;
+    `).get(...(ownerUserId ? [clientKey, ownerUserId] : [clientKey])) as Row | undefined;
     if (!row) return null;
     return {
       ...this.mapUploadSession(row),
       clientKey: String(row.client_key),
-      tempPath: String(row.temp_path)
+      tempPath: String(row.temp_path),
+      ownerUserId: row.owner_user_id ? String(row.owner_user_id) : null
     };
   }
 
-  listUploadSessions(limit = 25): UploadSession[] {
+  listUploadSessions(limit = 25, ownerUserId?: string): UploadSession[] {
     const safeLimit = Math.min(200, Math.max(1, Math.trunc(limit)));
     return (this.db.prepare(`
-      SELECT * FROM upload_sessions ORDER BY updated_at DESC LIMIT ?
-    `).all(safeLimit) as Row[]).map((row) => this.mapUploadSession(row));
+      SELECT * FROM upload_sessions
+      ${ownerUserId ? "WHERE owner_user_id = ?" : ""}
+      ORDER BY updated_at DESC LIMIT ?
+    `).all(...(ownerUserId ? [ownerUserId, safeLimit] : [safeLimit])) as Row[]).map((row) => this.mapUploadSession(row));
   }
 
   deleteUploadSessionsForJob(jobId: string): number {
@@ -2585,13 +2815,25 @@ export class EmailDatabase {
   recordDiagnostic(input: DiagnosticInput): DiagnosticEvent {
     const id = randomUUID();
     const now = new Date().toISOString();
+    const jobOwner = input.jobId
+      ? (this.db.prepare(`
+          SELECT a.owner_user_id
+          FROM import_jobs j JOIN archives a ON a.id = j.archive_id
+          WHERE j.id = ?
+        `).get(input.jobId) as Row | undefined)
+      : undefined;
+    const ownerUserId = input.ownerUserId
+      ?? (input.archiveId ? this.getArchiveOwnerUserId(input.archiveId) : null)
+      ?? (jobOwner?.owner_user_id ? String(jobOwner.owner_user_id) : null)
+      ?? this.primaryAdminUserId();
     this.db.prepare(`
       INSERT INTO diagnostic_events (
-        id, level, category, message, stack, job_id, archive_id,
+        id, owner_user_id, level, category, message, stack, job_id, archive_id,
         source_name, context_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      ownerUserId,
       input.level,
       input.category,
       input.message.slice(0, 4_000),
@@ -2611,6 +2853,8 @@ export class EmailDatabase {
     category?: DiagnosticCategory;
     jobId?: string;
     limit?: number;
+    ownerUserId?: string;
+    includeGlobal?: boolean;
   } = {}): DiagnosticEvent[] {
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -2627,21 +2871,27 @@ export class EmailDatabase {
       params.push(options.category);
     }
     if (options.jobId) {
-      conditions.push("job_id = ?");
+      conditions.push("d.job_id = ?");
       params.push(options.jobId);
+    }
+    if (options.ownerUserId) {
+      conditions.push(`(d.owner_user_id = ? ${options.includeGlobal ? "OR d.owner_user_id IS NULL" : ""})`);
+      params.push(options.ownerUserId);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const limit = Math.min(1_000, Math.max(1, Math.trunc(options.limit ?? 300)));
     return (this.db.prepare(`
-      SELECT * FROM diagnostic_events ${where}
-      ORDER BY created_at DESC LIMIT ?
+      SELECT d.* FROM diagnostic_events d ${where}
+      ORDER BY d.created_at DESC LIMIT ?
     `).all(...params, limit) as Row[]).map((row) => this.mapDiagnostic(row));
   }
 
-  listAllDiagnostics(): DiagnosticEvent[] {
+  listAllDiagnostics(ownerUserId?: string, includeGlobal = false): DiagnosticEvent[] {
     return (this.db.prepare(`
-      SELECT * FROM diagnostic_events ORDER BY created_at DESC
-    `).all() as Row[]).map((row) => this.mapDiagnostic(row));
+      SELECT d.* FROM diagnostic_events d
+      ${ownerUserId ? `WHERE (d.owner_user_id = ? ${includeGlobal ? "OR d.owner_user_id IS NULL" : ""})` : ""}
+      ORDER BY d.created_at DESC
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[]).map((row) => this.mapDiagnostic(row));
   }
 
   createAiJob(input: AiJobCreateInput): AiJob {
@@ -2707,10 +2957,17 @@ export class EmailDatabase {
     return row ? this.mapAiJob(row) : null;
   }
 
-  listAiJobs(limit = 300): AiJob[] {
+  listAiJobs(limit = 300, ownerUserId?: string): AiJob[] {
     return (this.db.prepare(`
-      SELECT * FROM ai_jobs ORDER BY created_at DESC LIMIT ?
-    `).all(Math.min(1_000, Math.max(1, Math.trunc(limit)))) as Row[])
+      SELECT j.* FROM ai_jobs j
+      JOIN messages m ON m.id = j.message_id
+      JOIN archives a ON a.id = m.archive_id
+      ${ownerUserId ? "WHERE a.owner_user_id = ?" : ""}
+      ORDER BY j.created_at DESC LIMIT ?
+    `).all(...(ownerUserId
+      ? [ownerUserId, Math.min(1_000, Math.max(1, Math.trunc(limit)))]
+      : [Math.min(1_000, Math.max(1, Math.trunc(limit)))])
+    ) as Row[])
       .map((row) => this.mapAiJob(row));
   }
 
@@ -2918,7 +3175,7 @@ export class EmailDatabase {
     return { messageId, reviewedAt };
   }
 
-  markAllMessageAnalysesReviewed(): AiAnalysisReviewAllResult {
+  markAllMessageAnalysesReviewed(ownerUserId?: string): AiAnalysisReviewAllResult {
     const reviewedAt = new Date().toISOString();
     const result = this.db.prepare(`
       INSERT INTO ai_analysis_reviews (message_id, reviewed_at)
@@ -2926,7 +3183,9 @@ export class EmailDatabase {
       FROM ai_message_analysis a
       JOIN messages m ON m.id = a.message_id
       JOIN folders f ON f.id = m.folder_id
+      JOIN archives owner_archive ON owner_archive.id = m.archive_id
       WHERE (a.action_required = 1 OR a.draft_recommended = 1 OR a.priority IN ('high', 'urgent'))
+        ${ownerUserId ? "AND owner_archive.owner_user_id = ?" : ""}
         AND lower(trim(f.name)) != 'spam'
         AND NOT EXISTS (
           SELECT 1 FROM ai_analysis_reviews ar WHERE ar.message_id = a.message_id
@@ -2934,7 +3193,7 @@ export class EmailDatabase {
         AND NOT EXISTS (
           SELECT 1 FROM conversation_replies cr WHERE cr.conversation_key = m.conversation_key
         )
-    `).run(reviewedAt);
+    `).run(...(ownerUserId ? [reviewedAt, ownerUserId] : [reviewedAt]));
     return { reviewedCount: result.changes, reviewedAt };
   }
 
@@ -2994,7 +3253,7 @@ export class EmailDatabase {
     );
   }
 
-  listAiSchedules(): AiSchedule[] {
+  listAiSchedules(ownerUserId?: string): AiSchedule[] {
     return (this.db.prepare(`
       SELECT s.*, f.path AS folder_path, f.archive_id AS archive_id, a.name AS archive_name,
         m.subject AS message_subject, gc.email AS gmail_connection_email, r.name AS resume_name,
@@ -3006,8 +3265,9 @@ export class EmailDatabase {
       LEFT JOIN gmail_connections gc ON gc.id = s.gmail_connection_id
       LEFT JOIN resume_assets r ON r.id = s.resume_id
       LEFT JOIN reply_styles rs ON rs.id = s.reply_style_id
+      ${ownerUserId ? "WHERE s.owner_user_id = ?" : ""}
       ORDER BY s.created_at DESC
-    `).all() as Row[]).map((row) => this.mapAiSchedule(row));
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[]).map((row) => this.mapAiSchedule(row));
   }
 
   getAiSchedule(id: string): AiSchedule | null {
@@ -3027,7 +3287,7 @@ export class EmailDatabase {
     return row ? this.mapAiSchedule(row) : null;
   }
 
-  createAiSchedule(input: AiScheduleCreate): AiSchedule {
+  createAiSchedule(input: AiScheduleCreate, ownerUserId?: string | null): AiSchedule {
     this.validateAiScheduleTargets({
       folderId: input.folderId,
       task: input.task ?? "analyze",
@@ -3038,14 +3298,16 @@ export class EmailDatabase {
     });
     const id = randomUUID();
     const now = new Date().toISOString();
+    const resolvedOwnerUserId = ownerUserId ?? this.primaryAdminUserId();
     this.db.prepare(`
       INSERT INTO ai_schedules (
-        id, name, task, folder_id, message_id, gmail_connection_id, resume_id, reply_style_id,
+        id, owner_user_id, name, task, folder_id, message_id, gmail_connection_id, resume_id, reply_style_id,
         mode, interval_minutes, provider, model, skills_json, prompt,
         enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      resolvedOwnerUserId,
       input.name,
       input.task ?? "analyze",
       input.folderId,
@@ -3286,8 +3548,12 @@ export class EmailDatabase {
     `).all(folderId) as Row[]).map((row) => String(row.id));
   }
 
-  listResumeAssets(): ResumeAsset[] {
-    return (this.db.prepare("SELECT * FROM resume_assets ORDER BY created_at DESC").all() as Row[])
+  listResumeAssets(ownerUserId?: string): ResumeAsset[] {
+    return (this.db.prepare(`
+      SELECT * FROM resume_assets
+      ${ownerUserId ? "WHERE owner_user_id = ?" : ""}
+      ORDER BY created_at DESC
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[])
       .map((row) => this.mapResumeAsset(row));
   }
 
@@ -3304,12 +3570,14 @@ export class EmailDatabase {
   createResumeAsset(input: ResumeAssetCreateInput): ResumeAsset {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
+    const ownerUserId = input.ownerUserId ?? this.primaryAdminUserId();
     this.db.prepare(`
       INSERT INTO resume_assets (
-        id, name, filename, content_type, sha256, relative_path, size_bytes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, owner_user_id, name, filename, content_type, sha256, relative_path, size_bytes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      ownerUserId,
       input.name,
       input.filename,
       input.contentType,
@@ -3345,8 +3613,11 @@ export class EmailDatabase {
     );
   }
 
-  listEmailDrafts(): EmailDraft[] {
-    return (this.db.prepare(`${this.emailDraftSelect()} ORDER BY d.updated_at DESC`).all() as Row[])
+  listEmailDrafts(ownerUserId?: string): EmailDraft[] {
+    return (this.db.prepare(`${this.emailDraftSelect()}
+      ${ownerUserId ? "WHERE d.owner_user_id = ?" : ""}
+      ORDER BY d.updated_at DESC
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[])
       .map((row) => this.mapEmailDraft(row));
   }
 
@@ -3481,17 +3752,21 @@ export class EmailDatabase {
     record();
   }
 
-  createEmailDraft(input: EmailDraftCreate): EmailDraft {
+  createEmailDraft(input: EmailDraftCreate, ownerUserId?: string | null): EmailDraft {
     this.validateEmailDraftTargets(input.connectionId, input.sourceMessageId ?? null, input.resumeId ?? null);
     const id = randomUUID();
     const now = new Date().toISOString();
+    const resolvedOwnerUserId = ownerUserId
+      ?? this.getGmailConnectionOwnerUserId(input.connectionId)
+      ?? this.primaryAdminUserId();
     this.db.prepare(`
       INSERT INTO email_drafts (
-        id, connection_id, source_message_id, source, from_address, to_json, cc_json, bcc_json,
+        id, owner_user_id, connection_id, source_message_id, source, from_address, to_json, cc_json, bcc_json,
         subject, body_text, resume_id, created_at, updated_at
-      ) VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      resolvedOwnerUserId,
       input.connectionId,
       input.sourceMessageId ?? null,
       input.fromAddress ?? null,
@@ -3516,14 +3791,18 @@ export class EmailDatabase {
     );
     const id = randomUUID();
     const now = new Date().toISOString();
+    const resolvedOwnerUserId = input.ownerUserId
+      ?? this.getGmailConnectionOwnerUserId(input.connectionId)
+      ?? this.primaryAdminUserId();
     const result = this.db.prepare(`
       INSERT OR IGNORE INTO email_drafts (
-        id, connection_id, source_message_id, schedule_id, source, from_address,
+        id, owner_user_id, connection_id, source_message_id, schedule_id, source, from_address,
         to_json, cc_json, bcc_json, subject, body_text, resume_id, reply_style_id,
         work_related, development_opportunity, ai_reason, ai_confidence, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'ai', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 'ai', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      resolvedOwnerUserId,
       input.connectionId,
       input.sourceMessageId,
       input.scheduleId,
@@ -3649,33 +3928,55 @@ export class EmailDatabase {
     }
   }
 
-  getAdminInsights(): AdminInsights {
-    const totalMessages = Number((this.db.prepare("SELECT COUNT(*) AS count FROM messages").get() as Row).count);
-    const totalAttachments = Number((this.db.prepare("SELECT COUNT(*) AS count FROM attachments").get() as Row).count);
+  getAdminInsights(ownerUserId?: string): AdminInsights {
+    const ownerWhere = ownerUserId ? "WHERE archive.owner_user_id = ?" : "";
+    const ownerAnd = ownerUserId ? "AND archive.owner_user_id = ?" : "";
+    const ownerParams = ownerUserId ? [ownerUserId] : [];
+    const totalMessages = Number((this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM messages m
+      JOIN archives archive ON archive.id = m.archive_id
+      ${ownerWhere}
+    `).get(...ownerParams) as Row).count);
+    const totalAttachments = Number((this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM attachments attachment
+      JOIN messages m ON m.id = attachment.message_id
+      JOIN archives archive ON archive.id = m.archive_id
+      ${ownerWhere}
+    `).get(...ownerParams) as Row).count);
 
     const oldestRow = this.db.prepare(`
-      SELECT id, subject, sender_name, sender_address, COALESCE(sent_at, received_at) AS effective_date
-      FROM messages
-      WHERE COALESCE(sent_at, received_at) IS NOT NULL
+      SELECT m.id, m.subject, m.sender_name, m.sender_address,
+        COALESCE(m.sent_at, m.received_at) AS effective_date
+      FROM messages m
+      JOIN archives archive ON archive.id = m.archive_id
+      WHERE COALESCE(m.sent_at, m.received_at) IS NOT NULL
+        ${ownerAnd}
       ORDER BY effective_date ASC LIMIT 1
-    `).get() as Row | undefined;
+    `).get(...ownerParams) as Row | undefined;
     const newestRow = this.db.prepare(`
-      SELECT id, subject, sender_name, sender_address, COALESCE(sent_at, received_at) AS effective_date
-      FROM messages
-      WHERE COALESCE(sent_at, received_at) IS NOT NULL
+      SELECT m.id, m.subject, m.sender_name, m.sender_address,
+        COALESCE(m.sent_at, m.received_at) AS effective_date
+      FROM messages m
+      JOIN archives archive ON archive.id = m.archive_id
+      WHERE COALESCE(m.sent_at, m.received_at) IS NOT NULL
+        ${ownerAnd}
       ORDER BY effective_date DESC LIMIT 1
-    `).get() as Row | undefined;
+    `).get(...ownerParams) as Row | undefined;
 
     const topSenders = (this.db.prepare(`
       SELECT m.sender_address AS address, MAX(m.sender_name) AS name, COUNT(*) AS count
       FROM messages m
       JOIN folders f ON f.id = m.folder_id
+      JOIN archives archive ON archive.id = m.archive_id
       WHERE m.sender_address != ''
         AND lower(trim(f.name)) != 'spam'
+        ${ownerAnd}
       GROUP BY m.sender_address
       ORDER BY count DESC
       LIMIT 10
-    `).all() as Row[]).map((row) => this.mapTopContact(row));
+    `).all(...ownerParams) as Row[]).map((row) => this.mapTopContact(row));
 
     const topRecipients = (this.db.prepare(`
       SELECT
@@ -3684,23 +3985,34 @@ export class EmailDatabase {
         COUNT(*) AS count
       FROM messages m
       JOIN folders f ON f.id = m.folder_id
+      JOIN archives archive ON archive.id = m.archive_id
       JOIN json_each(m.to_json) AS je
       WHERE lower(trim(f.name)) != 'spam'
         AND json_extract(je.value, '$.address') IS NOT NULL
         AND json_extract(je.value, '$.address') != ''
+        ${ownerAnd}
       GROUP BY address
       ORDER BY count DESC
       LIMIT 10
-    `).all() as Row[]).map((row) => this.mapTopContact(row));
+    `).all(...ownerParams) as Row[]).map((row) => this.mapTopContact(row));
 
-    const analyzedCount = Number(
-      (this.db.prepare("SELECT COUNT(*) AS count FROM ai_message_analysis").get() as Row).count
-    );
+    const analyzedCount = Number((this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM ai_message_analysis analysis
+      JOIN messages m ON m.id = analysis.message_id
+      JOIN archives archive ON archive.id = m.archive_id
+      ${ownerWhere}
+    `).get(...ownerParams) as Row).count);
     let analysis: AdminInsights["analysis"] = null;
     if (analyzedCount > 0) {
       const priorityRows = this.db.prepare(`
-        SELECT priority, COUNT(*) AS count FROM ai_message_analysis GROUP BY priority
-      `).all() as Row[];
+        SELECT analysis.priority, COUNT(*) AS count
+        FROM ai_message_analysis analysis
+        JOIN messages m ON m.id = analysis.message_id
+        JOIN archives archive ON archive.id = m.archive_id
+        ${ownerWhere}
+        GROUP BY analysis.priority
+      `).all(...ownerParams) as Row[];
       const priorityBreakdown: Record<AiPriority, number> = { low: 0, normal: 0, high: 0, urgent: 0 };
       for (const row of priorityRows) {
         const priority = row.priority as AiPriority;
@@ -3708,27 +4020,35 @@ export class EmailDatabase {
       }
       const topCategories = (this.db.prepare(`
         SELECT je.value AS category, COUNT(*) AS count
-        FROM ai_message_analysis a, json_each(a.categories_json) je
+        FROM ai_message_analysis analysis
+        JOIN messages m ON m.id = analysis.message_id
+        JOIN archives archive ON archive.id = m.archive_id
+        JOIN json_each(analysis.categories_json) je
+        ${ownerWhere}
         GROUP BY category
         ORDER BY count DESC
         LIMIT 10
-      `).all() as Row[]).map((row) => ({ category: String(row.category), count: Number(row.count) }));
-      const actionRequiredCount = Number((this.db.prepare(
-        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE action_required = 1"
-      ).get() as Row).count);
-      const draftRecommendedCount = Number((this.db.prepare(
-        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE draft_recommended = 1"
-      ).get() as Row).count);
-      const flaggedSpamCount = Number((this.db.prepare(
-        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE spam_probability >= 0.5"
-      ).get() as Row).count);
-      const flaggedPhishingCount = Number((this.db.prepare(
-        "SELECT COUNT(*) AS count FROM ai_message_analysis WHERE phishing_probability >= 0.5"
-      ).get() as Row).count);
+      `).all(...ownerParams) as Row[]).map((row) => ({ category: String(row.category), count: Number(row.count) }));
+      const analysisCount = (condition: string) => Number((this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM ai_message_analysis analysis
+        JOIN messages m ON m.id = analysis.message_id
+        JOIN archives archive ON archive.id = m.archive_id
+        WHERE ${condition}
+          ${ownerAnd}
+      `).get(...ownerParams) as Row).count);
+      const actionRequiredCount = analysisCount("analysis.action_required = 1");
+      const draftRecommendedCount = analysisCount("analysis.draft_recommended = 1");
+      const flaggedSpamCount = analysisCount("analysis.spam_probability >= 0.5");
+      const flaggedPhishingCount = analysisCount("analysis.phishing_probability >= 0.5");
       const averages = this.db.prepare(`
-        SELECT AVG(spam_probability) AS avg_spam, AVG(phishing_probability) AS avg_phishing
-        FROM ai_message_analysis
-      `).get() as Row;
+        SELECT AVG(analysis.spam_probability) AS avg_spam,
+          AVG(analysis.phishing_probability) AS avg_phishing
+        FROM ai_message_analysis analysis
+        JOIN messages m ON m.id = analysis.message_id
+        JOIN archives archive ON archive.id = m.archive_id
+        ${ownerWhere}
+      `).get(...ownerParams) as Row;
       analysis = {
         analyzedCount,
         priorityBreakdown,
@@ -4038,12 +4358,21 @@ export class EmailDatabase {
     return this.getSenderFilingStatus(archiveId);
   }
 
-  listSmartMailRules(archiveId?: string): SmartMailRule[] {
-    const rows = archiveId
-      ? this.db.prepare(`${this.smartMailRuleSelect()} WHERE r.archive_id = ? ORDER BY r.created_at DESC`)
-          .all(archiveId) as Row[]
-      : this.db.prepare(`${this.smartMailRuleSelect()} ORDER BY a.name COLLATE NOCASE, r.created_at DESC`)
-          .all() as Row[];
+  listSmartMailRules(archiveId?: string, ownerUserId?: string): SmartMailRule[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (archiveId) {
+      conditions.push("r.archive_id = ?");
+      params.push(archiveId);
+    }
+    if (ownerUserId) {
+      conditions.push("a.owner_user_id = ?");
+      params.push(ownerUserId);
+    }
+    const rows = this.db.prepare(`${this.smartMailRuleSelect()}
+      ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
+      ORDER BY a.name COLLATE NOCASE, r.created_at DESC
+    `).all(...params) as Row[];
     return rows.map((row) => this.mapSmartMailRule(row));
   }
 
@@ -4428,12 +4757,16 @@ export class EmailDatabase {
 
   createGmailConnection(input: GmailConnectionCreateInput): GmailConnection {
     const now = new Date().toISOString();
+    const ownerUserId = input.ownerUserId ?? this.primaryAdminUserId();
     const create = this.db.transaction(() => {
       const folder = this.db.prepare(`
         SELECT f.id FROM folders f
         JOIN archives a ON a.id = f.archive_id
         WHERE f.id = ? AND f.archive_id = ? AND a.status != 'importing'
-      `).get(input.folderId, input.archiveId);
+          ${ownerUserId ? "AND a.owner_user_id = ?" : ""}
+      `).get(...(ownerUserId
+        ? [input.folderId, input.archiveId, ownerUserId]
+        : [input.folderId, input.archiveId]));
       if (!folder) throw new Error("The Gmail destination mailbox is unavailable");
 
       const existing = this.db.prepare(`
@@ -4445,12 +4778,14 @@ export class EmailDatabase {
       if (existing) {
         this.db.prepare(`
           UPDATE gmail_connections SET
+            owner_user_id = ?,
             query = ?, ocr_enabled = ?, refresh_token = ?, access_token = ?,
             access_token_expires_at = ?, can_send = ?, can_modify_mailbox = ?, can_manage_calendar = ?,
             status = 'connected', last_error = NULL,
             updated_at = ?
           WHERE id = ?
         `).run(
+          ownerUserId,
           input.query,
           input.ocrEnabled ? 1 : 0,
           input.refreshToken,
@@ -4465,12 +4800,13 @@ export class EmailDatabase {
       } else {
         this.db.prepare(`
           INSERT INTO gmail_connections (
-            id, email, archive_id, folder_id, query, ocr_enabled,
+            id, owner_user_id, email, archive_id, folder_id, query, ocr_enabled,
             refresh_token, access_token, access_token_expires_at,
             can_send, can_modify_mailbox, can_manage_calendar, status, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected', ?, ?)
         `).run(
           id,
+          ownerUserId,
           input.email,
           input.archiveId,
           input.folderId,
@@ -4496,19 +4832,25 @@ export class EmailDatabase {
     return row ? this.mapGmailConnection(row) : null;
   }
 
+  getGmailConnectionOwnerUserId(id: string): string | null {
+    const row = this.db.prepare("SELECT owner_user_id FROM gmail_connections WHERE id = ?").get(id) as Row | undefined;
+    return row?.owner_user_id ? String(row.owner_user_id) : null;
+  }
+
   getGmailConnectionRecord(id: string): GmailConnectionRecord | null {
     const row = this.gmailConnectionRow(id);
     return row ? this.mapGmailConnectionRecord(row) : null;
   }
 
-  listGmailConnections(): GmailConnection[] {
+  listGmailConnections(ownerUserId?: string): GmailConnection[] {
     return (this.db.prepare(`
       SELECT c.*, a.name AS archive_name, f.path AS folder_path
       FROM gmail_connections c
       JOIN archives a ON a.id = c.archive_id
       JOIN folders f ON f.id = c.folder_id
+      ${ownerUserId ? "WHERE c.owner_user_id = ?" : ""}
       ORDER BY c.updated_at DESC
-    `).all() as Row[]).map((row) => this.mapGmailConnection(row));
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[]).map((row) => this.mapGmailConnection(row));
   }
 
   getGmailMessageMutationTargets(messageIds: string[]): GmailMessageMutationTarget[] {
@@ -4741,19 +5083,22 @@ export class EmailDatabase {
   createCalendarAccount(input: CalendarAccountCreateInput): CalendarAccount {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
+    const ownerUserId = input.ownerUserId ?? this.primaryAdminUserId();
     this.db.prepare(`
       INSERT INTO calendar_accounts (
-        id, provider, label, username, server_url, secret,
+        id, owner_user_id, provider, label, username, server_url, secret,
         status, last_error, created_at, updated_at
-      ) VALUES (?, 'apple', ?, ?, ?, ?, 'connected', NULL, ?, ?)
-    `).run(id, input.label, input.username, input.serverUrl, input.secret, now, now);
+      ) VALUES (?, ?, 'apple', ?, ?, ?, ?, 'connected', NULL, ?, ?)
+    `).run(id, ownerUserId, input.label, input.username, input.serverUrl, input.secret, now, now);
     return this.getCalendarAccount(id)!;
   }
 
-  listCalendarAccounts(): CalendarAccount[] {
+  listCalendarAccounts(ownerUserId?: string): CalendarAccount[] {
     return (this.db.prepare(`
-      SELECT * FROM calendar_accounts ORDER BY provider, label COLLATE NOCASE, created_at
-    `).all() as Row[]).map((row) => this.mapCalendarAccount(row));
+      SELECT * FROM calendar_accounts
+      ${ownerUserId ? "WHERE owner_user_id = ?" : ""}
+      ORDER BY provider, label COLLATE NOCASE, created_at
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[]).map((row) => this.mapCalendarAccount(row));
   }
 
   getCalendarAccount(id: string): CalendarAccount | null {
@@ -4788,8 +5133,12 @@ export class EmailDatabase {
     `).get(...archiveIds));
   }
 
-  clearDiagnostics(): number {
-    return this.db.prepare("DELETE FROM diagnostic_events").run().changes;
+  clearDiagnostics(ownerUserId?: string, includeGlobal = false): number {
+    if (!ownerUserId) return this.db.prepare("DELETE FROM diagnostic_events").run().changes;
+    return this.db.prepare(`
+      DELETE FROM diagnostic_events
+      WHERE owner_user_id = ? ${includeGlobal ? "OR owner_user_id IS NULL" : ""}
+    `).run(ownerUserId).changes;
   }
 
   createFolder(archiveId: string, name: string, parentId: string | null = null): Folder {
@@ -5263,12 +5612,16 @@ export class EmailDatabase {
     return result.changes > 0;
   }
 
-  listMessages(options: Omit<SearchFilters, "sort">): CursorPage<MessageSummary> {
+  listMessages(options: Omit<SearchFilters, "sort"> & { ownerUserId?: string }): CursorPage<MessageSummary> {
     const limit = clampLimit(options.limit);
     const cursor = decodeMessageCursor(options.cursor);
     const conditions: string[] = [];
     const params: unknown[] = [];
     appendMessageFilters(options, conditions, params);
+    if (options.ownerUserId) {
+      conditions.push("EXISTS (SELECT 1 FROM archives owner_archive WHERE owner_archive.id = m.archive_id AND owner_archive.owner_user_id = ?)");
+      params.push(options.ownerUserId);
+    }
     if (cursor) {
       conditions.push(`(
         COALESCE(m.received_at, m.sent_at, '') < ?
@@ -5297,7 +5650,12 @@ export class EmailDatabase {
     };
   }
 
-  countInboxCategories(options: { archiveId?: string; folderId?: string; isRead?: boolean }): InboxCategoryCounts {
+  countInboxCategories(options: {
+    archiveId?: string;
+    folderId?: string;
+    isRead?: boolean;
+    ownerUserId?: string;
+  }): InboxCategoryCounts {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (options.archiveId) {
@@ -5311,6 +5669,10 @@ export class EmailDatabase {
     if (options.isRead !== undefined) {
       conditions.push("COALESCE(s.is_read, 0) = ?");
       params.push(options.isRead ? 1 : 0);
+    }
+    if (options.ownerUserId) {
+      conditions.push("EXISTS (SELECT 1 FROM archives owner_archive WHERE owner_archive.id = m.archive_id AND owner_archive.owner_user_id = ?)");
+      params.push(options.ownerUserId);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.db.prepare(`
@@ -5572,12 +5934,21 @@ export class EmailDatabase {
     return this.getMessageFollowUp(id)!;
   }
 
-  listMessageFollowUps(status?: MessageFollowUp["status"]): MessageFollowUp[] {
-    const rows = status
-      ? this.db.prepare(`${this.messageFollowUpSelect()} WHERE fu.status = ? ORDER BY fu.due_at, fu.created_at`)
-          .all(status) as Row[]
-      : this.db.prepare(`${this.messageFollowUpSelect()} ORDER BY CASE fu.status WHEN 'pending' THEN 0 ELSE 1 END, fu.due_at, fu.created_at`)
-          .all() as Row[];
+  listMessageFollowUps(status?: MessageFollowUp["status"], ownerUserId?: string): MessageFollowUp[] {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (status) {
+      conditions.push("fu.status = ?");
+      params.push(status);
+    }
+    if (ownerUserId) {
+      conditions.push("a.owner_user_id = ?");
+      params.push(ownerUserId);
+    }
+    const rows = this.db.prepare(`${this.messageFollowUpSelect()}
+      ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
+      ORDER BY CASE fu.status WHEN 'pending' THEN 0 ELSE 1 END, fu.due_at, fu.created_at
+    `).all(...params) as Row[];
     return rows.map((row) => this.mapMessageFollowUp(row));
   }
 
@@ -5611,10 +5982,12 @@ export class EmailDatabase {
     return this.db.prepare("DELETE FROM message_follow_ups WHERE id = ?").run(id).changes > 0;
   }
 
-  listReplyStyles(): ReplyStyle[] {
+  listReplyStyles(ownerUserId?: string): ReplyStyle[] {
     return (this.db.prepare(`
-      SELECT * FROM reply_styles ORDER BY is_default DESC, name COLLATE NOCASE
-    `).all() as Row[]).map((row) => this.mapReplyStyle(row));
+      SELECT * FROM reply_styles
+      ${ownerUserId ? "WHERE owner_user_id = ?" : ""}
+      ORDER BY is_default DESC, name COLLATE NOCASE
+    `).all(...(ownerUserId ? [ownerUserId] : [])) as Row[]).map((row) => this.mapReplyStyle(row));
   }
 
   getReplyStyle(id: string): ReplyStyle | null {
@@ -5622,15 +5995,19 @@ export class EmailDatabase {
     return row ? this.mapReplyStyle(row) : null;
   }
 
-  createReplyStyle(input: ReplyStyleCreate): ReplyStyle {
+  createReplyStyle(input: ReplyStyleCreate, ownerUserId?: string | null): ReplyStyle {
     const id = randomUUID();
     const now = new Date().toISOString();
+    const resolvedOwnerUserId = ownerUserId ?? this.primaryAdminUserId();
     const create = this.db.transaction(() => {
-      if (input.isDefault) this.db.prepare("UPDATE reply_styles SET is_default = 0, updated_at = ?").run(now);
+      if (input.isDefault) this.db.prepare(`
+        UPDATE reply_styles SET is_default = 0, updated_at = ?
+        WHERE owner_user_id IS ?
+      `).run(now, resolvedOwnerUserId);
       this.db.prepare(`
-        INSERT INTO reply_styles (id, name, tone, instructions, is_default, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(id, input.name, input.tone, input.instructions, input.isDefault ? 1 : 0, now, now);
+        INSERT INTO reply_styles (id, owner_user_id, name, tone, instructions, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, resolvedOwnerUserId, input.name, input.tone, input.instructions, input.isDefault ? 1 : 0, now, now);
     });
     create();
     return this.getReplyStyle(id)!;
@@ -5641,7 +6018,10 @@ export class EmailDatabase {
     if (!existing) throw new Error("Reply style not found");
     const now = new Date().toISOString();
     const update = this.db.transaction(() => {
-      if (patch.isDefault) this.db.prepare("UPDATE reply_styles SET is_default = 0, updated_at = ?").run(now);
+      if (patch.isDefault) this.db.prepare(`
+        UPDATE reply_styles SET is_default = 0, updated_at = ?
+        WHERE owner_user_id IS (SELECT owner_user_id FROM reply_styles WHERE id = ?)
+      `).run(now, id);
       const columns: string[] = [];
       const values: unknown[] = [];
       if (patch.name !== undefined) { columns.push("name = ?"); values.push(patch.name); }
@@ -5666,15 +6046,17 @@ export class EmailDatabase {
     return remove();
   }
 
-  getAiReviewQueue(limit = 100): AiReviewQueue {
+  getAiReviewQueue(limit = 100, ownerUserId?: string): AiReviewQueue {
     const safeLimit = Math.min(250, Math.max(1, Math.trunc(limit)));
-    const drafts = this.listEmailDrafts().filter((draft) => draft.source === "ai").slice(0, safeLimit);
+    const drafts = this.listEmailDrafts(ownerUserId).filter((draft) => draft.source === "ai").slice(0, safeLimit);
     const analysisRows = this.db.prepare(`
       SELECT a.message_id
       FROM ai_message_analysis a
       JOIN messages m ON m.id = a.message_id
       JOIN folders f ON f.id = m.folder_id
+      JOIN archives owner_archive ON owner_archive.id = m.archive_id
       WHERE (a.action_required = 1 OR a.draft_recommended = 1 OR a.priority IN ('high', 'urgent'))
+        ${ownerUserId ? "AND owner_archive.owner_user_id = ?" : ""}
         AND lower(trim(f.name)) != 'spam'
         AND NOT EXISTS (
           SELECT 1 FROM ai_analysis_reviews ar WHERE ar.message_id = a.message_id
@@ -5684,13 +6066,13 @@ export class EmailDatabase {
         )
       ORDER BY CASE a.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, a.updated_at DESC
       LIMIT ?
-    `).all(safeLimit) as Row[];
+    `).all(...(ownerUserId ? [ownerUserId, safeLimit] : [safeLimit])) as Row[];
     const analyses = analysisRows.flatMap((row) => {
       const message = this.getMessage(String(row.message_id));
       const analysis = this.getMessageAnalysis(String(row.message_id));
       return message && analysis ? [{ message, analysis }] : [];
     });
-    const followUps = this.listMessageFollowUps("pending").slice(0, safeLimit);
+    const followUps = this.listMessageFollowUps("pending", ownerUserId).slice(0, safeLimit);
     return {
       drafts,
       analyses,
@@ -5704,6 +6086,7 @@ export class EmailDatabase {
       SELECT fu.*, m.subject, m.sender_name, m.sender_address
       FROM message_follow_ups fu
       JOIN messages m ON m.id = fu.message_id
+      JOIN archives a ON a.id = m.archive_id
     `;
   }
 
@@ -5791,6 +6174,10 @@ export class EmailDatabase {
     const filterParams: unknown[] = [];
 
     appendMessageFilters(options, filters, filterParams);
+    if (options.ownerUserId) {
+      filters.push("EXISTS (SELECT 1 FROM archives owner_archive WHERE owner_archive.id = m.archive_id AND owner_archive.owner_user_id = ?)");
+      filterParams.push(options.ownerUserId);
+    }
 
     const filterSql = filters.length ? `AND ${filters.join(" AND ")}` : "";
     const sortSql = options.sort === "newest"
@@ -6780,24 +7167,27 @@ export class EmailDatabase {
     `).run(connectionId, eventId);
   }
 
-  listTodos(startDate: string, endDate: string): TodoItem[] {
+  listTodos(startDate: string, endDate: string, ownerUserId?: string): TodoItem[] {
     return (this.db.prepare(`
       SELECT * FROM todos
       WHERE todo_date BETWEEN ? AND ?
+        ${ownerUserId ? "AND owner_user_id = ?" : ""}
       ORDER BY todo_date, position, created_at
-    `).all(startDate, endDate) as Row[]).map((row) => this.mapTodo(row));
+    `).all(...(ownerUserId ? [startDate, endDate, ownerUserId] : [startDate, endDate])) as Row[]).map((row) => this.mapTodo(row));
   }
 
-  createTodo(input: TodoCreate): TodoItem {
+  createTodo(input: TodoCreate, ownerUserId?: string | null): TodoItem {
     const now = new Date().toISOString();
     const id = randomUUID();
+    const resolvedOwnerUserId = ownerUserId ?? this.primaryAdminUserId();
     const nextPosition = this.db.prepare(
-      "SELECT COALESCE(MAX(position), -1) + 1 AS next FROM todos WHERE todo_date = ?"
-    ).get(input.date) as Row;
+      `SELECT COALESCE(MAX(position), -1) + 1 AS next FROM todos
+       WHERE todo_date = ? AND owner_user_id IS ?`
+    ).get(input.date, resolvedOwnerUserId) as Row;
     this.db.prepare(`
-      INSERT INTO todos (id, todo_date, text, completed, position, created_at, updated_at)
-      VALUES (?, ?, ?, 0, ?, ?, ?)
-    `).run(id, input.date, input.text.trim(), Number(nextPosition.next), now, now);
+      INSERT INTO todos (id, owner_user_id, todo_date, text, completed, position, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+    `).run(id, resolvedOwnerUserId, input.date, input.text.trim(), Number(nextPosition.next), now, now);
     return this.getTodo(id)!;
   }
 
