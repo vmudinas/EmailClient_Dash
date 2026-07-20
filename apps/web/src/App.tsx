@@ -49,15 +49,17 @@ import type {
   LocalMessageStatePatch,
   MessageActionSuggestion,
   MessageDetail,
+  MessageFilingSuggestion,
   MessageSummary,
   NewsHeadline,
   RuntimeConfig,
   SearchFilters,
   SearchHit,
   SharingState,
-  StockQuote
+  StockQuote,
+  UserScreenId
 } from "@email-client/shared";
-import { DEFAULT_INBOX_TABS } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS, userCanAccessScreen } from "@email-client/shared";
 import { Sidebar } from "./components/Sidebar.js";
 import {
   MessageList,
@@ -257,6 +259,7 @@ export function App() {
 
   const readOnly = !session || session.role === "viewer";
   const isAdmin = session?.role === "admin";
+  const canAccessScreen = (screen: UserScreenId) => !session || userCanAccessScreen(session.user, screen);
   const electron = Boolean(window.emailClient);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
@@ -482,8 +485,10 @@ export function App() {
     ));
   }, [api]);
 
+  const importScreenAllowed = !session || userCanAccessScreen(session.user, "import");
+
   const refreshJobs = useCallback(async () => {
-    if (!api || readOnly) return;
+    if (!api || readOnly || !importScreenAllowed) return;
     try {
       const loaded = await api.listImportJobs();
       setJobs(loaded);
@@ -493,7 +498,7 @@ export function App() {
     } catch (error) {
       showError(error instanceof Error ? error.message : "Import status could not be loaded");
     }
-  }, [api, readOnly, refreshArchives, showError]);
+  }, [api, readOnly, importScreenAllowed, refreshArchives, showError]);
 
   const refreshDiagnostics = useCallback(async () => {
     if (!api || readOnly) return;
@@ -810,6 +815,12 @@ export function App() {
   };
 
   const openImport = () => {
+    // Also reached from the Sidebar's import buttons, so guard here rather
+    // than only hiding the top-bar entry point.
+    if (!canAccessScreen("import")) {
+      showError("Import access is disabled for this account. Ask an administrator to enable it.");
+      return;
+    }
     setImportProgress(null);
     setImportError("");
     setImportOpen(true);
@@ -1105,8 +1116,10 @@ export function App() {
     void loadDrafts();
   };
 
+  const aiScreenAllowed = !session || userCanAccessScreen(session.user, "ai");
+
   const refreshReviewQueue = useCallback(async () => {
-    if (!api) return;
+    if (!api || !aiScreenAllowed) return;
     setReviewQueueLoading(true);
     try {
       setReviewQueue(await api.getAiReviewQueue());
@@ -1115,14 +1128,14 @@ export function App() {
     } finally {
       setReviewQueueLoading(false);
     }
-  }, [api, showError]);
+  }, [api, aiScreenAllowed, showError]);
 
   useEffect(() => {
-    if (!api || !session) return;
+    if (!api || !session || !aiScreenAllowed) return;
     void refreshReviewQueue();
     const interval = window.setInterval(() => void refreshReviewQueue(), 30_000);
     return () => window.clearInterval(interval);
-  }, [api, session?.id, refreshReviewQueue]);
+  }, [api, session?.id, aiScreenAllowed, refreshReviewQueue]);
 
   const openReviewQueue = () => {
     setReviewQueueOpen(true);
@@ -1603,6 +1616,10 @@ export function App() {
         + `Confidence: ${confidence}%\n${suggestion.reason}\n\nMove all selected messages to this folder?`
       );
       if (!accepted) return;
+      // Snapshot before the refresh below removes the moved rows from the list.
+      const movedSummaries = items
+        .filter((item) => messageIds.includes(item.message.id))
+        .map((item) => item.message);
       const result = await api.bulkMoveMessagesToFolder(messageIds, suggestion.folderId);
       if (message && messageIds.includes(message.id)) {
         setSelectedMessageId(null);
@@ -1619,11 +1636,65 @@ export function App() {
         + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
         + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : "")
       );
+      await offerSmartRuleForFiling(movedSummaries, suggestion);
     } catch (error) {
       showError(error instanceof Error ? error.message : "AI could not recommend a mailbox");
     } finally {
       setAiFilingBusy(false);
       setBulkActionBusy(false);
+    }
+  };
+
+  // After an accepted AI filing move, offer to turn the decision into a smart
+  // rule and sweep every folder with it, so similar mail is filed the same way
+  // from now on.
+  const offerSmartRuleForFiling = async (movedMessages: MessageSummary[], filing: MessageFilingSuggestion) => {
+    if (!api || !filing.folderId || !filing.folderPath) return;
+    if (!isAdmin && !canAccessScreen("settings")) return;
+    const archiveId = movedMessages[0]?.archiveId ?? selectedArchiveId;
+    if (!archiveId || movedMessages.some((moved) => moved.archiveId !== archiveId)) return;
+    if (!window.confirm(
+      `Create a smart rule so emails like these are filed to "${filing.folderPath}" automatically?\n\n`
+      + "AI will draft the rule for your review, and you can apply it to every folder right away."
+    )) return;
+
+    try {
+      const senders = [...new Set(movedMessages.map((moved) => moved.sender.address).filter(Boolean))].slice(0, 10);
+      const subjects = [...new Set(movedMessages.map((moved) => moved.subject).filter(Boolean))].slice(0, 5);
+      const instruction = [
+        `Move emails like the following to the folder "${filing.folderPath}".`,
+        senders.length ? `They come from senders such as: ${senders.join(", ")}.` : "",
+        subjects.length ? `Subjects look like: ${subjects.map((subject) => `"${subject}"`).join("; ")}.` : "",
+        filing.reason ? `They were filed there because: ${filing.reason}` : ""
+      ].filter(Boolean).join("\n").slice(0, 4_000);
+      const draft = await api.suggestSmartMailRule({ archiveId, instruction });
+      const conditionParts = [
+        draft.conditions.senderContains.length ? `sender contains ${draft.conditions.senderContains.join(", ")}` : "",
+        draft.conditions.subjectContains.length ? `subject contains ${draft.conditions.subjectContains.join(", ")}` : "",
+        draft.conditions.bodyContains.length ? `body contains ${draft.conditions.bodyContains.join(", ")}` : "",
+        draft.conditions.hasAttachments === null ? "" : draft.conditions.hasAttachments ? "has attachments" : "has no attachments"
+      ].filter(Boolean).join(draft.conditions.match === "all" ? " AND " : " OR ");
+      if (!window.confirm(
+        `AI drafted this rule:\n\n"${draft.name}"\nWhen ${conditionParts || "…"}\nMove to "${filing.folderPath}"\n\n`
+        + `${draft.explanation}\n\nCreate the rule and apply it to every folder now?`
+      )) return;
+      const rule = await api.createSmartMailRule({
+        archiveId,
+        name: draft.name,
+        instruction,
+        conditions: draft.conditions,
+        targetFolderId: filing.folderId,
+        markRead: draft.markRead,
+        star: draft.star,
+        enabled: true,
+        applyExisting: false
+      });
+      await api.runSmartMailRule(rule.id, "all");
+      showError(
+        `Smart rule "${rule.name}" created. It is sweeping every folder in the background and will file future mail automatically (manage it under Settings → Smart rules).`
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The smart rule could not be created");
     }
   };
 
@@ -1986,40 +2057,44 @@ export function App() {
           >
             {showReadMessages ? <EyeOff size={18} /> : <Eye size={18} />}
           </button>
-          <button
-            className={`icon-button calendar-trigger ${viewMode === "calendar" ? "active" : ""}`}
-            onClick={() => setViewMode((current) => (current === "calendar" ? "mail" : "calendar"))}
-            title={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
-            aria-label={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
-          >
-            {viewMode === "calendar" ? <Mail size={18} /> : <CalendarDays size={18} />}
-          </button>
+          {canAccessScreen("calendar") && (
+            <button
+              className={`icon-button calendar-trigger ${viewMode === "calendar" ? "active" : ""}`}
+              onClick={() => setViewMode((current) => (current === "calendar" ? "mail" : "calendar"))}
+              title={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
+              aria-label={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
+            >
+              {viewMode === "calendar" ? <Mail size={18} /> : <CalendarDays size={18} />}
+            </button>
+          )}
           {electron && isAdmin && (
             <button className="icon-button sharing-trigger" onClick={() => void openSharing()} title="Open iPhone viewer" aria-label="Open iPhone viewer">
               <MonitorSmartphone size={18} />
             </button>
           )}
-          {!readOnly && (
+          {!readOnly && canAccessScreen("compose") && (
             <button className="icon-button drafts-trigger" onClick={openDrafts} title="Open drafts" aria-label="Open drafts">
               <FileEdit size={18} />
             </button>
           )}
-          <button className="icon-button review-queue-trigger" onClick={openReviewQueue} title="Open AI review queue" aria-label="Open AI review queue">
-            <BrainCircuit size={18} />
-            {(reviewQueue?.totalItems ?? 0) > 0 && <span className="diagnostic-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
-          </button>
-          {!readOnly && (
+          {canAccessScreen("ai") && (
+            <button className="icon-button review-queue-trigger" onClick={openReviewQueue} title="Open AI review queue" aria-label="Open AI review queue">
+              <BrainCircuit size={18} />
+              {(reviewQueue?.totalItems ?? 0) > 0 && <span className="diagnostic-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
+            </button>
+          )}
+          {!readOnly && canAccessScreen("compose") && (
             <button className="icon-button compose-trigger" onClick={() => openCompose()} title="Compose email" aria-label="Compose email">
               <MailPlus size={18} />
             </button>
           )}
-          {isAdmin && (
-            <button className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)} title="Open admin settings" aria-label="Open admin settings">
+          {!readOnly && (isAdmin || canAccessScreen("settings")) && (
+            <button className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)} title={isAdmin ? "Open admin settings" : "Open personal settings"} aria-label={isAdmin ? "Open admin settings" : "Open personal settings"}>
               <SettingsIcon size={18} />
-              {pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
+              {isAdmin && pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
             </button>
           )}
-          {!readOnly && (
+          {!readOnly && canAccessScreen("import") && (
             <button className="primary-button top-import" onClick={openImport}>
               <Import size={17} /> <span>Import</span>
             </button>
@@ -2171,15 +2246,19 @@ export function App() {
         }}>
           <List size={19} /><span>Mail</span>
         </button>
-        <button className="mobile-compose-nav" onClick={() => openCompose()} disabled={readOnly}>
-          <span className="mobile-compose-icon"><MailPlus size={21} /></span><span>Compose</span>
-        </button>
-        <button className={viewMode === "calendar" ? "selected" : ""} onClick={() => {
-          setMobileMenuOpen(false);
-          setViewMode("calendar");
-        }}>
-          <CalendarDays size={19} /><span>Calendar</span>
-        </button>
+        {canAccessScreen("compose") && (
+          <button className="mobile-compose-nav" onClick={() => openCompose()} disabled={readOnly}>
+            <span className="mobile-compose-icon"><MailPlus size={21} /></span><span>Compose</span>
+          </button>
+        )}
+        {canAccessScreen("calendar") && (
+          <button className={viewMode === "calendar" ? "selected" : ""} onClick={() => {
+            setMobileMenuOpen(false);
+            setViewMode("calendar");
+          }}>
+            <CalendarDays size={19} /><span>Calendar</span>
+          </button>
+        )}
         <button className={mobileMenuOpen ? "selected" : ""} onClick={() => setMobileMenuOpen((open) => !open)} aria-expanded={mobileMenuOpen}>
           <MoreHorizontal size={20} /><span>More</span>
           {(reviewQueue?.totalItems ?? 0) > 0 && <span className="mobile-nav-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
@@ -2197,11 +2276,11 @@ export function App() {
               <button className="icon-button" onClick={() => setMobileMenuOpen(false)} aria-label="Close more actions"><X size={19} /></button>
             </header>
             <div className="mobile-action-grid">
-              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openDrafts(); }}><FileEdit size={20} /><span>Drafts</span></button>}
-              <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>
+              {!readOnly && canAccessScreen("compose") && <button onClick={() => { setMobileMenuOpen(false); openDrafts(); }}><FileEdit size={20} /><span>Drafts</span></button>}
+              {canAccessScreen("ai") && <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>}
               <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>
-              {!readOnly && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
-              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>Admin</span>{pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
+              {!readOnly && canAccessScreen("import") && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
+              {!readOnly && (isAdmin || canAccessScreen("settings")) && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>{isAdmin ? "Admin" : "Settings"}</span>{isAdmin && pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
               {electron && isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
             </div>
             <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>
@@ -2374,7 +2453,7 @@ export function App() {
         />
       )}
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
-      {isAdmin && (
+      {!readOnly && (
         <SettingsDialog
           open={settingsOpen}
           api={api}

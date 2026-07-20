@@ -27,6 +27,14 @@ id -g
 
 The secure default binds port `3001` only to `127.0.0.1` for a same-host reverse proxy. Set `ARCHIVE_MAIL_BIND_ADDRESS=0.0.0.0` only for direct LAN access protected by the server firewall.
 
+Normal username/PIN login from another device is disabled by default because the desktop QR flow is read-only. For a server deployment on a trusted LAN or behind HTTPS, set:
+
+```dotenv
+EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true
+```
+
+Paired QR sessions remain read-only. A normal remote login receives the configured user's full role.
+
 Useful commands:
 
 ```bash
@@ -36,6 +44,8 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml restart archive-mai
 ```
 
 Run `./deploy/scripts/deploy.sh` again after pulling source changes. It rebuilds the production image, recreates the service, and waits for `/api/health` to report healthy.
+
+Database migrations run automatically when the recreated container starts. On the first build containing private user workspaces, existing mail and account configuration are assigned to the first active administrator; newly created users begin with empty private mail and calendar workspaces.
 
 ## Synology NAS
 
@@ -51,6 +61,8 @@ ARCHIVE_MAIL_DATA_DIR=/volume1/docker/archive-mail/data
 ARCHIVE_MAIL_BACKUP_DIR=/volume1/docker/archive-mail/backups
 ARCHIVE_MAIL_UID=1026
 ARCHIVE_MAIL_GID=100
+ARCHIVE_MAIL_BIND_ADDRESS=0.0.0.0
+EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true
 ```
 
 Use `id -u your-dsm-user` and `id -g your-dsm-user` over SSH instead of assuming the example IDs. Then run:
@@ -63,6 +75,58 @@ cd /volume1/docker/archive-mail/app
 ### Container Manager project method
 
 Synology Container Manager can create a Project from a Compose file. Choose the repository's `deploy` directory as the project path and use `compose.yaml`; keep `deploy/.env` in that same directory. Build and start the project. The compose build context is the repository root, so the entire repository must remain together.
+
+If Container Manager reuses a stale image or container, create a DSM **Task Scheduler > Scheduled Task > User-defined script** task, run it as `root`, schedule it every minute, and use this command:
+
+```bash
+/volume1/docker/archive-mail/app/deploy/scripts/synology-deploy-task.sh
+```
+
+Name the task `Archive Mail deployment`. The task exits immediately unless the upload script has created a deployment request marker, so the one-minute schedule does not rebuild continuously. To verify the one-time setup, create `/volume1/docker/archive-mail/backups/rebuild.request` and run the task manually once. The script builds without cache, recreates the service, verifies remote-login configuration, and waits for a healthy container. It never removes the bind-mounted data directory.
+
+After that one-time root-task setup, every deployment is one command from the repository on the Mac:
+
+```bash
+./deploy/scripts/push-synology.sh
+```
+
+The command asks for the Synology SSH password once, uploads a clean snapshot without local dependencies, build output, Git metadata, or `deploy/.env`, preserves the existing NAS environment file, writes a deployment request for the scheduled root task, waits for the health check, and prints the build result. Override `ARCHIVE_MAIL_NAS_HOST`, `ARCHIVE_MAIL_NAS_APP_DIR`, or `ARCHIVE_MAIL_NAS_BACKUP_DIR` when deploying to a different NAS or path. SSH keys can remove the password prompt, but the script never stores a password.
+
+To avoid typing the override every time, keep a personal launcher next to the scripts — any `*.local.sh` file is git-ignored and excluded from the uploaded snapshot:
+
+```bash
+#!/bin/sh
+# deploy/scripts/push.local.sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export ARCHIVE_MAIL_NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-user@192.168.1.2}
+exec "$SCRIPT_DIR/push-synology.sh" "$@"
+```
+
+### Passwordless-sudo rebuild (alternative to the scheduled task)
+
+Instead of the every-minute scheduled task, the SSH account can be allowed to run exactly one root-owned rebuild script without a password. `push-synology.sh` detects this automatically: when the sudo rule exists it rebuilds directly over the same SSH connection and streams the build output live; otherwise it falls back to the deployment-request marker and the scheduled task.
+
+The sudo rule must point at a **root-owned copy outside the app tree**. The copy under `/volume1/docker/archive-mail/app` is replaced by every upload, so a rule targeting it would let the SSH account run arbitrary code as root. One-time setup, as root on the NAS (`sudo -i`):
+
+```bash
+cp /volume1/docker/archive-mail/app/deploy/scripts/synology-rebuild.sh /usr/local/bin/archive-mail-rebuild.sh
+chown root:root /usr/local/bin/archive-mail-rebuild.sh
+chmod 755 /usr/local/bin/archive-mail-rebuild.sh
+cat > /etc/sudoers.d/archive-mail <<'EOF'
+gliukaz ALL=(root) NOPASSWD: /usr/local/bin/archive-mail-rebuild.sh
+EOF
+chmod 440 /etc/sudoers.d/archive-mail
+visudo -c
+```
+
+Replace `gliukaz` with the SSH account name. `visudo -c` must report the files parse correctly before closing the root shell.
+
+Notes:
+
+- The root-owned copy is a deliberate snapshot. When `deploy/scripts/synology-rebuild.sh` changes in the repository, refresh it with the same `cp`/`chown`/`chmod` as root; `push-synology.sh` prints a warning when the two copies differ but continues with the installed one. Requiring root to approve script changes is the security property, not an inconvenience.
+- A DSM major update can reset `/etc/sudoers.d`. If a later push falls back to the scheduled-task flow unexpectedly, re-run the one-time setup.
+- With the sudo rule in place, the `Archive Mail deployment` scheduled task is redundant and can be disabled or deleted; leaving it enabled is harmless since it exits immediately unless a request marker exists.
 
 Synology documents Project creation and Compose operations in its [Container Manager Project guide](https://kb.synology.com/en-global/DSM/help/ContainerManager/docker_project?version=7).
 
@@ -128,6 +192,7 @@ Restore creates a separate safety backup of the current data first. Test restore
 ## Security checklist
 
 - Change the bootstrap `admin` PIN `2332` immediately.
+- Keep `EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=false` unless the service is limited to a trusted LAN or protected by HTTPS.
 - Prefer HTTPS and a dedicated hostname.
 - Keep host port `3001` bound to loopback when using a same-host reverse proxy.
 - Do not expose the Docker socket to this container.

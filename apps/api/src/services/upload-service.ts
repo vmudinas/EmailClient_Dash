@@ -17,10 +17,10 @@ export class UploadService {
     private readonly imports: ImportService
   ) {}
 
-  async createOrResume(input: UploadSessionCreate): Promise<UploadSession> {
+  async createOrResume(input: UploadSessionCreate, ownerUserId: string | null = null): Promise<UploadSession> {
     validateFilename(input.filename);
     const clientKey = uploadClientKey(input);
-    const existing = this.database.findResumableUpload(clientKey);
+    const existing = this.database.findResumableUpload(clientKey, ownerUserId);
     if (existing) {
       try {
         await access(existing.tempPath);
@@ -43,6 +43,7 @@ export class UploadService {
     await file.close();
     const session = this.database.createUploadSession({
       id,
+      ownerUserId,
       clientKey,
       filename: safeName,
       sizeBytes: input.sizeBytes,
@@ -63,8 +64,8 @@ export class UploadService {
     return this.database.getUploadSession(id);
   }
 
-  list(): UploadSession[] {
-    return this.database.listUploadSessions();
+  list(ownerUserId?: string): UploadSession[] {
+    return this.database.listUploadSessions(25, ownerUserId);
   }
 
   async append(id: string, offset: number, chunk: Buffer): Promise<UploadSession> {
@@ -140,7 +141,8 @@ export class UploadService {
           session.tempPath,
           { ocrEnabled: session.ocrEnabled },
           true,
-          session.filename
+          session.filename,
+          session.ownerUserId
         );
         const completed = this.database.updateUploadSession(id, {
           status: "completed",

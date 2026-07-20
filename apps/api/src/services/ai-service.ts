@@ -247,6 +247,7 @@ export class AiService {
     gmailConnectionId: string;
     resumeId: string | null;
     replyStyleId?: string | null;
+    instructions?: string | null;
   }): MessageDraftReplyStart {
     const message = this.database.getMessage(messageId);
     if (!message) throw new AiMessageNotFoundError("Message not found");
@@ -270,6 +271,7 @@ export class AiService {
     }
 
     const current = this.settings.current();
+    const instructions = input.instructions?.trim() ?? "";
     return this.startDraftReply(messageId, {
       scheduleId: null,
       scheduleRunId: null,
@@ -280,7 +282,9 @@ export class AiService {
         provider: current.provider,
         model: current.model,
         skills: [...AI_AGENT_SKILL_IDS],
-        prompt: ""
+        // The prompt feeds the job's cache fingerprint (configuredPromptVersion),
+        // so changed guidance regenerates instead of reusing a completed job.
+        prompt: instructions ? `Follow the user's guidance for this reply:\n${instructions}` : ""
       }
     });
   }

@@ -73,9 +73,17 @@ import type {
   SmartMailRuleSuggestion,
   InboxTabDefinition,
   InboxTabSettings,
+  UserScreenId,
   UserSummary
 } from "@email-client/shared";
-import { AI_AGENT_SKILLS, AI_AGENT_SKILL_IDS, AI_PROVIDER_IDS, NEWS_SOURCE_IDS, NEWS_SOURCE_LABELS } from "@email-client/shared";
+import {
+  AI_AGENT_SKILLS,
+  AI_AGENT_SKILL_IDS,
+  AI_PROVIDER_IDS,
+  NEWS_SOURCE_IDS,
+  NEWS_SOURCE_LABELS,
+  USER_SCREENS
+} from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
@@ -121,6 +129,15 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "audit", label: "Audit", icon: ScrollText }
 ];
 
+const PERSONAL_MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
+  { id: "calendars", label: "Calendars", icon: CalendarDays },
+  { id: "reply-styles", label: "Reply styles", icon: Sparkles },
+  { id: "sender-filing", label: "Sender rules", icon: ListFilter },
+  { id: "smart-rules", label: "Smart rules", icon: MailCheck },
+  { id: "inbox-tabs", label: "Inbox tabs", icon: ListFilter },
+  { id: "resumes", label: "Resumes", icon: Paperclip }
+];
+
 export function SettingsDialog({
   open,
   api,
@@ -136,6 +153,8 @@ export function SettingsDialog({
   onNewsSettingsChanged,
   onInboxTabSettingsChanged
 }: SettingsDialogProps) {
+  const isAdmin = session.role === "admin";
+  const menu = isAdmin ? MENU : PERSONAL_MENU;
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [users, setUsers] = useState<UserSummary[]>([]);
@@ -146,7 +165,7 @@ export function SettingsDialog({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(true);
 
   const loadAdminData = useCallback(async () => {
-    if (!api) return;
+    if (!api || !isAdmin) return;
     setLoading(true);
     setError("");
     try {
@@ -161,14 +180,15 @@ export function SettingsDialog({
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, isAdmin]);
 
   useEffect(() => {
     if (open) {
       setMobileMenuOpen(true);
-      void loadAdminData();
+      setSection(isAdmin ? "database" : "calendars");
+      if (isAdmin) void loadAdminData();
     }
-  }, [open, loadAdminData]);
+  }, [open, isAdmin, loadAdminData]);
 
   if (!open) return null;
 
@@ -181,12 +201,12 @@ export function SettingsDialog({
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section className={`dialog settings-dialog ${mobileMenuOpen ? "mobile-settings-menu-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="dialog-header">
-          <div><Settings size={20} /><h2 id="settings-title">Admin settings</h2></div>
+          <div><Settings size={20} /><h2 id="settings-title">{isAdmin ? "Admin settings" : "Personal settings"}</h2></div>
           <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
         </header>
         <div className="settings-layout">
           <nav className="settings-menu" aria-label="Settings panels">
-            {MENU.map((item) => {
+            {menu.map((item) => {
               const Icon = item.icon;
               return (
                 <button key={item.id} className={section === item.id ? "selected" : ""} onClick={() => { setSection(item.id); setMobileMenuOpen(false); setError(""); setNotice(""); }}>
@@ -198,12 +218,12 @@ export function SettingsDialog({
           <article className="settings-content">
             <button className="settings-mobile-section-trigger mobile-only" onClick={() => setMobileMenuOpen(true)}>
               {(() => {
-                const selectedItem = MENU.find((item) => item.id === section) ?? MENU[0]!;
+                const selectedItem = menu.find((item) => item.id === section) ?? menu[0]!;
                 const Icon = selectedItem.icon;
                 return <><Icon size={18} /><span>{selectedItem.label}</span><ChevronRight size={17} /></>;
               })()}
             </button>
-            {loading && !settings && section !== "tools" ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
+            {isAdmin && loading && !settings && section !== "tools" ? <div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings</div> : (
               <>
                 {section === "tools" && (
                   <AdminToolsPanel
@@ -3340,11 +3360,22 @@ function UsersPanel({
   const [displayName, setDisplayName] = useState("");
   const [role, setRole] = useState<"admin" | "user">("user");
   const [pin, setPin] = useState("");
+  const [createScreens, setCreateScreens] = useState<UserScreenId[]>(USER_SCREENS.map((screen) => screen.id));
   const [resetUser, setResetUser] = useState<UserSummary | null>(null);
   const [resetPin, setResetPin] = useState("");
+  const [accessUser, setAccessUser] = useState<UserSummary | null>(null);
+  const [accessScreens, setAccessScreens] = useState<UserScreenId[]>([]);
 
   const replaceUser = (updated: UserSummary) => {
     onUsers(users.map((user) => user.id === updated.id ? updated : user));
+  };
+
+  const toggleScreen = (screens: UserScreenId[], screen: UserScreenId): UserScreenId[] =>
+    screens.includes(screen) ? screens.filter((item) => item !== screen) : [...screens, screen];
+
+  const screenAccessLabel = (user: UserSummary): string => {
+    if (user.role === "admin" || user.allowedScreens === null) return "All screens";
+    return `Mail + ${user.allowedScreens.length} of ${USER_SCREENS.length}`;
   };
 
   const create = async (event: FormEvent) => {
@@ -3352,12 +3383,23 @@ function UsersPanel({
     onBusy(true);
     onError("");
     try {
-      const created = await api.createUser({ username, displayName, role, pin });
+      const created = await api.createUser({
+        username,
+        displayName,
+        role,
+        pin,
+        // A full selection is stored as null so the account automatically gains
+        // screens added in future versions.
+        allowedScreens: role === "admin" || createScreens.length === USER_SCREENS.length
+          ? null
+          : createScreens
+      });
       onUsers([...users, created].sort((a, b) => a.username.localeCompare(b.username)));
       setUsername("");
       setDisplayName("");
       setPin("");
-      onNotice(`User ${created.username} created.`);
+      setCreateScreens(USER_SCREENS.map((screen) => screen.id));
+      onNotice(`User ${created.username} created with an empty private mail and calendar workspace.`);
     } catch (createError) {
       onError(errorText(createError));
     } finally {
@@ -3365,7 +3407,10 @@ function UsersPanel({
     }
   };
 
-  const update = async (user: UserSummary, patch: { role?: "admin" | "user"; isActive?: boolean; pin?: string }) => {
+  const update = async (
+    user: UserSummary,
+    patch: { role?: "admin" | "user"; isActive?: boolean; pin?: string; allowedScreens?: UserScreenId[] | null }
+  ) => {
     onBusy(true);
     onError("");
     try {
@@ -3387,13 +3432,22 @@ function UsersPanel({
     setResetPin("");
   };
 
+  const saveAccess = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!accessUser) return;
+    await update(accessUser, {
+      allowedScreens: accessScreens.length === USER_SCREENS.length ? null : accessScreens
+    });
+    setAccessUser(null);
+  };
+
   return (
     <>
       <h3>Users</h3>
-      <p>Named accounts make audit records attributable. Administrators manage users and settings; users can manage mail but cannot open this panel.</p>
+      <p>Each named account has a private mail and calendar workspace. Administrators manage users and service settings; users manage their own connections, archives, calendars, drafts, rules, and preferences.</p>
       <div className="settings-table-wrap">
         <table className="settings-table">
-          <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead>
+          <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Access</th><th>Last login</th><th>Actions</th></tr></thead>
           <tbody>
             {users.map((user) => (
               <tr key={user.id}>
@@ -3404,6 +3458,23 @@ function UsersPanel({
                   </select>
                 </td>
                 <td><span className={`status-text ${user.isActive ? "active" : "inactive"}`}>{user.isActive ? "Active" : "Disabled"}</span></td>
+                <td>
+                  {user.role === "admin" ? (
+                    <span className="status-text active">All screens</span>
+                  ) : (
+                    <button
+                      className="text-button"
+                      disabled={busy}
+                      onClick={() => {
+                        setAccessUser(user);
+                        setAccessScreens(user.allowedScreens ?? USER_SCREENS.map((screen) => screen.id));
+                      }}
+                      aria-label={`Edit screen access for ${user.username}`}
+                    >
+                      {screenAccessLabel(user)}
+                    </button>
+                  )}
+                </td>
                 <td>{user.lastLoginAt ? formatDate(user.lastLoginAt) : "Never"}</td>
                 <td className="settings-actions">
                   <button className="icon-button subtle" onClick={() => void update(user, { isActive: !user.isActive })} disabled={busy} title={user.isActive ? "Disable user" : "Enable user"} aria-label={`${user.isActive ? "Disable" : "Enable"} ${user.username}`}><Power size={15} /></button>
@@ -3422,6 +3493,29 @@ function UsersPanel({
           <button type="button" className="text-button" onClick={() => setResetUser(null)}>Cancel</button>
         </form>
       )}
+      {accessUser && (
+        <form className="settings-inline-form user-screen-access-form" onSubmit={(event) => void saveAccess(event)}>
+          <strong>Screen access for {accessUser.username}</strong>
+          <p>Mail is always available. Unchecked screens are hidden from the app and blocked by the service.</p>
+          <ul className="user-screen-list" aria-label={`Screens for ${accessUser.username}`}>
+            {USER_SCREENS.map((screen) => (
+              <li key={screen.id}>
+                <label className="settings-checkbox" title={screen.description}>
+                  <input
+                    type="checkbox"
+                    checked={accessScreens.includes(screen.id)}
+                    onChange={() => setAccessScreens((current) => toggleScreen(current, screen.id))}
+                    disabled={busy}
+                  />
+                  <span>{screen.label}</span>
+                </label>
+              </li>
+            ))}
+          </ul>
+          <button className="primary-button" disabled={busy}>Save access</button>
+          <button type="button" className="text-button" onClick={() => setAccessUser(null)}>Cancel</button>
+        </form>
+      )}
       <form className="settings-create-user" onSubmit={(event) => void create(event)}>
         <h4><UserPlus size={17} /> Add user</h4>
         <div className="settings-form-grid">
@@ -3430,6 +3524,27 @@ function UsersPanel({
           <label>Role<select value={role} onChange={(event) => setRole(event.target.value as "admin" | "user")}><option value="user">User</option><option value="admin">Admin</option></select></label>
           <label>PIN<input type="password" inputMode="numeric" pattern="[0-9]{4,12}" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 12))} required /></label>
         </div>
+        {role === "user" && (
+          <fieldset className="user-screen-access-fieldset">
+            <legend>Screen access</legend>
+            <p>Mail is always available. Choose which additional screens this user can open.</p>
+            <ul className="user-screen-list" aria-label="Screens for the new user">
+              {USER_SCREENS.map((screen) => (
+                <li key={screen.id}>
+                  <label className="settings-checkbox" title={screen.description}>
+                    <input
+                      type="checkbox"
+                      checked={createScreens.includes(screen.id)}
+                      onChange={() => setCreateScreens((current) => toggleScreen(current, screen.id))}
+                      disabled={busy}
+                    />
+                    <span>{screen.label}</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          </fieldset>
+        )}
         <button className="primary-button" disabled={busy || username.length < 3 || !displayName.trim() || pin.length < 4}><UserPlus size={16} /> Create user</button>
       </form>
     </>

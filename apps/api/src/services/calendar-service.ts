@@ -104,10 +104,10 @@ export class CalendarService {
     private readonly davClientFactory: DavClientFactory = createDAVClient
   ) {}
 
-  async listSources(): Promise<CalendarSource[]> {
-    const googleConnections = this.database.listGmailConnections()
+  async listSources(ownerUserId?: string): Promise<CalendarSource[]> {
+    const googleConnections = this.database.listGmailConnections(ownerUserId)
       .filter((connection) => connection.canManageCalendar);
-    const appleAccounts = this.database.listCalendarAccounts();
+    const appleAccounts = this.database.listCalendarAccounts(ownerUserId);
     const googleResults = await Promise.allSettled(
       googleConnections.map((connection) => this.listGoogleSources(connection.id, connection.email))
     );
@@ -132,7 +132,10 @@ export class CalendarService {
     return sources;
   }
 
-  async connectAppleAccount(input: AppleCalendarAccountCreate): Promise<CalendarAccount> {
+  async connectAppleAccount(
+    input: AppleCalendarAccountCreate,
+    ownerUserId: string | null = null
+  ): Promise<CalendarAccount> {
     const client = await this.createAppleClient({
       id: "pending",
       provider: "apple",
@@ -147,6 +150,7 @@ export class CalendarService {
     });
     await client.fetchCalendars();
     return this.database.createCalendarAccount({
+      ownerUserId,
       label: input.label,
       username: input.username,
       serverUrl: input.serverUrl,
@@ -154,36 +158,54 @@ export class CalendarService {
     });
   }
 
-  listAppleAccounts(): CalendarAccount[] {
-    return this.database.listCalendarAccounts();
+  listAppleAccounts(ownerUserId?: string): CalendarAccount[] {
+    return this.database.listCalendarAccounts(ownerUserId);
   }
 
   disconnectAppleAccount(accountId: string): CalendarAccount | null {
     return this.database.deleteCalendarAccount(accountId);
   }
 
-  async listSourceEvents(sourceId: string, timeMinISO: string, timeMaxISO: string): Promise<CalendarEvent[]> {
+  async listSourceEvents(
+    sourceId: string,
+    timeMinISO: string,
+    timeMaxISO: string,
+    ownerUserId?: string
+  ): Promise<CalendarEvent[]> {
     const source = decodeSourceId(sourceId);
+    this.assertSourceOwnership(source, ownerUserId);
     if (source.provider === "google") {
       return this.listGoogleEvents(source, timeMinISO, timeMaxISO);
     }
     return this.listAppleEvents(source, timeMinISO, timeMaxISO);
   }
 
-  async createSourceEvent(sourceId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+  async createSourceEvent(
+    sourceId: string,
+    input: CalendarEventInput,
+    ownerUserId?: string
+  ): Promise<CalendarEvent> {
     const source = decodeSourceId(sourceId);
+    this.assertSourceOwnership(source, ownerUserId);
     if (source.provider === "google") return this.createGoogleEvent(source, input);
     return this.createAppleEvent(source, input);
   }
 
-  async updateSourceEvent(sourceId: string, eventId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+  async updateSourceEvent(
+    sourceId: string,
+    eventId: string,
+    input: CalendarEventInput,
+    ownerUserId?: string
+  ): Promise<CalendarEvent> {
     const source = decodeSourceId(sourceId);
+    this.assertSourceOwnership(source, ownerUserId);
     if (source.provider === "google") return this.updateGoogleEvent(source, eventId, input);
     return this.updateAppleEvent(source, eventId, input);
   }
 
-  async deleteSourceEvent(sourceId: string, eventId: string): Promise<void> {
+  async deleteSourceEvent(sourceId: string, eventId: string, ownerUserId?: string): Promise<void> {
     const source = decodeSourceId(sourceId);
+    this.assertSourceOwnership(source, ownerUserId);
     if (source.provider === "google") {
       await this.deleteGoogleEvent(source, eventId);
       return;
@@ -191,20 +213,42 @@ export class CalendarService {
     await this.deleteAppleEvent(source, eventId);
   }
 
-  async listEvents(connectionId: string, timeMinISO: string, timeMaxISO: string): Promise<CalendarEvent[]> {
+  async listEvents(
+    connectionId: string,
+    timeMinISO: string,
+    timeMaxISO: string,
+    ownerUserId?: string
+  ): Promise<CalendarEvent[]> {
+    this.assertSourceOwnership({ provider: "google", accountId: connectionId, externalId: "primary" }, ownerUserId);
     return this.listGoogleEvents({ provider: "google", accountId: connectionId, externalId: "primary" }, timeMinISO, timeMaxISO);
   }
 
-  async createEvent(connectionId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+  async createEvent(connectionId: string, input: CalendarEventInput, ownerUserId?: string): Promise<CalendarEvent> {
+    this.assertSourceOwnership({ provider: "google", accountId: connectionId, externalId: "primary" }, ownerUserId);
     return this.createGoogleEvent({ provider: "google", accountId: connectionId, externalId: "primary" }, input);
   }
 
-  async updateEvent(connectionId: string, eventId: string, input: CalendarEventInput): Promise<CalendarEvent> {
+  async updateEvent(
+    connectionId: string,
+    eventId: string,
+    input: CalendarEventInput,
+    ownerUserId?: string
+  ): Promise<CalendarEvent> {
+    this.assertSourceOwnership({ provider: "google", accountId: connectionId, externalId: "primary" }, ownerUserId);
     return this.updateGoogleEvent({ provider: "google", accountId: connectionId, externalId: "primary" }, eventId, input);
   }
 
-  async deleteEvent(connectionId: string, eventId: string): Promise<void> {
+  async deleteEvent(connectionId: string, eventId: string, ownerUserId?: string): Promise<void> {
+    this.assertSourceOwnership({ provider: "google", accountId: connectionId, externalId: "primary" }, ownerUserId);
     return this.deleteGoogleEvent({ provider: "google", accountId: connectionId, externalId: "primary" }, eventId);
+  }
+
+  private assertSourceOwnership(source: SourceIdentity, ownerUserId?: string): void {
+    if (!ownerUserId) return;
+    const resource = source.provider === "google" ? "gmail-connection" : "calendar-account";
+    if (!this.database.ownsResource(ownerUserId, resource, source.accountId)) {
+      throw new Error("Calendar source not found");
+    }
   }
 
   private async listGoogleSources(connectionId: string, email: string): Promise<CalendarSource[]> {

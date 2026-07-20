@@ -33,6 +33,7 @@ export function AiDraftReplyDialog({
   const [resumes, setResumes] = useState<ResumeAsset[]>([]);
   const [replyStyles, setReplyStyles] = useState<ReplyStyle[]>([]);
   const [replyStyleId, setReplyStyleId] = useState("");
+  const [instructions, setInstructions] = useState("");
   const [loadingResumes, setLoadingResumes] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -46,6 +47,7 @@ export function AiDraftReplyDialog({
     );
     setResumeId("");
     setReplyStyleId("");
+    setInstructions("");
     setError("");
   }, [open, archiveId, senders]);
 
@@ -82,7 +84,8 @@ export function AiDraftReplyDialog({
       const result = await api.startMessageDraftReply(messageId, {
         gmailConnectionId: connectionId,
         resumeId: resumeId || null,
-        replyStyleId: replyStyleId || null
+        replyStyleId: replyStyleId || null,
+        instructions: instructions.trim() || null
       });
       onStarted(result);
       onClose();
@@ -140,6 +143,17 @@ export function AiDraftReplyDialog({
                     <option key={style.id} value={style.id}>{style.name} · {style.tone}</option>
                   ))}
                 </select>
+              </label>
+              <label>Guidance for this reply (optional)
+                <textarea
+                  value={instructions}
+                  onChange={(event) => setInstructions(event.target.value)}
+                  disabled={busy}
+                  rows={3}
+                  maxLength={2000}
+                  placeholder="e.g. Accept the interview but ask to move it to Thursday afternoon; mention I'm available after 2 PM."
+                />
+                <small>Tell the AI what the reply should say or avoid. Combined with the selected reply style.</small>
               </label>
               <div className="message-draft-hint">
                 <Paperclip size={15} />

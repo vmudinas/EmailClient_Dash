@@ -54,9 +54,14 @@ export class AuthService {
   initialize(): void {
     this.database.purgeExpiredSessions();
     this.database.revokeAllSessions();
-    if (this.database.listUsers().length > 0) return;
+    const users = this.database.listUsers();
+    if (users.length > 0) {
+      const administrator = users.find((user) => user.role === "admin" && user.isActive);
+      if (administrator) this.database.claimUnownedUserData(administrator.id);
+      return;
+    }
     const hashed = hashPin(DEFAULT_ADMIN_PIN);
-    this.database.createUser({
+    const administrator = this.database.createUser({
       username: DEFAULT_ADMIN_USERNAME,
       displayName: "Administrator",
       role: "admin",
@@ -64,6 +69,7 @@ export class AuthService {
       pinSalt: hashed.salt,
       mustChangePin: true
     });
+    this.database.claimUnownedUserData(administrator.id);
   }
 
   login(input: LoginInput): AuthLoginResult {
@@ -141,7 +147,10 @@ export class AuthService {
       role: input.role,
       pinHash: hashed.hash,
       pinSalt: hashed.salt,
-      mustChangePin: false
+      mustChangePin: false,
+      // Administrators always see every screen; screen restrictions only make
+      // sense for standard user accounts.
+      allowedScreens: input.role === "admin" ? null : input.allowedScreens ?? null
     });
   }
 
@@ -157,13 +166,18 @@ export class AuthService {
     }
 
     const hashed = update.pin ? hashPin(update.pin) : null;
+    const targetRole = update.role ?? current.role;
+    const allowedScreens = targetRole === "admin"
+      ? (update.role === "admin" || update.allowedScreens !== undefined ? null : undefined)
+      : update.allowedScreens;
     const user = this.database.updateUser(id, {
       displayName: update.displayName,
       role: update.role,
       isActive: update.isActive,
       pinHash: hashed?.hash,
       pinSalt: hashed?.salt,
-      mustChangePin: hashed ? false : undefined
+      mustChangePin: hashed ? false : undefined,
+      allowedScreens
     });
     this.database.revokeUserSessions(id);
     return user;

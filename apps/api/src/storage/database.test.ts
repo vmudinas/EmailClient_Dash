@@ -276,12 +276,44 @@ describe("EmailDatabase", () => {
     expect(archivePlan.some((row) => row.detail.includes("messages_archive_keyset_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("messages_conversation_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("SCAN sent_reply"))).toBe(false);
-    expect(sqlite.pragma("user_version", { simple: true })).toBe(32);
+    expect(sqlite.pragma("user_version", { simple: true })).toBe(34);
     expect((sqlite.pragma("index_list(message_state)") as Array<{ name: string }>)
       .some((index) => index.name === "message_state_read_idx")).toBe(true);
 
     sqlite.close();
     database.close();
+  });
+
+  it("claims legacy unowned data for the primary administrator", async () => {
+    const dataDir = await temporaryDirectory();
+    const database = new EmailDatabase(dataDir);
+    const archive = database.createArchive({
+      name: "Legacy private mailbox",
+      sourceType: "mbox",
+      fingerprint: "legacy-private-workspace",
+      sizeBytes: 0
+    });
+    const administrator = database.createUser({
+      username: "administrator",
+      displayName: "Administrator",
+      role: "admin",
+      pinHash: "hash",
+      pinSalt: "salt",
+      mustChangePin: false
+    });
+    database.close();
+
+    const legacy = new BetterSqlite3(join(dataDir, "archive-mail.sqlite"));
+    legacy.prepare("UPDATE archives SET owner_user_id = NULL WHERE id = ?").run(archive.id);
+    legacy.pragma("user_version = 32");
+    legacy.close();
+
+    const migrated = new EmailDatabase(dataDir);
+    expect(migrated.listArchives(administrator.id)).toEqual([
+      expect.objectContaining({ id: archive.id, name: "Legacy private mailbox" })
+    ]);
+    expect(migrated.ownsResource(administrator.id, "archive", archive.id)).toBe(true);
+    migrated.close();
   });
 
   it("filters and counts Inbox categories", async () => {

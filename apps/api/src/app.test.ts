@@ -116,7 +116,7 @@ describe("Email API attachment routes", () => {
       receivedAt: null,
       bodyText: "See attachment.",
       bodyHtml: null,
-      headers: {},
+      headers: { "x-archive-mail-gmail-thread-id": "shared-provider-thread" },
       sizeBytes: content.byteLength,
       attachments: [{
         filename: "review.pdf",
@@ -732,8 +732,25 @@ describe("Email API on-demand draft reply route", () => {
     expect(startDraft).toHaveBeenCalledWith("message-1", {
       gmailConnectionId: "00000000-0000-4000-8000-000000000001",
       resumeId: null,
-      replyStyleId: null
+      replyStyleId: null,
+      instructions: null
     });
+
+    const guided = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/draft-reply",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        gmailConnectionId: "00000000-0000-4000-8000-000000000001",
+        resumeId: null,
+        instructions: "  Accept the offer and ask about the start date.  "
+      }
+    });
+    expect(guided.statusCode).toBe(200);
+    expect(startDraft).toHaveBeenLastCalledWith("message-1", expect.objectContaining({
+      instructions: "Accept the offer and ask about the start date."
+    }));
   });
 });
 
@@ -825,7 +842,7 @@ describe("Email API message calendar association route", () => {
       remoteAddress: "127.0.0.1"
     });
     expect(removed.statusCode).toBe(204);
-    expect(removeRemote).toHaveBeenCalledWith(archive.id, "event-linked");
+    expect(removeRemote).toHaveBeenCalledWith(archive.id, "event-linked", expect.any(String));
     expect(runtime.database.getMessage(messageId)?.hasCalendarEvent).toBe(false);
   });
 });
@@ -1460,6 +1477,205 @@ describe("Email API authorization", () => {
     expect(afterLogout.statusCode).toBe(401);
   });
 
+  it("keeps each user's mail, calendars, drafts, and to-dos private", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const adminLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const adminHeaders = {
+      authorization: `Bearer ${(adminLogin.json() as { accessToken: string }).accessToken}`
+    };
+    const archive = runtime.database.createArchive({
+      name: "Administrator mailbox",
+      sourceType: "gmail",
+      fingerprint: "admin-private-workspace",
+      sizeBytes: 0
+    });
+    const inbox = runtime.database.ensureFolder(archive.id, "Inbox", "Inbox", null);
+    const messageId = runtime.database.insertMessage({
+      archiveId: archive.id,
+      folderId: inbox.id,
+      sourceKey: "admin-private-message",
+      internetMessageId: "<admin-private@example.test>",
+      subject: "Administrator only",
+      sender: { name: "Private Sender", address: "private@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: null,
+      receivedAt: "2026-07-19T12:00:00.000Z",
+      bodyText: "Private mail",
+      bodyHtml: null,
+      headers: {},
+      sizeBytes: 12,
+      attachments: []
+    });
+    runtime.database.completeArchive(archive.id, 0);
+    runtime.database.createGmailConnection({
+      email: "admin@example.test",
+      archiveId: archive.id,
+      folderId: inbox.id,
+      query: "",
+      ocrEnabled: false,
+      canSend: true,
+      canModifyMailbox: true,
+      canManageCalendar: true,
+      refreshToken: "admin-refresh-token"
+    });
+    runtime.database.createCalendarAccount({
+      label: "Administrator iCloud",
+      username: "admin@icloud.test",
+      serverUrl: "https://caldav.icloud.com",
+      secret: "app-password"
+    });
+
+    const createdUser = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        username: "casey-private",
+        displayName: "Casey Private",
+        role: "user",
+        pin: "4521"
+      }
+    });
+    expect(createdUser.statusCode).toBe(200);
+
+    const userLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "casey-private", pin: "4521" }
+    });
+    const userHeaders = {
+      authorization: `Bearer ${(userLogin.json() as { accessToken: string }).accessToken}`
+    };
+
+    const archives = await runtime.app.inject({
+      method: "GET",
+      url: "/api/archives",
+      headers: userHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(archives.statusCode).toBe(200);
+    expect(archives.json()).toEqual([]);
+
+    const privateMessage = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages/${messageId}`,
+      headers: userHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(privateMessage.statusCode).toBe(404);
+
+    const userId = (createdUser.json() as { id: string }).id;
+    const userArchive = runtime.database.createArchive({
+      ownerUserId: userId,
+      name: "Casey mailbox",
+      sourceType: "gmail",
+      fingerprint: "user-private-workspace",
+      sizeBytes: 0
+    });
+    const userInbox = runtime.database.ensureFolder(userArchive.id, "Inbox", "Inbox", null);
+    const userMessageId = runtime.database.insertMessage({
+      archiveId: userArchive.id,
+      folderId: userInbox.id,
+      sourceKey: "user-private-message",
+      internetMessageId: "<user-private@example.test>",
+      subject: "Casey only",
+      sender: { name: "Private Sender", address: "private@example.test" },
+      to: [],
+      cc: [],
+      bcc: [],
+      sentAt: null,
+      receivedAt: "2026-07-19T12:05:00.000Z",
+      bodyText: "User private mail",
+      bodyHtml: null,
+      headers: { "x-archive-mail-gmail-thread-id": "shared-provider-thread" },
+      sizeBytes: 17,
+      attachments: []
+    });
+    runtime.database.completeArchive(userArchive.id, 0);
+
+    const adminThread = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages/${messageId}/thread`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(adminThread.statusCode).toBe(200);
+    expect(adminThread.json()).toMatchObject({ totalMessages: 1, messages: [{ id: messageId }] });
+
+    const userThread = await runtime.app.inject({
+      method: "GET",
+      url: `/api/messages/${userMessageId}/thread`,
+      headers: userHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(userThread.statusCode).toBe(200);
+    expect(userThread.json()).toMatchObject({ totalMessages: 1, messages: [{ id: userMessageId }] });
+
+    const adminInsights = await runtime.app.inject({
+      method: "GET",
+      url: "/api/admin/insights",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(adminInsights.statusCode).toBe(200);
+    expect(adminInsights.json()).toMatchObject({ totalMessages: 1, totalAttachments: 0 });
+
+    const gmailConnections = await runtime.app.inject({
+      method: "GET",
+      url: "/api/gmail/connections",
+      headers: userHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(gmailConnections.statusCode).toBe(200);
+    expect(gmailConnections.json()).toEqual([]);
+
+    const calendarAccounts = await runtime.app.inject({
+      method: "GET",
+      url: "/api/admin/calendar/accounts",
+      headers: userHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(calendarAccounts.statusCode).toBe(200);
+    expect(calendarAccounts.json()).toEqual([]);
+
+    const userTodo = await runtime.app.inject({
+      method: "POST",
+      url: "/api/todos",
+      headers: userHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { date: "2026-07-20", text: "Casey's private task" }
+    });
+    expect(userTodo.statusCode).toBe(201);
+
+    const adminTodos = await runtime.app.inject({
+      method: "GET",
+      url: "/api/todos?start=2026-07-20&end=2026-07-20",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(adminTodos.statusCode).toBe(200);
+    expect(adminTodos.json()).toEqual([]);
+  });
+
   it("allows paired viewers to read but not mutate", async () => {
     const dataDir = await temporaryDirectory();
     const runtime = new EmailApiRuntime(loadConfig({
@@ -1673,6 +1889,39 @@ describe("Email API authorization", () => {
     });
     expect(clearedDiagnostics.statusCode).toBe(204);
     expect(runtime.database.listDiagnostics()).toEqual([]);
+  });
+
+  it("allows full remote login when server access is explicitly enabled", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      allowRemoteLogin: true,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "192.168.1.8",
+      payload: { username: "admin", pin: "2332" }
+    });
+    expect(login.statusCode).toBe(200);
+    expect(login.json()).toMatchObject({ session: { role: "admin" } });
+    const headers = {
+      authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}`
+    };
+    const adminSettings = await runtime.app.inject({
+      method: "GET",
+      url: "/api/admin/settings",
+      headers,
+      remoteAddress: "192.168.1.8"
+    });
+    expect(adminSettings.statusCode).toBe(200);
   });
 
   it("revokes issued viewer sessions when sharing is turned off", async () => {
@@ -2214,7 +2463,12 @@ describe("Email API calendar source routes", () => {
     expect(sources.json()).toMatchObject([{ id: sourceId, name: "Personal" }]);
     expect(events.statusCode).toBe(200);
     expect(events.json()).toMatchObject([{ id: "event-1", title: "Planning" }]);
-    expect(listEvents).toHaveBeenCalledWith(sourceId, "2026-07-17T00:00:00.000Z", "2026-07-18T00:00:00.000Z");
+    expect(listEvents).toHaveBeenCalledWith(
+      sourceId,
+      "2026-07-17T00:00:00.000Z",
+      "2026-07-18T00:00:00.000Z",
+      expect.any(String)
+    );
   });
 });
 
@@ -2441,6 +2695,111 @@ describe("Email API mailbox task routes", () => {
       markedReadMessages: 1
     });
     expect(runtime.database.getMessage(messageId)?.state.isRead).toBe(true);
+  });
+});
+
+describe("Email API per-user screen access", () => {
+  it("lets only admins manage users and enforces admin-granted screens", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const adminLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const adminHeaders = { authorization: `Bearer ${(adminLogin.json() as { accessToken: string }).accessToken}` };
+
+    const invalidScreen = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { username: "casey", displayName: "Casey", role: "user", pin: "4521", allowedScreens: ["not-a-screen"] }
+    });
+    expect(invalidScreen.statusCode).toBe(400);
+
+    const created = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { username: "casey", displayName: "Casey", role: "user", pin: "4521", allowedScreens: ["calendar"] }
+    });
+    expect(created.statusCode).toBe(200);
+    const caseyId = (created.json() as { id: string; allowedScreens: string[] }).id;
+    expect(created.json()).toMatchObject({ allowedScreens: ["calendar"] });
+
+    const login = async () => {
+      const result = await runtime.app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        remoteAddress: "127.0.0.1",
+        payload: { username: "casey", pin: "4521" }
+      });
+      return { authorization: `Bearer ${(result.json() as { accessToken: string }).accessToken}` };
+    };
+    let caseyHeaders = await login();
+    const request = (url: string, headers: Record<string, string>) =>
+      runtime.app.inject({ method: "GET", url, headers, remoteAddress: "127.0.0.1" });
+
+    const manageUsers = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: caseyHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { username: "rogue", displayName: "Rogue", role: "admin", pin: "9999" }
+    });
+    expect(manageUsers.statusCode).toBe(403);
+    const editUsers = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${caseyId}`,
+      headers: caseyHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { allowedScreens: null }
+    });
+    expect(editUsers.statusCode).toBe(403);
+
+    expect((await request("/api/archives", caseyHeaders)).statusCode).toBe(200);
+    expect((await request("/api/todos?start=2026-07-01&end=2026-07-31", caseyHeaders)).statusCode).toBe(200);
+    expect((await request("/api/drafts", caseyHeaders)).statusCode).toBe(403);
+    expect((await request("/api/ai/review-queue", caseyHeaders)).statusCode).toBe(403);
+    expect((await request("/api/uploads", caseyHeaders)).statusCode).toBe(403);
+    expect((await request("/api/import-jobs", caseyHeaders)).statusCode).toBe(403);
+
+    const widened = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${caseyId}`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { allowedScreens: ["calendar", "compose"] }
+    });
+    expect(widened.statusCode).toBe(200);
+    expect(widened.json()).toMatchObject({ allowedScreens: ["calendar", "compose"] });
+
+    expect((await request("/api/drafts", caseyHeaders)).statusCode).toBe(401);
+    caseyHeaders = await login();
+    expect((await request("/api/drafts", caseyHeaders)).statusCode).toBe(200);
+    expect((await request("/api/ai/review-queue", caseyHeaders)).statusCode).toBe(403);
+
+    const promoted = await runtime.app.inject({
+      method: "PATCH",
+      url: `/api/admin/users/${caseyId}`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { role: "admin" }
+    });
+    expect(promoted.statusCode).toBe(200);
+    expect(promoted.json()).toMatchObject({ role: "admin", allowedScreens: null });
   });
 });
 

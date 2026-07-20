@@ -16,11 +16,16 @@ export class ResumeService {
     private readonly blobs: BlobStore
   ) {}
 
-  list(): ResumeAsset[] {
-    return this.database.listResumeAssets();
+  list(ownerUserId?: string): ResumeAsset[] {
+    return this.database.listResumeAssets(ownerUserId);
   }
 
-  async upload(filename: string, content: Buffer, name?: string): Promise<ResumeAsset> {
+  async upload(
+    filename: string,
+    content: Buffer,
+    name?: string,
+    ownerUserId: string | null = null
+  ): Promise<ResumeAsset> {
     const safeFilename = basename(filename.trim()).slice(0, 240);
     const extension = extname(safeFilename).toLowerCase();
     const contentType = CONTENT_TYPES[extension];
@@ -33,6 +38,7 @@ export class ResumeService {
     }
     const blob = await this.blobs.put(content);
     return this.database.createResumeAsset({
+      ownerUserId,
       name: name?.trim().slice(0, 120) || safeFilename.replace(/\.[^.]+$/, ""),
       filename: safeFilename,
       contentType,

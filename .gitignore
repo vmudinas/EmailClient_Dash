@@ -16,11 +16,19 @@ eng.traineddata
 
 # Local planning docs, not for public repo
 docs/
+!docs/
+docs/*
+!docs/property-management/
+docs/property-management/*
+!docs/property-management/README.md
 
 # Env / secrets
 .env
 .env.*
 !.env.example
+
+# Personal deploy launchers (machine-specific NAS host, etc.)
+*.local.sh
 
 # OS junk
 .DS_Store
