@@ -48,6 +48,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
   --exclude='*/dist' \
   --exclude='./.git' \
   --exclude='./deploy/.env' \
+  --exclude='*.local.sh' \
   --exclude='.DS_Store' \
   -cf - . | remote "
     set -eu

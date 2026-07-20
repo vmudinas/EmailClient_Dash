@@ -92,6 +92,17 @@ After that one-time root-task setup, every deployment is one command from the re
 
 The command asks for the Synology SSH password once, uploads a clean snapshot without local dependencies, build output, Git metadata, or `deploy/.env`, preserves the existing NAS environment file, writes a deployment request for the scheduled root task, waits for the health check, and prints the build result. Override `ARCHIVE_MAIL_NAS_HOST`, `ARCHIVE_MAIL_NAS_APP_DIR`, or `ARCHIVE_MAIL_NAS_BACKUP_DIR` when deploying to a different NAS or path. SSH keys can remove the password prompt, but the script never stores a password.
 
+To avoid typing the override every time, keep a personal launcher next to the scripts — any `*.local.sh` file is git-ignored and excluded from the uploaded snapshot:
+
+```bash
+#!/bin/sh
+# deploy/scripts/push.local.sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export ARCHIVE_MAIL_NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-user@192.168.1.2}
+exec "$SCRIPT_DIR/push-synology.sh" "$@"
+```
+
 ### Passwordless-sudo rebuild (alternative to the scheduled task)
 
 Instead of the every-minute scheduled task, the SSH account can be allowed to run exactly one root-owned rebuild script without a password. `push-synology.sh` detects this automatically: when the sudo rule exists it rebuilds directly over the same SSH connection and streams the build output live; otherwise it falls back to the deployment-request marker and the scheduled task.

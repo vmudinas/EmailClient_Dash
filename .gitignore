@@ -27,6 +27,9 @@ docs/property-management/*
 .env.*
 !.env.example
 
+# Personal deploy launchers (machine-specific NAS host, etc.)
+*.local.sh
+
 # OS junk
 .DS_Store
 Thumbs.db
