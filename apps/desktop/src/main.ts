@@ -93,7 +93,7 @@ function registerIpc(api: StartedApi): void {
   }));
 
   ipcMain.handle("archive:select-and-import", async (_event, rawOptions: ImportOptions, accessToken: string) => {
-    return api.runtime.runDesktopAction(accessToken, "desktop.archive.select_and_import", async () => {
+    return api.runtime.runDesktopAction(accessToken, "desktop.archive.select_and_import", async (session) => {
       const options = importOptionsSchema.parse(rawOptions);
       const selected = await dialog.showOpenDialog(mainWindow!, {
         title: "Import email archive",
@@ -105,7 +105,15 @@ function registerIpc(api: StartedApi): void {
         ]
       });
       if (selected.canceled || !selected.filePaths[0]) return null;
-      return api.runtime.imports.startImport(selected.filePaths[0], options);
+      // Without an explicit owner the archive would fall back to the primary
+      // admin's workspace instead of the signed-in desktop user's.
+      return api.runtime.imports.startImport(
+        selected.filePaths[0],
+        options,
+        false,
+        undefined,
+        session.user.id
+      );
     });
   });
 
