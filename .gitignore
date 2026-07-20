@@ -16,6 +16,11 @@ eng.traineddata
 
 # Local planning docs, not for public repo
 docs/
+!docs/
+docs/*
+!docs/property-management/
+docs/property-management/*
+!docs/property-management/README.md
 
 # Env / secrets
 .env

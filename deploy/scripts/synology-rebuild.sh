@@ -21,6 +21,10 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
+set -a
+. "$ENV_FILE"
+set +a
+
 compose() {
   "$DOCKER_BIN" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
@@ -42,8 +46,11 @@ fi
 
 remote_login=$("$DOCKER_BIN" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" \
   | grep '^EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=' || true)
-if [ "$remote_login" != "EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true" ]; then
-  echo "The recreated container is missing EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true." >&2
+expected_remote_login="EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=${EMAIL_CLIENT_ALLOW_REMOTE_LOGIN:-false}"
+if [ "$remote_login" != "$expected_remote_login" ]; then
+  echo "The recreated container has an unexpected remote-login setting." >&2
+  echo "Expected: $expected_remote_login" >&2
+  echo "Actual: ${remote_login:-missing}" >&2
   exit 1
 fi
 echo "$remote_login"
