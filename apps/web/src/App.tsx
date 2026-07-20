@@ -49,6 +49,7 @@ import type {
   LocalMessageStatePatch,
   MessageActionSuggestion,
   MessageDetail,
+  MessageFilingSuggestion,
   MessageSummary,
   NewsHeadline,
   RuntimeConfig,
@@ -1615,6 +1616,10 @@ export function App() {
         + `Confidence: ${confidence}%\n${suggestion.reason}\n\nMove all selected messages to this folder?`
       );
       if (!accepted) return;
+      // Snapshot before the refresh below removes the moved rows from the list.
+      const movedSummaries = items
+        .filter((item) => messageIds.includes(item.message.id))
+        .map((item) => item.message);
       const result = await api.bulkMoveMessagesToFolder(messageIds, suggestion.folderId);
       if (message && messageIds.includes(message.id)) {
         setSelectedMessageId(null);
@@ -1631,11 +1636,65 @@ export function App() {
         + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
         + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : "")
       );
+      await offerSmartRuleForFiling(movedSummaries, suggestion);
     } catch (error) {
       showError(error instanceof Error ? error.message : "AI could not recommend a mailbox");
     } finally {
       setAiFilingBusy(false);
       setBulkActionBusy(false);
+    }
+  };
+
+  // After an accepted AI filing move, offer to turn the decision into a smart
+  // rule and sweep every folder with it, so similar mail is filed the same way
+  // from now on.
+  const offerSmartRuleForFiling = async (movedMessages: MessageSummary[], filing: MessageFilingSuggestion) => {
+    if (!api || !filing.folderId || !filing.folderPath) return;
+    if (!isAdmin && !canAccessScreen("settings")) return;
+    const archiveId = movedMessages[0]?.archiveId ?? selectedArchiveId;
+    if (!archiveId || movedMessages.some((moved) => moved.archiveId !== archiveId)) return;
+    if (!window.confirm(
+      `Create a smart rule so emails like these are filed to "${filing.folderPath}" automatically?\n\n`
+      + "AI will draft the rule for your review, and you can apply it to every folder right away."
+    )) return;
+
+    try {
+      const senders = [...new Set(movedMessages.map((moved) => moved.sender.address).filter(Boolean))].slice(0, 10);
+      const subjects = [...new Set(movedMessages.map((moved) => moved.subject).filter(Boolean))].slice(0, 5);
+      const instruction = [
+        `Move emails like the following to the folder "${filing.folderPath}".`,
+        senders.length ? `They come from senders such as: ${senders.join(", ")}.` : "",
+        subjects.length ? `Subjects look like: ${subjects.map((subject) => `"${subject}"`).join("; ")}.` : "",
+        filing.reason ? `They were filed there because: ${filing.reason}` : ""
+      ].filter(Boolean).join("\n").slice(0, 4_000);
+      const draft = await api.suggestSmartMailRule({ archiveId, instruction });
+      const conditionParts = [
+        draft.conditions.senderContains.length ? `sender contains ${draft.conditions.senderContains.join(", ")}` : "",
+        draft.conditions.subjectContains.length ? `subject contains ${draft.conditions.subjectContains.join(", ")}` : "",
+        draft.conditions.bodyContains.length ? `body contains ${draft.conditions.bodyContains.join(", ")}` : "",
+        draft.conditions.hasAttachments === null ? "" : draft.conditions.hasAttachments ? "has attachments" : "has no attachments"
+      ].filter(Boolean).join(draft.conditions.match === "all" ? " AND " : " OR ");
+      if (!window.confirm(
+        `AI drafted this rule:\n\n"${draft.name}"\nWhen ${conditionParts || "…"}\nMove to "${filing.folderPath}"\n\n`
+        + `${draft.explanation}\n\nCreate the rule and apply it to every folder now?`
+      )) return;
+      const rule = await api.createSmartMailRule({
+        archiveId,
+        name: draft.name,
+        instruction,
+        conditions: draft.conditions,
+        targetFolderId: filing.folderId,
+        markRead: draft.markRead,
+        star: draft.star,
+        enabled: true,
+        applyExisting: false
+      });
+      await api.runSmartMailRule(rule.id, "all");
+      showError(
+        `Smart rule "${rule.name}" created. It is sweeping every folder in the background and will file future mail automatically (manage it under Settings → Smart rules).`
+      );
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The smart rule could not be created");
     }
   };
 
