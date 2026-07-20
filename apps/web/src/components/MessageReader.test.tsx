@@ -185,12 +185,16 @@ describe("MessageReader AI analysis", () => {
     fireEvent.change(screen.getByLabelText("Optional résumé"), {
       target: { value: "00000000-0000-4000-8000-000000000002" }
     });
+    fireEvent.change(screen.getByLabelText(/Guidance for this reply/), {
+      target: { value: "  Accept the interview but ask to move it to Thursday.  " }
+    });
     fireEvent.click(screen.getByRole("button", { name: "Generate reviewable draft" }));
 
     await waitFor(() => expect(api.startMessageDraftReply).toHaveBeenCalledWith(MESSAGE.id, {
       gmailConnectionId: connection.id,
       resumeId: "00000000-0000-4000-8000-000000000002",
-      replyStyleId: null
+      replyStyleId: null,
+      instructions: "Accept the interview but ask to move it to Thursday."
     }));
     await waitFor(() => expect(onOpenDraft).toHaveBeenCalledWith(AI_DRAFT));
   });

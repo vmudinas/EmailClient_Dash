@@ -956,7 +956,8 @@ export type MessageActionSuggestionRequest = z.infer<typeof messageActionSuggest
 export const messageDraftReplyRequestSchema = z.object({
   gmailConnectionId: z.string().uuid(),
   resumeId: z.string().uuid().nullable().optional(),
-  replyStyleId: z.string().uuid().nullable().optional()
+  replyStyleId: z.string().uuid().nullable().optional(),
+  instructions: z.string().trim().max(2000).nullable().optional()
 }).strict();
 
 export type MessageDraftReplyRequest = z.infer<typeof messageDraftReplyRequestSchema>;

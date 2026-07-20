@@ -732,8 +732,25 @@ describe("Email API on-demand draft reply route", () => {
     expect(startDraft).toHaveBeenCalledWith("message-1", {
       gmailConnectionId: "00000000-0000-4000-8000-000000000001",
       resumeId: null,
-      replyStyleId: null
+      replyStyleId: null,
+      instructions: null
     });
+
+    const guided = await runtime.app.inject({
+      method: "POST",
+      url: "/api/messages/message-1/ai/draft-reply",
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        gmailConnectionId: "00000000-0000-4000-8000-000000000001",
+        resumeId: null,
+        instructions: "  Accept the offer and ask about the start date.  "
+      }
+    });
+    expect(guided.statusCode).toBe(200);
+    expect(startDraft).toHaveBeenLastCalledWith("message-1", expect.objectContaining({
+      instructions: "Accept the offer and ask about the start date."
+    }));
   });
 });
 

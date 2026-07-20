@@ -1396,7 +1396,8 @@ export class EmailApiRuntime {
           const result = this.ai.startMessageDraftReply(request.params.messageId, {
             gmailConnectionId: parsed.data.gmailConnectionId,
             resumeId: parsed.data.resumeId ?? null,
-            replyStyleId: parsed.data.replyStyleId ?? null
+            replyStyleId: parsed.data.replyStyleId ?? null,
+            instructions: parsed.data.instructions ?? null
           });
           return reply.code(result.draft ? 200 : 202).send(result);
         } catch (error) {
