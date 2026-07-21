@@ -70,6 +70,9 @@ describe("PropertyPlatformStore", () => {
       priority: "high",
       preferredEntryAt: null
     });
+    expect(() => platform.assertRequestAccess(tenantUser.id, request.id)).not.toThrow();
+    expect(() => platform.assertRequestAccess("unrelated-user", request.id))
+      .toThrow(PropertyPlatformNotFoundError);
     platform.recordRequestCreated(tenantUser.id, request.id);
     platform.addRequestComment(managerId, request.id, "Vendor scheduled for Tuesday.", true, "Manager");
     platform.addRequestComment(managerId, request.id, "Internal estimate is pending.", false, "Manager");

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, resolve } from "node:path";
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
@@ -61,6 +61,10 @@ export class PropertyFileService {
   read(storageKey: string): Buffer | null {
     const path = this.path(storageKey);
     return existsSync(path) ? readFileSync(path) : null;
+  }
+
+  remove(storageKey: string): void {
+    rmSync(this.path(storageKey), { force: true });
   }
 
   path(storageKey: string): string {

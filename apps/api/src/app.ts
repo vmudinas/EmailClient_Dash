@@ -1305,13 +1305,19 @@ export class EmailApiRuntime {
         if (!this.requireRole(request, reply, ["local", "admin"])) return;
         try {
           const userId = this.currentUserId(request)!;
+          this.propertyPlatform.assertRequestAccess(userId, request.params.requestId);
           const file = this.propertyFiles.save(
             "requests",
             request.query.filename ?? "attachment",
             request.headers["content-type"],
             request.body
           );
-          return reply.code(201).send(this.propertyPlatform.addRequestAttachment(userId, request.params.requestId, file));
+          try {
+            return reply.code(201).send(this.propertyPlatform.addRequestAttachment(userId, request.params.requestId, file));
+          } catch (error) {
+            this.propertyFiles.remove(file.storageKey);
+            throw error;
+          }
         } catch (error) {
           return this.propertyErrorReply(reply, error, "Request attachment could not be uploaded");
         }

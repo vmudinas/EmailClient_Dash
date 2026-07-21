@@ -29,7 +29,10 @@ export interface PropertyIntegrationRuntimeSettings {
   gmailConnectionId: string | null;
 }
 
-interface PersistedSettings extends PropertyIntegrationRuntimeSettings {}
+type PersistedSettings = Omit<PropertyIntegrationRuntimeSettings, "paypalEnvironment" | "zelleNote"> & {
+  paypalEnvironment: "sandbox" | "live" | null;
+  zelleNote: string | null;
+};
 
 const DEFAULT_SETTINGS: PersistedSettings = {
   stripeSecretKey: null,
@@ -37,9 +40,9 @@ const DEFAULT_SETTINGS: PersistedSettings = {
   paypalClientId: null,
   paypalClientSecret: null,
   paypalWebhookId: null,
-  paypalEnvironment: "sandbox",
+  paypalEnvironment: null,
   zelleRecipient: null,
-  zelleNote: "Include the property address and payment reference in the memo.",
+  zelleNote: null,
   twilioAccountSid: null,
   twilioAuthToken: null,
   twilioMessagingServiceSid: null,
@@ -65,9 +68,11 @@ export class PropertyIntegrationSettingsManager {
       paypalClientId: this.persisted.paypalClientId || this.environment.paypalClientId || null,
       paypalClientSecret: this.persisted.paypalClientSecret || this.environment.paypalClientSecret || null,
       paypalWebhookId: this.persisted.paypalWebhookId || this.environment.paypalWebhookId || null,
-      paypalEnvironment: this.persisted.paypalEnvironment || this.environment.paypalEnvironment || "sandbox",
+      paypalEnvironment: this.persisted.paypalEnvironment ?? this.environment.paypalEnvironment ?? "sandbox",
       zelleRecipient: this.persisted.zelleRecipient || this.environment.zelleRecipient || null,
-      zelleNote: this.persisted.zelleNote || this.environment.zelleNote || DEFAULT_SETTINGS.zelleNote,
+      zelleNote: this.persisted.zelleNote
+        ?? this.environment.zelleNote
+        ?? "Include the property address and payment reference in the memo.",
       twilioAccountSid: this.persisted.twilioAccountSid || this.environment.twilioAccountSid || null,
       twilioAuthToken: this.persisted.twilioAuthToken || this.environment.twilioAuthToken || null,
       twilioMessagingServiceSid: this.persisted.twilioMessagingServiceSid
@@ -146,9 +151,11 @@ export class PropertyIntegrationSettingsManager {
         paypalClientId: optionalString(root.paypalClientId),
         paypalClientSecret: optionalString(root.paypalClientSecret),
         paypalWebhookId: optionalString(root.paypalWebhookId),
-        paypalEnvironment: root.paypalEnvironment === "live" ? "live" : "sandbox",
+        paypalEnvironment: root.paypalEnvironment === "live"
+          ? "live"
+          : root.paypalEnvironment === "sandbox" ? "sandbox" : null,
         zelleRecipient: optionalString(root.zelleRecipient),
-        zelleNote: optionalString(root.zelleNote) ?? DEFAULT_SETTINGS.zelleNote,
+        zelleNote: optionalString(root.zelleNote),
         twilioAccountSid: optionalString(root.twilioAccountSid),
         twilioAuthToken: optionalString(root.twilioAuthToken),
         twilioMessagingServiceSid: optionalString(root.twilioMessagingServiceSid),

@@ -370,6 +370,10 @@ export class PropertyPlatformStore {
     );
   }
 
+  assertRequestAccess(userId: string, requestId: string): void {
+    this.requireAccessibleRequest(userId, requestId);
+  }
+
   requestAttachmentForUser(userId: string, attachmentId: string): PropertyRequestAttachment & { storageKey: string } {
     const row = this.db.prepare(`
       SELECT a.* FROM property_request_attachments a

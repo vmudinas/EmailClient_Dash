@@ -356,6 +356,9 @@ export class PropertyStore {
     const property = this.accessiblePropertyRow(userId, input.propertyId);
     let leaseId = input.leaseId;
     const mode = this.modeForUser(userId);
+    if (mode === "tenant" && input.status !== "pending") {
+      throw new PropertyAccessError("Tenant payments must be verified before their status can change");
+    }
     if (mode === "tenant" && !leaseId) {
       const lease = this.db.prepare(`
         SELECT l.id FROM property_leases l

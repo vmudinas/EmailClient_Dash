@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { PropertyNotFoundError, PropertyStore } from "./property-store.js";
+import { PropertyAccessError, PropertyNotFoundError, PropertyStore } from "./property-store.js";
 
 const temporaryDirs: string[] = [];
 
@@ -119,6 +119,47 @@ describe("PropertyStore", () => {
     });
     expect(overview.stats.paidThisMonthCents).toBe(200_000);
     expect(overview.payments[0]).toMatchObject({ status: "succeeded", externalId: "cs_test_123" });
+    store.close();
+  });
+
+  it("requires provider or manager verification before a tenant payment can succeed", () => {
+    const store = createStore();
+    const managerId = randomUUID();
+    const tenantUserId = randomUUID();
+    const property = store.createProperty(managerId, propertyInput("Verified Rent House"));
+    const tenant = store.createTenant(managerId, {
+      linkedUserId: tenantUserId,
+      firstName: "Taylor",
+      lastName: "Tenant",
+      email: "tenant@example.test",
+      phone: "",
+      status: "active"
+    });
+    const lease = store.createLease(managerId, {
+      propertyId: property.id,
+      tenantId: tenant.id,
+      startDate: "2026-01-01",
+      endDate: "2026-12-31",
+      monthlyRentCents: 200_000,
+      securityDepositCents: 0,
+      dueDay: 1,
+      status: "active"
+    });
+
+    expect(() => store.createPayment(tenantUserId, {
+      propertyId: property.id,
+      leaseId: lease.id,
+      chargeId: null,
+      provider: "manual",
+      method: "cash",
+      amountCents: 200_000,
+      currency: "USD",
+      status: "succeeded",
+      reference: null,
+      paidAt: "2026-07-20T12:00:00.000Z",
+      notes: ""
+    })).toThrow(PropertyAccessError);
+    expect(store.overview(managerId, paymentConfiguration()).payments).toHaveLength(0);
     store.close();
   });
 
