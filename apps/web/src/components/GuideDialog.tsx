@@ -167,7 +167,7 @@ function GuideContent({ section }: { section: GuideSection }) {
         <p>Every application launch requires a named Archive Mail user and PIN. The first-run account is <code>admin</code> with PIN <code>2332</code>; change it under Admin settings and Security.</p>
         <ul>
           <li>PINs are salted and hashed. Session tokens are stored as hashes, bound to the login IP address, and revoked when the service restarts.</li>
-          <li>Administrators can create named users, change roles, disable access, reset PINs, and review or export the audit history.</li>
+          <li>Administrators can create standard or renter accounts, change roles, disable or delete access, reset PINs, and review or export the audit history. Renter accounts are restricted to their linked tenant portal.</li>
           <li>Audit entries include user, time, action, result, IP address, route, and user agent. PINs, tokens, and email bodies are excluded.</li>
         </ul>
         <h4>Database adapters</h4>

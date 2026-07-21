@@ -130,6 +130,19 @@ describe("PropertyPlatformStore", () => {
     expect(managerOverview.requestComments).toHaveLength(2);
     expect(managerOverview.invitations[0]?.acceptedAt).not.toBeNull();
 
+    platform.unlinkUserAccount(tenantUser.id);
+    expect(properties.overview(managerId, paymentConfiguration()).tenants[0]).toMatchObject({
+      id: tenant.id,
+      linkedUserId: null
+    });
+    expect(platform.overview(managerId, configuredIntegrations()).requestComments).toHaveLength(2);
+    expect(platform.overview(tenantUser.id, configuredIntegrations())).toMatchObject({
+      memberships: [],
+      units: [],
+      documents: [],
+      requestComments: []
+    });
+
     platform.close();
     properties.close();
     database.close();
@@ -176,5 +189,14 @@ function configuredIntegrations(): PropertyIntegrationSettings {
     twilioConfigured: true,
     twilioSource: "admin",
     gmailConnectionId: "13b0f948-f75b-4fa5-9a62-0313028c98c4"
+  };
+}
+
+function paymentConfiguration() {
+  return {
+    stripe: { configured: false, methods: ["card", "apple_pay", "google_pay", "ach"] as const },
+    paypal: { configured: false, environment: "sandbox" as const, methods: ["paypal"] as const },
+    zelle: { configured: false, recipient: null, note: "" },
+    manual: { configured: true as const, methods: ["cash", "check", "other"] as const }
   };
 }

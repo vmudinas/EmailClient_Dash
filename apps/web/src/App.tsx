@@ -274,6 +274,8 @@ export function App() {
 
   const readOnly = !session || session.role === "viewer";
   const isAdmin = session?.role === "admin";
+  const isRenter = session?.user.role === "renter";
+  const canUseMail = Boolean(session && !isRenter);
   const canAccessScreen = (screen: UserScreenId) => !session || userCanAccessScreen(session.user, screen);
   const navigateView = (next: AppView, replace = false) => {
     setViewMode(next);
@@ -291,6 +293,10 @@ export function App() {
 
   useEffect(() => {
     if (!session) return;
+    if (session.user.role === "renter" && viewMode !== "properties") {
+      navigateView("properties", true);
+      return;
+    }
     if (viewMode === "calendar" && !canAccessScreen("calendar")) navigateView("mail", true);
     if (viewMode === "properties" && !canAccessScreen("properties")) navigateView("mail", true);
   }, [session, viewMode]);
@@ -360,7 +366,17 @@ export function App() {
     }
   }, []);
 
-  const loadAuthenticatedData = useCallback(async (client: ApiClient) => {
+  const loadAuthenticatedData = useCallback(async (
+    client: ApiClient,
+    accountRole: AuthSessionInfo["user"]["role"]
+  ) => {
+    if (accountRole === "renter") {
+      setArchives([]);
+      setSelectedArchiveId(null);
+      setViewMode("properties");
+      if (window.location.pathname !== "/properties") window.history.replaceState(null, "", "/properties");
+      return;
+    }
     const loadedArchives = await client.listArchives();
     void refreshStockQuotes(client);
     void refreshNewsHeadlines(client);
@@ -376,13 +392,13 @@ export function App() {
   }, [refreshStockQuotes, refreshNewsHeadlines]);
 
   useEffect(() => {
-    if (!api || !session) return;
+    if (!api || !session || session.user.role === "renter") return;
     const timer = window.setInterval(() => void refreshStockQuotes(api), 60_000);
     return () => window.clearInterval(timer);
   }, [api, session, refreshStockQuotes]);
 
   useEffect(() => {
-    if (!api || !session) return;
+    if (!api || !session || session.user.role === "renter") return;
     const timer = window.setInterval(() => void refreshNewsHeadlines(api), 10 * 60_000);
     return () => window.clearInterval(timer);
   }, [api, session, refreshNewsHeadlines]);
@@ -407,7 +423,7 @@ export function App() {
       try {
         const activeSession = await client.currentSession();
         setSession(activeSession);
-        await loadAuthenticatedData(client);
+        await loadAuthenticatedData(client, activeSession.user.role);
       } catch {
         sessionStorage.removeItem(SESSION_STORAGE_KEY);
         client.setAccessToken("");
@@ -432,7 +448,7 @@ export function App() {
         sessionStorage.removeItem(SESSION_STORAGE_KEY);
       }
       setSession(result.session);
-      await loadAuthenticatedData(api);
+      await loadAuthenticatedData(api, result.session.user.role);
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "Sign in failed");
     } finally {
@@ -2019,7 +2035,7 @@ export function App() {
       if (runtime?.platform === "desktop") sessionStorage.setItem(SESSION_STORAGE_KEY, result.accessToken);
       setSession(result.session);
       window.history.replaceState(null, "", "/properties");
-      void loadAuthenticatedData(api);
+      void loadAuthenticatedData(api, result.session.user.role);
     }} />;
   }
 
@@ -2039,7 +2055,7 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark"><Archive size={20} /></span>
-          <span className="brand-name">Archive Mail</span>
+          <span className="brand-name">{isRenter ? "Tenant Portal" : "Archive Mail"}</span>
           {viewMode === "mail" && (
             <button
               className="icon-button subtle folder-panel-toggle"
@@ -2122,7 +2138,7 @@ export function App() {
               {viewMode === "calendar" ? <Mail size={18} /> : <CalendarDays size={18} />}
             </button>
           )}
-          {canAccessScreen("properties") && (
+          {!isRenter && canAccessScreen("properties") && (
             <button
               className={`icon-button properties-trigger ${viewMode === "properties" ? "active" : ""}`}
               onClick={() => navigateView(viewMode === "properties" ? "mail" : "properties")}
@@ -2153,7 +2169,7 @@ export function App() {
               <MailPlus size={18} />
             </button>
           )}
-          {!readOnly && (isAdmin || canAccessScreen("settings")) && (
+          {!readOnly && (isAdmin || isRenter || canAccessScreen("settings")) && (
             <button className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)} title={isAdmin ? "Open admin settings" : "Open personal settings"} aria-label={isAdmin ? "Open admin settings" : "Open personal settings"}>
               <SettingsIcon size={18} />
               {isAdmin && pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
@@ -2287,36 +2303,36 @@ export function App() {
         )}
       </main>
 
-      <NewsTickerBar
+      {!isRenter && <NewsTickerBar
         headlines={newsHeadlines}
         loading={newsHeadlinesLoading}
         error={newsHeadlinesError}
         secondsPerHeadline={newsSecondsPerHeadline}
         onRefresh={() => { if (api) void refreshNewsHeadlines(api); }}
-      />
-      <StockTickerBar
+      />}
+      {!isRenter && <StockTickerBar
         quotes={stockQuotes}
         loading={stockQuotesLoading}
         error={stockQuotesError}
         secondsPerSymbol={stockSecondsPerSymbol}
         onRefresh={() => { if (api) void refreshStockQuotes(api); }}
-      />
+      />}
 
-      <nav className={`mobile-nav ${canAccessScreen("properties") ? "has-properties" : ""}`} aria-label="Mobile navigation">
-        <button className={viewMode === "mail" && mobileView === "folders" ? "selected" : ""} onClick={() => {
+      <nav className={`mobile-nav ${canAccessScreen("properties") ? "has-properties" : ""} ${isRenter ? "renter-only" : ""}`} aria-label="Mobile navigation">
+        {canUseMail && <button className={viewMode === "mail" && mobileView === "folders" ? "selected" : ""} onClick={() => {
           setMobileMenuOpen(false);
           navigateView("mail");
           setMobileView("folders");
         }}>
           <FolderOpen size={19} /><span>Folders</span>
-        </button>
-        <button className={viewMode === "mail" && mobileView !== "folders" ? "selected" : ""} onClick={() => {
+        </button>}
+        {canUseMail && <button className={viewMode === "mail" && mobileView !== "folders" ? "selected" : ""} onClick={() => {
           setMobileMenuOpen(false);
           navigateView("mail");
           if (selectedMessageId) closeMessage(); else setMobileView("messages");
         }}>
           <List size={19} /><span>Mail</span>
-        </button>
+        </button>}
         {canAccessScreen("compose") && (
           <button className="mobile-compose-nav" onClick={() => openCompose()} disabled={readOnly}>
             <span className="mobile-compose-icon"><MailPlus size={21} /></span><span>Compose</span>
@@ -2357,9 +2373,9 @@ export function App() {
             <div className="mobile-action-grid">
               {!readOnly && canAccessScreen("compose") && <button onClick={() => { setMobileMenuOpen(false); openDrafts(); }}><FileEdit size={20} /><span>Drafts</span></button>}
               {canAccessScreen("ai") && <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>}
-              <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>
+              {canUseMail && <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>}
               {!readOnly && canAccessScreen("import") && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
-              {!readOnly && (isAdmin || canAccessScreen("settings")) && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>{isAdmin ? "Admin" : "Settings"}</span>{isAdmin && pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
+              {!readOnly && (isAdmin || isRenter || canAccessScreen("settings")) && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>{isAdmin ? "Admin" : "Account"}</span>{isAdmin && pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
               {electron && isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
             </div>
             <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>

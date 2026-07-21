@@ -120,16 +120,16 @@ The desktop QR/LAN sharing flow is intentionally read-only. A Docker/server depl
 
 Archive Mail requires a named user and PIN on every service/application launch. PINs are stored with a random salt and scrypt hash. Session tokens are stored only as SHA-256 hashes, bound to the login IP address, and revoked when the service starts, a PIN changes, or an administrator changes that user.
 
-Each named user has a private workspace. Archives, imported messages and attachments, Gmail connections, Apple and Google calendars, drafts, to-dos, resumes, reply styles, inbox tabs, sender rules, smart rules, AI review state, and diagnostics are visible only to their owner. A new standard user starts with an empty workspace and uses **Personal settings** to connect their own Gmail or Apple calendar and configure their own mail preferences. Provider credentials and other service-wide settings remain administrator-managed.
+Each standard user has a private workspace. Archives, imported messages and attachments, Gmail connections, Apple and Google calendars, drafts, to-dos, resumes, reply styles, inbox tabs, sender rules, smart rules, AI review state, and diagnostics are visible only to their owner. A new standard user starts with an empty workspace and uses **Personal settings** to connect their own Gmail or Apple calendar and configure their own mail preferences. A renter account is restricted to its linked tenant portal and personal PIN settings; it cannot access mail, calendars, AI, imports, or administration. Provider credentials and other service-wide settings remain administrator-managed.
 
 When an existing installation first upgrades to the private-workspace database schema, all legacy unowned data is assigned to the first active administrator so no existing mail or configuration is lost. New resources are owned by the user who creates or connects them. This migration runs automatically when the API starts; no manual database command is required.
 
 The first-run `admin` account uses PIN `2332`. Login attempts are throttled per IP address. Under **Admin settings** an administrator can:
 
-- create named administrator or standard user accounts;
-- enable or disable users, change roles, and reset PINs;
+- create named administrator, standard user, or renter accounts;
+- enable, disable, or delete users, change roles, and reset PINs while retaining linked property, payment, maintenance, and audit history;
 - choose which screens each standard user can open (Calendar, Compose & Drafts, AI tools, Import, Personal settings) — Mail is always available, hidden screens are also blocked by the service, and administrators always have every screen;
-- change their own PIN, which revokes every existing session for that user;
+- let every account change its own PIN, which revokes every existing session for that user;
 - inspect and export audit history.
 
 The audit table is separate from Diagnostics and is not removed by **Clear logs**. Every API request and privileged Electron operation records the named user when available, effective role, timestamp, action, HTTP result, direct client IP address, route, and user agent. Request bodies, PINs, bearer tokens, Gmail tokens, and email content are not stored in audit details.

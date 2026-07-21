@@ -39,7 +39,7 @@ export const AI_AGENT_SKILLS: ReadonlyArray<{
 export type AiJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type AiJobTask = "analyze" | "draft_reply";
 export type AiPriority = "low" | "normal" | "high" | "urgent";
-export type AccountRole = "admin" | "user";
+export type AccountRole = "admin" | "user" | "renter";
 export type SessionRole = AccountRole | "viewer";
 export type DatabaseProvider = "sqlite" | "postgresql" | "mysql" | "mssql";
 
@@ -1082,6 +1082,7 @@ export function userCanAccessScreen(
   screen: UserScreenId
 ): boolean {
   if (user.role === "admin") return true;
+  if (user.role === "renter") return screen === "properties";
   return !user.allowedScreens || user.allowedScreens.includes(screen);
 }
 
@@ -2228,7 +2229,7 @@ const allowedScreensSchema = z.array(z.enum(USER_SCREEN_IDS))
 export const userCreateSchema = z.object({
   username: usernameSchema,
   displayName: z.string().trim().min(1).max(120),
-  role: z.enum(["admin", "user"]),
+  role: z.enum(["admin", "user", "renter"]),
   pin: pinSchema,
   allowedScreens: allowedScreensSchema.nullable().optional()
 }).strict();
@@ -2237,7 +2238,7 @@ export type UserCreate = z.infer<typeof userCreateSchema>;
 
 export const userUpdateSchema = z.object({
   displayName: z.string().trim().min(1).max(120).optional(),
-  role: z.enum(["admin", "user"]).optional(),
+  role: z.enum(["admin", "user", "renter"]).optional(),
   isActive: z.boolean().optional(),
   pin: pinSchema.optional(),
   allowedScreens: allowedScreensSchema.nullable().optional()

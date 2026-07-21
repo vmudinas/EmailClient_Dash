@@ -114,6 +114,7 @@ export function PropertyManagementView({
   const [gmailConnections, setGmailConnections] = useState<GmailConnection[]>([]);
   const [backups, setBackups] = useState<PropertyBackupSummary[]>([]);
   const [paymentInstructions, setPaymentInstructions] = useState("");
+  const [paymentChargeId, setPaymentChargeId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -184,6 +185,13 @@ export function PropertyManagementView({
     [overview.leases]
   );
   const manager = overview.mode === "manager";
+  const paymentCharge = paymentChargeId
+    ? overview.rentCharges.find((charge) => charge.id === paymentChargeId) ?? null
+    : null;
+  const openPayment = (chargeId: string | null = null) => {
+    setPaymentChargeId(chargeId);
+    setDialog("payment");
+  };
 
   const createInvitation = async (tenantId: string) => {
     setBusy(true);
@@ -274,7 +282,7 @@ export function PropertyManagementView({
           <Panel title="Recent service requests" action={!readOnly ? <ActionButton label="New request" onClick={() => setDialog("request")} /> : null}>
             <RequestList requests={overview.serviceRequests.slice(0, 5)} />
           </Panel>
-          <Panel title="Rent and payments" action={!readOnly ? <ActionButton label={manager ? "Record payment" : "Pay rent"} onClick={() => setDialog("payment")} /> : null}>
+          <Panel title="Rent and payments" action={!readOnly ? <ActionButton label={manager ? "Record payment" : "Pay rent or fee"} onClick={() => openPayment()} /> : null}>
             <div className="rent-summary-list">
               {overview.rentCharges.slice(0, 5).map((charge) => (
                 <div key={charge.id}>
@@ -393,8 +401,8 @@ export function PropertyManagementView({
                       if (!body) return;
                       void run(() => api.addPropertyRequestComment(request.id, { body, tenantVisible: true }), "Comment added");
                       form.reset();
-                    }}><input name="comment" placeholder="Add an update…" aria-label={`Comment on ${request.title}`} /><button className="secondary-button compact" disabled={busy}><Send size={14} /> Add</button></form>
-                    <label className="secondary-button compact file-action"><Upload size={14} /> Attach<input type="file" accept=".pdf,.doc,.docx,.txt,image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void run(() => api.uploadPropertyRequestAttachment(request.id, file), "Attachment uploaded"); event.currentTarget.value = ""; }} /></label>
+                    }}><input name="comment" placeholder={manager ? "Reply to tenant…" : "Message property manager…"} aria-label={`Comment on ${request.title}`} /><button className="secondary-button compact" disabled={busy}><Send size={14} /> Send</button></form>
+                    <label className="secondary-button compact file-action"><Upload size={14} /> Photo, video, or file<input type="file" accept=".pdf,.doc,.docx,.txt,image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm" onChange={(event) => { const file = event.target.files?.[0]; if (file) void run(() => api.uploadPropertyRequestAttachment(request.id, file), "Attachment uploaded"); event.currentTarget.value = ""; }} /></label>
                   </div>}
                 </div>
               </article>
@@ -416,12 +424,13 @@ export function PropertyManagementView({
                   <div><strong>{charge.description}</strong><span>{charge.propertyName} · due {dateLabel(charge.dueDate)}</span></div>
                   <div className="charge-amount"><strong>{money(charge.balanceCents)}</strong><small>of {money(charge.amountCents)}</small></div>
                   <StatusBadge value={charge.status} />
+                  {!manager && !readOnly && charge.balanceCents > 0 && <button className="primary-button compact" disabled={busy} onClick={() => openPayment(charge.id)}><CreditCard size={14} /> Pay</button>}
                 </article>
               ))}
               {overview.rentCharges.length === 0 && <EmptyState text="No rent charges." />}
             </div>
           </Panel>
-          <Panel title="Payment history" action={!readOnly ? <ActionButton label={manager ? "Record payment" : "Pay rent"} onClick={() => setDialog("payment")} /> : null}>
+          <Panel title="Payment history" action={!readOnly ? <ActionButton label={manager ? "Record payment" : "Pay rent or fee"} onClick={() => openPayment()} /> : null}>
             <PaymentHistory
               payments={overview.payments}
               manager={manager}
@@ -605,7 +614,7 @@ export function PropertyManagementView({
               <Field label="Last name"><input name="lastName" required /></Field>
               <Field label="Email"><input name="email" type="email" required /></Field>
               <Field label="Phone"><input name="phone" type="tel" /></Field>
-              {isAdmin && <Field label="Existing portal account" wide><select name="linkedUserId"><option value="">Create with an invitation later</option>{users.filter((user) => user.role === "user").map((user) => <option key={user.id} value={user.id}>{user.displayName} ({user.username})</option>)}</select><small>Link an existing account, or use Invite after saving the tenant.</small></Field>}
+              {isAdmin && <Field label="Renter portal account" wide><select name="linkedUserId"><option value="">Create or invite an account later</option>{users.filter((user) => user.role === "renter" || user.role === "user").map((user) => <option key={user.id} value={user.id}>{user.displayName} ({user.username}) · {user.role}</option>)}</select><small>Renter-role accounts are restricted to the tenant portal. Existing user accounts remain available for compatibility.</small></Field>}
             </FormGrid>
             <ModalActions busy={busy} />
           </form>
@@ -686,7 +695,7 @@ export function PropertyManagementView({
       )}
 
       {dialog === "payment" && (
-        <PropertyModal title={manager ? "Record or start payment" : "Pay rent"} busy={busy} onClose={() => setDialog(null)}>
+        <PropertyModal title={manager ? "Record or start payment" : "Pay rent or fee"} busy={busy} onClose={() => { setDialog(null); setPaymentChargeId(null); }}>
           <form onSubmit={async (event) => {
             event.preventDefault();
             const data = formData(event);
@@ -701,6 +710,7 @@ export function PropertyManagementView({
               });
               const checkout = await api.createPropertyPaymentCheckout(payment.id);
               setDialog(null);
+              setPaymentChargeId(null);
               if (checkout.action === "redirect" && checkout.url) window.open(checkout.url, "_blank", "noopener,noreferrer");
               if (checkout.instructions) setPaymentInstructions(checkout.instructions);
               onNotice(checkout.action === "redirect" ? "Secure payment checkout opened" : "Payment instructions created");
@@ -712,11 +722,11 @@ export function PropertyManagementView({
             }
           }}>
             <FormGrid>
-              <Field label="Property"><PropertySelect properties={overview.properties} name="propertyId" /></Field>
-              <Field label="Lease"><select name="leaseId"><option value="">No lease</option>{activeLeases.map((lease) => <option key={lease.id} value={lease.id}>{lease.propertyName} · {lease.tenantName}</option>)}</select></Field>
-              <Field label="Apply to charge"><select name="chargeId"><option value="">Unallocated payment</option>{overview.rentCharges.filter((charge) => charge.balanceCents > 0).map((charge) => <option key={charge.id} value={charge.id}>{charge.propertyName} · {charge.description} · {money(charge.balanceCents)}</option>)}</select></Field>
+              <Field label="Property"><PropertySelect properties={overview.properties} name="propertyId" defaultValue={paymentCharge?.propertyId} /></Field>
+              <Field label="Lease"><select name="leaseId" defaultValue={paymentCharge?.leaseId ?? ""}><option value="">No lease</option>{activeLeases.map((lease) => <option key={lease.id} value={lease.id}>{lease.propertyName} · {lease.tenantName}</option>)}</select></Field>
+              <Field label="Apply to charge"><select name="chargeId" defaultValue={paymentCharge?.id ?? ""}><option value="">Unallocated payment</option>{overview.rentCharges.filter((charge) => charge.balanceCents > 0).map((charge) => <option key={charge.id} value={charge.id}>{charge.propertyName} · {charge.description} · {money(charge.balanceCents)}</option>)}</select></Field>
               <Field label="Payment method"><select name="provider" required defaultValue={firstConfiguredProvider(overview)}>{providerOptions(overview).map((option) => <option key={option.value} value={option.value} disabled={!option.configured}>{option.label}{option.configured ? "" : " — not configured"}</option>)}</select></Field>
-              <Field label="Amount"><input name="amount" type="number" min="0.01" step="0.01" required /></Field>
+              <Field label="Amount"><input name="amount" type="number" min="0.01" step="0.01" defaultValue={paymentCharge ? (paymentCharge.balanceCents / 100).toFixed(2) : ""} required /></Field>
               <Field label="Reference"><input name="reference" placeholder="Optional check or Zelle reference" /></Field>
               <Field label="Notes" wide><textarea name="notes" rows={3} /></Field>
             </FormGrid>
@@ -920,7 +930,7 @@ function PropertyModal({ title, busy, onClose, children }: { title: string; busy
 function FormGrid({ children }: { children: ReactNode }) { return <div className="property-form-grid">{children}</div>; }
 function Field({ label: text, children, wide = false }: { label: string; children: ReactNode; wide?: boolean }) { return <label className={wide ? "wide" : ""}><span>{text}</span>{children}</label>; }
 function ModalActions({ busy, submitLabel = "Save" }: { busy: boolean; submitLabel?: string }) { return <footer className="property-modal-actions"><button className="primary-button" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <CheckCircle2 size={17} />}{busy ? "Saving…" : submitLabel}</button></footer>; }
-function PropertySelect({ properties, name }: { properties: ManagedProperty[]; name: string }) { return <select name={name} required><option value="">Choose property</option>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select>; }
+function PropertySelect({ properties, name, defaultValue }: { properties: ManagedProperty[]; name: string; defaultValue?: string }) { return <select name={name} defaultValue={defaultValue ?? ""} required><option value="">Choose property</option>{properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select>; }
 function StatusBadge({ value }: { value: string }) { return <span className={`property-status ${value}`}>{label(value)}</span>; }
 function EmptyState({ text }: { text: string }) { return <div className="property-empty"><ClipboardList size={21} /><span>{text}</span></div>; }
 function IntegrationStatus({ label: text, ready }: { label: string; ready: boolean }) { return <div><span className={ready ? "configured" : "unconfigured"}>{ready ? <CheckCircle2 size={16} /> : <X size={16} />}</span><strong>{text}</strong><small>{ready ? "Ready" : "Not configured"}</small></div>; }

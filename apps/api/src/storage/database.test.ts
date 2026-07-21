@@ -276,7 +276,8 @@ describe("EmailDatabase", () => {
     expect(archivePlan.some((row) => row.detail.includes("messages_archive_keyset_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("messages_conversation_idx"))).toBe(true);
     expect(replyPlan.some((row) => row.detail.includes("SCAN sent_reply"))).toBe(false);
-    expect(sqlite.pragma("user_version", { simple: true })).toBe(34);
+    expect(sqlite.pragma("user_version", { simple: true })).toBe(35);
+    expect(sqlite.pragma("foreign_key_check")).toEqual([]);
     expect((sqlite.pragma("index_list(message_state)") as Array<{ name: string }>)
       .some((index) => index.name === "message_state_read_idx")).toBe(true);
 

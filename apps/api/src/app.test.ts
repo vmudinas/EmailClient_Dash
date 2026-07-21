@@ -2804,6 +2804,250 @@ describe("Email API per-user screen access", () => {
   });
 });
 
+describe("Email API renter accounts", () => {
+  it("isolates renters, supports tenant workflows, rotates PINs, and retains history after deletion", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const adminLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const adminSession = adminLogin.json() as {
+      accessToken: string;
+      session: { user: { id: string } };
+    };
+    const adminHeaders = { authorization: `Bearer ${adminSession.accessToken}` };
+    const createdRenter = await runtime.app.inject({
+      method: "POST",
+      url: "/api/admin/users",
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        username: "taylor-renter",
+        displayName: "Taylor Tenant",
+        role: "renter",
+        pin: "4826",
+        allowedScreens: ["calendar"]
+      }
+    });
+    expect(createdRenter.statusCode).toBe(200);
+    expect(createdRenter.json()).toMatchObject({
+      role: "renter",
+      allowedScreens: ["properties"]
+    });
+    const renterId = (createdRenter.json() as { id: string }).id;
+    const managerId = adminSession.session.user.id;
+    const property = runtime.properties.createProperty(managerId, {
+      name: "Tenant Portal House",
+      addressLine1: "101 Test St",
+      addressLine2: "",
+      city: "Boca Raton",
+      state: "FL",
+      postalCode: "33486",
+      propertyType: "single_family",
+      status: "occupied",
+      bedrooms: 3,
+      bathrooms: 2,
+      monthlyRentCents: 250_000,
+      notes: ""
+    });
+    runtime.propertyPlatform.ensureDefaultOrganization(managerId);
+    const unit = runtime.propertyPlatform.syncProperty(managerId, property.id);
+    const tenant = runtime.properties.createTenant(managerId, {
+      linkedUserId: renterId,
+      firstName: "Taylor",
+      lastName: "Tenant",
+      email: "taylor@example.test",
+      phone: "+15615550101",
+      status: "active"
+    });
+    const lease = runtime.properties.createLease(managerId, {
+      propertyId: property.id,
+      unitId: unit.id,
+      tenantId: tenant.id,
+      startDate: "2026-07-01",
+      endDate: "2027-06-30",
+      monthlyRentCents: 250_000,
+      securityDepositCents: 250_000,
+      dueDay: 1,
+      status: "active"
+    });
+    const charge = runtime.properties.createRentCharge(managerId, {
+      propertyId: property.id,
+      leaseId: lease.id,
+      description: "August rent and service fee",
+      amountCents: 255_000,
+      dueDate: "2026-08-01"
+    });
+
+    const renterLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "taylor-renter", pin: "4826" }
+    });
+    expect(renterLogin.statusCode).toBe(200);
+    expect(renterLogin.json()).toMatchObject({ session: { role: "renter" } });
+    const renterToken = (renterLogin.json() as { accessToken: string }).accessToken;
+    const renterHeaders = { authorization: `Bearer ${renterToken}` };
+
+    const blockedMail = await runtime.app.inject({
+      method: "GET",
+      url: "/api/archives",
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(blockedMail.statusCode).toBe(403);
+    const portal = await runtime.app.inject({
+      method: "GET",
+      url: "/api/properties/overview",
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(portal.statusCode).toBe(200);
+    expect(portal.json()).toMatchObject({
+      mode: "tenant",
+      properties: [expect.objectContaining({ id: property.id })],
+      rentCharges: [expect.objectContaining({ id: charge.id, balanceCents: 255_000 })]
+    });
+
+    const forgedPayment = await runtime.app.inject({
+      method: "POST",
+      url: "/api/property-payments",
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        propertyId: property.id,
+        leaseId: lease.id,
+        chargeId: charge.id,
+        provider: "manual",
+        method: "cash",
+        amountCents: 255_000,
+        status: "succeeded"
+      }
+    });
+    expect(forgedPayment.statusCode).toBe(403);
+    const payment = await runtime.app.inject({
+      method: "POST",
+      url: "/api/property-payments",
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        propertyId: property.id,
+        leaseId: lease.id,
+        chargeId: charge.id,
+        provider: "manual",
+        method: "cash",
+        amountCents: 255_000,
+        status: "pending"
+      }
+    });
+    expect(payment.statusCode).toBe(201);
+    expect(payment.json()).toMatchObject({ status: "pending", chargeId: charge.id });
+
+    const serviceRequest = await runtime.app.inject({
+      method: "POST",
+      url: "/api/property-service-requests",
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: {
+        propertyId: property.id,
+        tenantId: null,
+        title: "Kitchen leak",
+        description: "Water is leaking below the sink.",
+        category: "Plumbing",
+        priority: "high",
+        preferredEntryAt: null
+      }
+    });
+    expect(serviceRequest.statusCode).toBe(201);
+    const requestId = (serviceRequest.json() as { id: string }).id;
+    const comment = await runtime.app.inject({
+      method: "POST",
+      url: `/api/property-service-requests/${requestId}/comments`,
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { body: "The shutoff valve is closed.", tenantVisible: true }
+    });
+    expect(comment.statusCode).toBe(201);
+    const mp4 = Buffer.concat([
+      Buffer.from([0, 0, 0, 24]),
+      Buffer.from("ftyp"),
+      Buffer.from("isom0000isomiso2")
+    ]);
+    const attachment = await runtime.app.inject({
+      method: "POST",
+      url: `/api/property-service-requests/${requestId}/attachments?filename=leak.mp4`,
+      headers: { ...renterHeaders, "content-type": "video/mp4" },
+      remoteAddress: "127.0.0.1",
+      payload: mp4
+    });
+    expect(attachment.statusCode).toBe(201);
+    expect(attachment.json()).toMatchObject({ filename: "leak.mp4", contentType: "video/mp4" });
+
+    const changedPin = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/auth/pin",
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1",
+      payload: { currentPin: "4826", newPin: "7319" }
+    });
+    expect(changedPin.statusCode).toBe(204);
+    expect((await runtime.app.inject({
+      method: "GET",
+      url: "/api/properties/overview",
+      headers: renterHeaders,
+      remoteAddress: "127.0.0.1"
+    })).statusCode).toBe(401);
+    expect((await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "taylor-renter", pin: "4826" }
+    })).statusCode).toBe(401);
+    expect((await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "taylor-renter", pin: "7319" }
+    })).statusCode).toBe(200);
+
+    const deleted = await runtime.app.inject({
+      method: "DELETE",
+      url: `/api/admin/users/${renterId}`,
+      headers: adminHeaders,
+      remoteAddress: "127.0.0.1"
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(runtime.database.getUserRecord(renterId)).toBeNull();
+    const managerOverview = runtime.properties.overview(managerId, runtime.propertyPayments.configuration());
+    expect(managerOverview.tenants).toEqual([
+      expect.objectContaining({ id: tenant.id, linkedUserId: null })
+    ]);
+    expect(managerOverview.serviceRequests).toEqual([
+      expect.objectContaining({ id: requestId, title: "Kitchen leak" })
+    ]);
+    const managerPlatform = runtime.propertyPlatform.overview(managerId, runtime.propertyIntegrations.view());
+    expect(managerPlatform.requestComments).toEqual([
+      expect.objectContaining({ body: "The shutoff valve is closed." })
+    ]);
+    expect(managerPlatform.requestAttachments).toEqual([
+      expect.objectContaining({ filename: "leak.mp4" })
+    ]);
+  });
+});
+
 describe("Email API property request attachments", () => {
   it("checks request access before saving an attachment", async () => {
     const dataDir = await temporaryDirectory();

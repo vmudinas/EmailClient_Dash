@@ -49,6 +49,34 @@ describe("SettingsDialog", () => {
     expect(listUsers).not.toHaveBeenCalled();
   });
 
+  it("gives renters only personal PIN settings", async () => {
+    const changePin = vi.fn().mockResolvedValue(undefined);
+    const onSignedOut = vi.fn();
+    const api = { changePin } as unknown as ApiClient;
+
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={RENTER_SESSION}
+        onClose={vi.fn()}
+        onSignedOut={onSignedOut}
+      />
+    );
+
+    expect(screen.getByRole("dialog", { name: "Personal settings" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Security" })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Calendars" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Users" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Current PIN"), { target: { value: "4826" } });
+    fireEvent.change(screen.getByLabelText("New PIN"), { target: { value: "7319" } });
+    fireEvent.change(screen.getByLabelText("Confirm new PIN"), { target: { value: "7319" } });
+    fireEvent.click(screen.getByRole("button", { name: "Change PIN and sign out" }));
+
+    await waitFor(() => expect(changePin).toHaveBeenCalledWith("4826", "7319"));
+    expect(onSignedOut).toHaveBeenCalledOnce();
+  });
+
   it("opens the guide and diagnostics from Admin tools", async () => {
     const onOpenGuide = vi.fn();
     const onOpenDiagnostics = vi.fn();
@@ -80,6 +108,30 @@ describe("SettingsDialog", () => {
     fireEvent.click(diagnosticsButton);
     expect(onOpenGuide).toHaveBeenCalledOnce();
     expect(onOpenDiagnostics).toHaveBeenCalledOnce();
+  });
+
+  it("lets an administrator delete a renter account", async () => {
+    const renter: UserSummary = {
+      ...RENTER_SESSION.user,
+      id: "renter-delete",
+      username: "renter-delete"
+    };
+    const deleteUser = vi.fn().mockResolvedValue(undefined);
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue([...USERS, renter]),
+      deleteUser
+    } as unknown as ApiClient;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Users" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete renter-delete" }));
+
+    await waitFor(() => expect(deleteUser).toHaveBeenCalledWith(renter.id));
+    expect(screen.getByText("Account renter-delete deleted.")).toBeTruthy();
+    expect(screen.queryByText("renter-delete")).toBeNull();
+    confirm.mockRestore();
   });
 
   it("configures the default draft sender and placeholder name", async () => {
@@ -1395,6 +1447,24 @@ const USER_SESSION: AuthSessionInfo = {
     updatedAt: "2026-07-13T00:00:00.000Z"
   },
   role: "user",
+  expiresAt: "2026-07-13T12:00:00.000Z"
+};
+
+const RENTER_SESSION: AuthSessionInfo = {
+  id: "session-renter",
+  user: {
+    id: "renter-private",
+    username: "taylor",
+    displayName: "Taylor Tenant",
+    role: "renter",
+    isActive: true,
+    mustChangePin: false,
+    allowedScreens: ["properties"],
+    lastLoginAt: null,
+    createdAt: "2026-07-13T00:00:00.000Z",
+    updatedAt: "2026-07-13T00:00:00.000Z"
+  },
+  role: "renter",
   expiresAt: "2026-07-13T12:00:00.000Z"
 };
 

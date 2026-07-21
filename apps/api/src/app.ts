@@ -322,6 +322,22 @@ function screenForRoute(route: string): UserScreenId | null {
   return null;
 }
 
+function renterCanAccessRoute(method: string, route: string): boolean {
+  const key = `${method.toUpperCase()} ${route}`;
+  return key === "GET /api/property-platform/overview"
+    || key === "GET /api/properties/overview"
+    || key === "GET /api/properties/:propertyId/photo"
+    || key === "POST /api/property-service-requests"
+    || key === "POST /api/property-payments"
+    || key === "POST /api/property-payments/:paymentId/checkout"
+    || key === "POST /api/property-payments/:paymentId/sync"
+    || key === "GET /api/property-document-versions/:versionId/content"
+    || key === "POST /api/property-documents/:documentId/acknowledge"
+    || key === "POST /api/property-service-requests/:requestId/comments"
+    || key === "POST /api/property-service-requests/:requestId/attachments"
+    || key === "GET /api/property-request-attachments/:attachmentId/content";
+}
+
 export interface StartedApi {
   runtime: EmailApiRuntime;
   url: string;
@@ -541,7 +557,7 @@ export class EmailApiRuntime {
   ): Promise<T> {
     const session = this.auth.authenticate(accessToken, "127.0.0.1");
     if (!session) throw new Error("Login required");
-    if (session.role === "viewer" || (adminOnly && session.role !== "admin")) {
+    if (session.role === "viewer" || session.role === "renter" || (adminOnly && session.role !== "admin")) {
       throw new Error(adminOnly ? "Administrator access required" : "This viewer is read-only");
     }
     try {
@@ -634,6 +650,14 @@ export class EmailApiRuntime {
         done(null, body);
       });
     }
+    for (const contentType of ["video/mp4", "video/quicktime", "video/webm"]) {
+      this.app.addContentTypeParser(contentType, {
+        parseAs: "buffer",
+        bodyLimit: 100 * 1024 * 1024
+      }, (_request, body, done) => {
+        done(null, body);
+      });
+    }
     for (const contentType of [
       "application/pdf",
       "application/msword",
@@ -655,7 +679,10 @@ export class EmailApiRuntime {
       if (!userId) return;
       const route = request.routeOptions.url || request.url.split("?", 1)[0]!;
       const session = this.resolveSession(request);
-      if (session?.role === "user") {
+      if (session?.user.role === "renter" && !renterCanAccessRoute(request.method, route)) {
+        return reply.code(403).send({ error: "Renter accounts can only access their property portal" });
+      }
+      if (session && (session.role === "user" || session.role === "renter")) {
         const screen = screenForRoute(route);
         if (screen && !userCanAccessScreen(session.user, screen)) {
           return reply.code(403).send({
@@ -3796,6 +3823,30 @@ export class EmailApiRuntime {
       }
     );
 
+    this.app.delete<{ Params: { userId: string } }>(
+      "/api/admin/users/:userId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["admin"])) return;
+        const currentUserId = this.currentUserId(request)!;
+        if (request.params.userId === currentUserId) {
+          return reply.code(409).send({ error: "You cannot delete your own account" });
+        }
+        if (this.properties.hasOwnedProperties(request.params.userId)) {
+          return reply.code(409).send({ error: "Transfer or remove this manager's properties before deleting the account" });
+        }
+        try {
+          this.auth.deleteUser(request.params.userId);
+          this.propertyPlatform.unlinkUserAccount(request.params.userId);
+          return reply.code(204).send();
+        } catch (error) {
+          const statusCode = error instanceof AuthConflictError ? 409
+            : error instanceof AuthError ? 404
+              : 400;
+          return reply.code(statusCode).send({ error: error instanceof Error ? error.message : "User could not be deleted" });
+        }
+      }
+    );
+
     this.app.get<{
       Querystring: {
         username?: string;
@@ -3938,7 +3989,7 @@ export class EmailApiRuntime {
     const header = request.headers.authorization;
     const bearer = header?.startsWith("Bearer ") ? header.slice(7) : null;
     const session = this.resolveSession(request);
-    if (session) return session.role === "user" ? "local" : session.role;
+    if (session) return session.role === "user" || session.role === "renter" ? "local" : session.role;
     if (loopback && bearer === this.adminToken) return "admin";
     if (loopback && bearer === this.localToken) return "local";
     return null;
