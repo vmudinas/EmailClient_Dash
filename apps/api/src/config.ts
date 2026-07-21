@@ -18,6 +18,24 @@ export interface ApiConfig {
   gmailSyncMailboxActions: boolean | null;
   openAiApiKey: string | null;
   deepSeekApiKey: string | null;
+  stripeSecretKey: string | null;
+  stripeWebhookSecret: string | null;
+  paypalClientId: string | null;
+  paypalClientSecret: string | null;
+  paypalWebhookId: string | null;
+  paypalEnvironment: "sandbox" | "live";
+  zelleRecipient: string | null;
+  zelleNote: string;
+  twilioAccountSid: string | null;
+  twilioAuthToken: string | null;
+  twilioMessagingServiceSid: string | null;
+  propertyGmailConnectionId: string | null;
+  propertyAutomationIntervalMinutes: number;
+  propertyBackupRetention: number;
+  importConcurrency: number;
+  importBatchSize: number;
+  importThrottleMs: number;
+  importLatencyThresholdMs: number;
 }
 
 export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
@@ -56,7 +74,54 @@ export function loadConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
       : process.env.OPENAI_API_KEY ?? null,
     deepSeekApiKey: overrides.deepSeekApiKey !== undefined
       ? overrides.deepSeekApiKey
-      : process.env.DEEPSEEK_API_KEY ?? null
+      : process.env.DEEPSEEK_API_KEY ?? null,
+    stripeSecretKey: overrides.stripeSecretKey !== undefined
+      ? overrides.stripeSecretKey
+      : process.env.STRIPE_SECRET_KEY ?? null,
+    stripeWebhookSecret: overrides.stripeWebhookSecret !== undefined
+      ? overrides.stripeWebhookSecret
+      : process.env.STRIPE_WEBHOOK_SECRET ?? null,
+    paypalClientId: overrides.paypalClientId !== undefined
+      ? overrides.paypalClientId
+      : process.env.PAYPAL_CLIENT_ID ?? null,
+    paypalClientSecret: overrides.paypalClientSecret !== undefined
+      ? overrides.paypalClientSecret
+      : process.env.PAYPAL_CLIENT_SECRET ?? null,
+    paypalWebhookId: overrides.paypalWebhookId !== undefined
+      ? overrides.paypalWebhookId
+      : process.env.PAYPAL_WEBHOOK_ID ?? null,
+    paypalEnvironment: overrides.paypalEnvironment
+      ?? (process.env.PAYPAL_ENVIRONMENT?.trim().toLowerCase() === "live" ? "live" : "sandbox"),
+    zelleRecipient: overrides.zelleRecipient !== undefined
+      ? overrides.zelleRecipient
+      : process.env.ZELLE_RECIPIENT ?? null,
+    zelleNote: overrides.zelleNote
+      ?? process.env.ZELLE_PAYMENT_NOTE
+      ?? "Include the property address and payment reference in the Zelle memo.",
+    twilioAccountSid: overrides.twilioAccountSid !== undefined
+      ? overrides.twilioAccountSid
+      : process.env.TWILIO_ACCOUNT_SID ?? null,
+    twilioAuthToken: overrides.twilioAuthToken !== undefined
+      ? overrides.twilioAuthToken
+      : process.env.TWILIO_AUTH_TOKEN ?? null,
+    twilioMessagingServiceSid: overrides.twilioMessagingServiceSid !== undefined
+      ? overrides.twilioMessagingServiceSid
+      : process.env.TWILIO_MESSAGING_SERVICE_SID ?? null,
+    propertyGmailConnectionId: overrides.propertyGmailConnectionId !== undefined
+      ? overrides.propertyGmailConnectionId
+      : process.env.PROPERTY_GMAIL_CONNECTION_ID ?? null,
+    propertyAutomationIntervalMinutes: overrides.propertyAutomationIntervalMinutes
+      ?? Math.max(1, Number(process.env.PROPERTY_AUTOMATION_INTERVAL_MINUTES ?? 5)),
+    propertyBackupRetention: overrides.propertyBackupRetention
+      ?? Math.max(1, Number(process.env.PROPERTY_BACKUP_RETENTION ?? 7)),
+    importConcurrency: overrides.importConcurrency
+      ?? boundedInteger(process.env.EMAIL_IMPORT_CONCURRENCY, 1, 1, 4),
+    importBatchSize: overrides.importBatchSize
+      ?? boundedInteger(process.env.EMAIL_IMPORT_BATCH_SIZE, 50, 10, 500),
+    importThrottleMs: overrides.importThrottleMs
+      ?? boundedInteger(process.env.EMAIL_IMPORT_THROTTLE_MS, 5, 0, 1_000),
+    importLatencyThresholdMs: overrides.importLatencyThresholdMs
+      ?? boundedInteger(process.env.EMAIL_IMPORT_LATENCY_THRESHOLD_MS, 250, 25, 10_000)
   };
 }
 
@@ -81,4 +146,11 @@ function parseOptionalInt(value: string | undefined): number | null {
 function parseOptionalBoolean(value: string | undefined): boolean | null {
   if (value === undefined || value.trim() === "") return null;
   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(parsed)));
 }

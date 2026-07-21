@@ -38,7 +38,7 @@ export const DATABASE_PROVIDERS: DatabaseProviderOption[] = [
     id: "postgresql",
     label: "PostgreSQL",
     available: false,
-    description: "Requires a PostgreSQL data and search adapter."
+    description: "Dockerized migration target is available; runtime activation requires the asynchronous PostgreSQL EmailStore adapter."
   },
   {
     id: "mysql",

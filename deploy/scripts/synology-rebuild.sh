@@ -45,7 +45,8 @@ echo "Removing the stale container and project network..."
 compose down --remove-orphans
 
 echo "Creating the container from the fresh image and current environment..."
-compose up -d --force-recreate archive-mail
+mkdir -p "$ARCHIVE_MAIL_DATA_DIR" "$ARCHIVE_MAIL_POSTGRES_DIR"
+compose up -d --force-recreate postgres archive-mail
 
 container_id=$(compose ps -q archive-mail)
 if [ -z "$container_id" ]; then

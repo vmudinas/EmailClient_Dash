@@ -26,7 +26,7 @@ export function LoginScreen({ busy, error, pairedViewer, onLogin }: LoginScreenP
         </div>
         <div className="login-heading">
           <KeyRound size={21} />
-          <div><h1>Sign in</h1><p>Enter your Archive Mail username and PIN.</p></div>
+          <div><h1>Sign in</h1><p>Enter your username and password or administrator PIN.</p></div>
         </div>
         <label>
           Username
@@ -39,13 +39,11 @@ export function LoginScreen({ busy, error, pairedViewer, onLogin }: LoginScreenP
           />
         </label>
         <label>
-          PIN
+          Password or PIN
           <input
             type="password"
-            inputMode="numeric"
-            pattern="[0-9]{4,12}"
             value={pin}
-            onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 12))}
+            onChange={(event) => setPin(event.target.value.slice(0, 128))}
             autoComplete="current-password"
             disabled={busy}
           />

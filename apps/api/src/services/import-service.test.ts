@@ -130,6 +130,36 @@ describe("ImportService", () => {
     await service.close();
     database.close();
   });
+
+  it("queues SQLite-writing imports and exposes API-pressure throttling status", async () => {
+    const dataDir = await temporaryDirectory();
+    const firstPath = join(dataDir, "first-large.mbox");
+    const secondPath = join(dataDir, "second-large.mbox");
+    await writeFile(firstPath, fixtureMbox().repeat(20), "utf8");
+    await writeFile(secondPath, `${fixtureMbox().repeat(20)}\n`, "utf8");
+    const database = new EmailDatabase(dataDir);
+    const service = new ImportService(database, new BlobStore(dataDir), {
+      useWorker: false,
+      concurrency: 1,
+      batchSize: 10,
+      throttleMs: 20,
+      latencyThresholdMs: 100
+    });
+    await service.initialize();
+
+    const first = await service.startImport(firstPath, { ocrEnabled: false });
+    const second = await service.startImport(secondPath, { ocrEnabled: false });
+
+    expect(service.status()).toMatchObject({ activeJobs: 1, queuedJobs: 1, concurrency: 1, batchSize: 10 });
+    expect(database.getImportJob(second.id)?.message).toContain("position 1");
+    service.recordApiLatency(150);
+    expect(service.status().throttledForApiLatency).toBe(true);
+
+    await service.cancelImport(second.id);
+    await service.cancelImport(first.id);
+    await service.close();
+    database.close();
+  });
 });
 
 async function waitForJob(database: EmailDatabase, jobId: string): Promise<NonNullable<ReturnType<EmailDatabase["getImportJob"]>>> {

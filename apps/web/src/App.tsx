@@ -1,13 +1,16 @@
 import {
   useCallback,
   useEffect,
+  lazy,
   useMemo,
   useRef,
+  Suspense,
   useState
 } from "react";
 import {
   Archive,
   BrainCircuit,
+  Building2,
   CalendarDays,
   FileEdit,
   Filter,
@@ -87,6 +90,7 @@ import { ComposeDialog, type ComposeDraft } from "./components/ComposeDialog.js"
 import { DraftsDialog } from "./components/DraftsDialog.js";
 import { GuideDialog } from "./components/GuideDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
+import { TenantInvitationScreen } from "./components/TenantInvitationScreen.js";
 import { SettingsDialog } from "./components/SettingsDialog.js";
 import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
 import { MessageActionDialog, type ReviewAction } from "./components/MessageActionDialog.js";
@@ -95,6 +99,7 @@ import { NewsTickerBar } from "./components/NewsTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
 type MobileView = "folders" | "messages" | "reader";
+type AppView = "mail" | "calendar" | "properties";
 type SmartMailbox = "starred";
 type RenameTarget =
   | { kind: "archive"; id: string; name: string }
@@ -136,6 +141,16 @@ const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string
 };
 
 const MAX_BULK_SELECTION = 500;
+const PropertyManagementView = lazy(async () => {
+  const module = await import("./components/PropertyManagementView.js");
+  return { default: module.PropertyManagementView };
+});
+
+function viewForPath(pathname = window.location.pathname): AppView {
+  if (pathname.startsWith("/properties") || pathname.startsWith("/portal")) return "properties";
+  if (pathname.startsWith("/calendar")) return "calendar";
+  return "mail";
+}
 
 export function App() {
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
@@ -193,7 +208,7 @@ export function App() {
   const [notice, setNotice] = useState("");
   const [mobileView, setMobileView] = useState<MobileView>("folders");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [viewMode, setViewMode] = useState<"mail" | "calendar">("mail");
+  const [viewMode, setViewMode] = useState<AppView>(() => viewForPath());
   const [importOpen, setImportOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importProgress, setImportProgress] = useState<UploadProgress | null>(null);
@@ -260,6 +275,25 @@ export function App() {
   const readOnly = !session || session.role === "viewer";
   const isAdmin = session?.role === "admin";
   const canAccessScreen = (screen: UserScreenId) => !session || userCanAccessScreen(session.user, screen);
+  const navigateView = (next: AppView, replace = false) => {
+    setViewMode(next);
+    const path = next === "mail" ? "/mail" : `/${next}`;
+    if (window.location.pathname !== path) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", path);
+    }
+  };
+
+  useEffect(() => {
+    const handlePopState = () => setViewMode(viewForPath());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    if (viewMode === "calendar" && !canAccessScreen("calendar")) navigateView("mail", true);
+    if (viewMode === "properties" && !canAccessScreen("properties")) navigateView("mail", true);
+  }, [session, viewMode]);
   const electron = Boolean(window.emailClient);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
@@ -369,18 +403,14 @@ export function App() {
       setRuntime(config);
       setApi(client);
       const savedToken = sessionStorage.getItem(SESSION_STORAGE_KEY);
-      if (savedToken) {
-        client.setAccessToken(savedToken);
-        try {
-          const activeSession = await client.currentSession();
-          setSession(activeSession);
-          await loadAuthenticatedData(client);
-        } catch {
-          sessionStorage.removeItem(SESSION_STORAGE_KEY);
-          client.setAccessToken("");
-          setSession(null);
-        }
-      } else {
+      if (savedToken) client.setAccessToken(savedToken);
+      try {
+        const activeSession = await client.currentSession();
+        setSession(activeSession);
+        await loadAuthenticatedData(client);
+      } catch {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        client.setAccessToken("");
         setSession(null);
       }
     } catch (error) {
@@ -396,7 +426,11 @@ export function App() {
     setLoginError("");
     try {
       const result = await api.login(username, pin);
-      sessionStorage.setItem(SESSION_STORAGE_KEY, result.accessToken);
+      if (runtime?.platform === "desktop") {
+        sessionStorage.setItem(SESSION_STORAGE_KEY, result.accessToken);
+      } else {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      }
       setSession(result.session);
       await loadAuthenticatedData(api);
     } catch (error) {
@@ -1977,6 +2011,18 @@ export function App() {
     );
   }
 
+  const invitationToken = window.location.pathname.startsWith("/portal/invite")
+    ? new URLSearchParams(window.location.search).get("token")
+    : null;
+  if (!session && api && invitationToken) {
+    return <TenantInvitationScreen api={api} token={invitationToken} onAccepted={(result) => {
+      if (runtime?.platform === "desktop") sessionStorage.setItem(SESSION_STORAGE_KEY, result.accessToken);
+      setSession(result.session);
+      window.history.replaceState(null, "", "/properties");
+      void loadAuthenticatedData(api);
+    }} />;
+  }
+
   if (!session) {
     return (
       <LoginScreen
@@ -1994,42 +2040,51 @@ export function App() {
         <div className="brand">
           <span className="brand-mark"><Archive size={20} /></span>
           <span className="brand-name">Archive Mail</span>
-          <button
-            className="icon-button subtle folder-panel-toggle"
-            onClick={() => setFolderPanelVisible((visible) => !visible)}
-            title={folderPanelVisible ? "Hide folders" : "Show folders"}
-            aria-label={folderPanelVisible ? "Hide folders" : "Show folders"}
-            aria-controls="folder-sidebar"
-            aria-expanded={folderPanelVisible}
-          >
-            {folderPanelVisible ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
-          </button>
-        </div>
-
-        <div className="search-wrap">
-          <Search className="search-icon" size={18} />
-          <input
-            ref={searchInputRef}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={`Search in ${searchScopeLabel}`}
-            aria-label="Search mail and attachments"
-          />
-          {query && (
-            <button className="search-clear" onClick={() => setQuery("")} title="Clear search" aria-label="Clear search">
-              <X size={16} />
+          {viewMode === "mail" && (
+            <button
+              className="icon-button subtle folder-panel-toggle"
+              onClick={() => setFolderPanelVisible((visible) => !visible)}
+              title={folderPanelVisible ? "Hide folders" : "Show folders"}
+              aria-label={folderPanelVisible ? "Hide folders" : "Show folders"}
+              aria-controls="folder-sidebar"
+              aria-expanded={folderPanelVisible}
+            >
+              {folderPanelVisible ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
             </button>
           )}
         </div>
 
+        {viewMode === "mail" ? (
+          <div className="search-wrap">
+            <Search className="search-icon" size={18} />
+            <input
+              ref={searchInputRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={`Search in ${searchScopeLabel}`}
+              aria-label="Search mail and attachments"
+            />
+            {query && (
+              <button className="search-clear" onClick={() => setQuery("")} title="Clear search" aria-label="Clear search">
+                <X size={16} />
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="module-context">
+            {viewMode === "calendar" ? <CalendarDays size={18} /> : <Building2 size={18} />}
+            <div><strong>{viewMode === "calendar" ? "Calendar" : "Property Management"}</strong><span>{viewMode === "calendar" ? "Events and to-dos" : "Portfolio and tenant portal"}</span></div>
+          </div>
+        )}
+
         <div className="topbar-actions">
-          {searchTerm && (
+          {viewMode === "mail" && searchTerm && (
             <div className="sort-segment" aria-label="Search sort">
               <button className={sort === "relevance" ? "selected" : ""} onClick={() => setSort("relevance")}>Best</button>
               <button className={sort === "newest" ? "selected" : ""} onClick={() => setSort("newest")}>Newest</button>
             </div>
           )}
-          <div className="filter-anchor">
+          {viewMode === "mail" && <div className="filter-anchor">
             <button
               className={`icon-button ${activeFilterCount > 0 ? "active" : ""}`}
               onClick={() => setFilterOpen((open) => !open)}
@@ -2047,8 +2102,8 @@ export function App() {
               onChange={setFilters}
               onClose={() => setFilterOpen(false)}
             />
-          </div>
-          <button
+          </div>}
+          {viewMode === "mail" && <button
             className={`icon-button read-visibility-toggle ${showReadMessages ? "" : "active"}`}
             onClick={() => setShowReadMessages((current) => !current)}
             title={showReadMessages ? "Hide read emails in every folder" : "Show read emails in every folder"}
@@ -2056,15 +2111,25 @@ export function App() {
             aria-pressed={!showReadMessages}
           >
             {showReadMessages ? <EyeOff size={18} /> : <Eye size={18} />}
-          </button>
+          </button>}
           {canAccessScreen("calendar") && (
             <button
               className={`icon-button calendar-trigger ${viewMode === "calendar" ? "active" : ""}`}
-              onClick={() => setViewMode((current) => (current === "calendar" ? "mail" : "calendar"))}
+              onClick={() => navigateView(viewMode === "calendar" ? "mail" : "calendar")}
               title={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
               aria-label={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
             >
               {viewMode === "calendar" ? <Mail size={18} /> : <CalendarDays size={18} />}
+            </button>
+          )}
+          {canAccessScreen("properties") && (
+            <button
+              className={`icon-button properties-trigger ${viewMode === "properties" ? "active" : ""}`}
+              onClick={() => navigateView(viewMode === "properties" ? "mail" : "properties")}
+              title={viewMode === "properties" ? "Back to mail" : "Open property management"}
+              aria-label={viewMode === "properties" ? "Back to mail" : "Open property management"}
+            >
+              {viewMode === "properties" ? <Mail size={18} /> : <Building2 size={18} />}
             </button>
           )}
           {electron && isAdmin && (
@@ -2107,9 +2172,15 @@ export function App() {
         </div>
       </header>
 
-      <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""} ${folderPanelVisible ? "" : "folders-collapsed"}`}>
+      <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""} ${folderPanelVisible ? "" : "folders-collapsed"} ${viewMode === "properties" ? "property-workspace" : ""}`}>
         {viewMode === "calendar" ? (
           api && <CalendarView api={api} connections={gmailConnections} onReauthorize={reauthorizeGmail} onError={showError} />
+        ) : viewMode === "properties" ? (
+          api && (
+            <Suspense fallback={<div className="property-loading"><LoaderCircle className="spin" size={24} /> Loading property workspace…</div>}>
+              <PropertyManagementView api={api} readOnly={readOnly} isAdmin={isAdmin} onError={showError} onNotice={setNotice} />
+            </Suspense>
+          )
         ) : (
           <>
             <Sidebar
@@ -2231,17 +2302,17 @@ export function App() {
         onRefresh={() => { if (api) void refreshStockQuotes(api); }}
       />
 
-      <nav className="mobile-nav" aria-label="Mobile navigation">
+      <nav className={`mobile-nav ${canAccessScreen("properties") ? "has-properties" : ""}`} aria-label="Mobile navigation">
         <button className={viewMode === "mail" && mobileView === "folders" ? "selected" : ""} onClick={() => {
           setMobileMenuOpen(false);
-          setViewMode("mail");
+          navigateView("mail");
           setMobileView("folders");
         }}>
           <FolderOpen size={19} /><span>Folders</span>
         </button>
         <button className={viewMode === "mail" && mobileView !== "folders" ? "selected" : ""} onClick={() => {
           setMobileMenuOpen(false);
-          setViewMode("mail");
+          navigateView("mail");
           if (selectedMessageId) closeMessage(); else setMobileView("messages");
         }}>
           <List size={19} /><span>Mail</span>
@@ -2254,9 +2325,17 @@ export function App() {
         {canAccessScreen("calendar") && (
           <button className={viewMode === "calendar" ? "selected" : ""} onClick={() => {
             setMobileMenuOpen(false);
-            setViewMode("calendar");
+            navigateView("calendar");
           }}>
             <CalendarDays size={19} /><span>Calendar</span>
+          </button>
+        )}
+        {canAccessScreen("properties") && (
+          <button className={viewMode === "properties" ? "selected" : ""} onClick={() => {
+            setMobileMenuOpen(false);
+            navigateView("properties");
+          }}>
+            <Building2 size={19} /><span>Properties</span>
           </button>
         )}
         <button className={mobileMenuOpen ? "selected" : ""} onClick={() => setMobileMenuOpen((open) => !open)} aria-expanded={mobileMenuOpen}>

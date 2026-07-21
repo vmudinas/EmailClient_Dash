@@ -1,7 +1,8 @@
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { basename, extname, resolve } from "node:path";
+import { Readable } from "node:stream";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, {
@@ -46,6 +47,8 @@ import {
   messageFollowUpCreateSchema,
   messageFollowUpPatchSchema,
   messageMoveSchema,
+  managedPropertyCreateSchema,
+  managedPropertyPatchSchema,
   newsSettingsPatchSchema,
   pinChangeSchema,
   senderFilingArchiveSchema,
@@ -59,6 +62,25 @@ import {
   stockSettingsPatchSchema,
   todoCreateSchema,
   todoPatchSchema,
+  propertyLeaseCreateSchema,
+  propertyConsentPatchSchema,
+  propertyDocumentMetadataSchema,
+  propertyIntegrationSettingsPatchSchema,
+  propertyLedgerAdjustmentSchema,
+  propertyOrganizationCreateSchema,
+  propertyPaymentCreateSchema,
+  propertyPaymentPatchSchema,
+  propertyRefundSchema,
+  propertyRentChargeCreateSchema,
+  propertyRentScheduleCreateSchema,
+  propertyRequestAssignmentSchema,
+  propertyRequestCommentCreateSchema,
+  propertyServiceRequestCreateSchema,
+  propertyServiceRequestPatchSchema,
+  propertyTenantCreateSchema,
+  propertyTenantInvitationAcceptSchema,
+  propertyTenantInvitationCreateSchema,
+  propertyUnitCreateSchema,
   uploadSessionCreateSchema,
   userCanAccessScreen,
   userCreateSchema,
@@ -140,6 +162,34 @@ import {
 import { NewsService } from "./services/news-service.js";
 import { StockService } from "./services/stock-service.js";
 import { MailboxTaskService } from "./services/mailbox-task-service.js";
+import {
+  PropertyAccessError,
+  PropertyNotFoundError,
+  PropertyStore,
+  type SeedProperty
+} from "./storage/property-store.js";
+import {
+  PropertyAssetService,
+  PropertyImageValidationError
+} from "./services/property-assets.js";
+import {
+  PropertyPaymentConfigurationError,
+  PropertyPaymentProviderError,
+  PropertyPaymentService
+} from "./services/property-payment-service.js";
+import {
+  PropertyInvitationError,
+  PropertyPlatformAccessError,
+  PropertyPlatformNotFoundError,
+  PropertyPlatformStore
+} from "./storage/property-platform-store.js";
+import {
+  PropertyFileService,
+  PropertyFileValidationError
+} from "./services/property-file-service.js";
+import { PropertyIntegrationSettingsManager } from "./services/property-integration-settings.js";
+import { PropertyAutomationService } from "./services/property-automation-service.js";
+import { PropertyBackupService } from "./services/property-backup-service.js";
 
 type Role = "viewer" | "local" | "admin";
 
@@ -164,12 +214,91 @@ const BULK_DESTINATION_CREATE_NAME: Record<BulkMoveDestination, string> = {
   spam: "Spam"
 };
 
+const DEFAULT_PROPERTY_SEEDS: SeedProperty[] = [
+  {
+    name: "1299 SW 12th Ave",
+    addressLine1: "1299 SW 12th Ave",
+    addressLine2: "",
+    city: "Boca Raton",
+    state: "FL",
+    postalCode: "33486",
+    propertyType: "single_family",
+    status: "setup",
+    bedrooms: null,
+    bathrooms: null,
+    monthlyRentCents: null,
+    notes: "",
+    imageFilename: "1299-SW-12th-Ave-33486.jpg"
+  },
+  {
+    name: "1251 Periwinkle Pl",
+    addressLine1: "1251 Periwinkle Pl",
+    addressLine2: "",
+    city: "Wellington",
+    state: "FL",
+    postalCode: "33414",
+    propertyType: "single_family",
+    status: "setup",
+    bedrooms: null,
+    bathrooms: null,
+    monthlyRentCents: null,
+    notes: "",
+    imageFilename: "1251-Periwinkle-Pl-33414.jpg"
+  },
+  {
+    name: "1010 SW 1st St",
+    addressLine1: "1010 SW 1st St",
+    addressLine2: "",
+    city: "Boca Raton",
+    state: "FL",
+    postalCode: "33486",
+    propertyType: "single_family",
+    status: "setup",
+    bedrooms: null,
+    bathrooms: null,
+    monthlyRentCents: null,
+    notes: "",
+    imageFilename: "1010-SW-1st-St-33486.jpg"
+  },
+  {
+    name: "14010 Aster Ave",
+    addressLine1: "14010 Aster Ave",
+    addressLine2: "",
+    city: "Wellington",
+    state: "FL",
+    postalCode: "33414",
+    propertyType: "single_family",
+    status: "setup",
+    bedrooms: null,
+    bathrooms: null,
+    monthlyRentCents: null,
+    notes: "",
+    imageFilename: "14010-Aster-Ave-33414.jpg"
+  },
+  {
+    name: "1145 SW 5th St",
+    addressLine1: "1145 SW 5th St",
+    addressLine2: "",
+    city: "Boca Raton",
+    state: "FL",
+    postalCode: "33486",
+    propertyType: "single_family",
+    status: "setup",
+    bedrooms: null,
+    bathrooms: null,
+    monthlyRentCents: null,
+    notes: "",
+    imageFilename: "1145-SW-5th-St-33486.jpg"
+  }
+];
+
 // Maps route patterns to the admin-configurable screen a standard user account
 // must be granted before using them. Mail routes (archives, folders, messages,
 // search) intentionally return null: Mail is every active account's baseline.
 // Read-only lookup routes feeding other screens' dialogs (/api/reply-styles,
 // /api/resumes, /api/inbox-tabs, /api/gmail/connections) also stay open.
 function screenForRoute(route: string): UserScreenId | null {
+  if (route.startsWith("/api/properties") || route.startsWith("/api/property-")) return "properties";
   if (route.startsWith("/api/calendar/")
     || route.startsWith("/api/todos")
     || route.startsWith("/api/admin/calendar/accounts")
@@ -221,28 +350,64 @@ export class EmailApiRuntime {
   readonly stocks: StockService;
   readonly news: NewsService;
   readonly uploads: UploadService;
+  readonly properties: PropertyStore;
+  readonly propertyPlatform: PropertyPlatformStore;
+  readonly propertyAssets: PropertyAssetService;
+  readonly propertyFiles: PropertyFileService;
+  readonly propertyIntegrations: PropertyIntegrationSettingsManager;
+  readonly propertyPayments: PropertyPaymentService;
+  readonly propertyAutomation: PropertyAutomationService;
+  readonly propertyBackups: PropertyBackupService;
   readonly adminToken = randomToken();
   readonly localToken = randomToken();
   private shareToken: string | null = null;
   private shareExpiresAt: Date | null = null;
   private listeningPort: number;
   private readonly requestSessions = new WeakMap<FastifyRequest, AuthSessionRecord | null>();
+  private readonly requestRawBodies = new WeakMap<FastifyRequest, Buffer>();
 
   constructor(config: ApiConfig) {
     this.config = config;
     this.listeningPort = config.port;
     this.app = Fastify({
       logger: config.logger,
-      bodyLimit: 5 * 1024 * 1024,
+      bodyLimit: 30 * 1024 * 1024,
       trustProxy: config.trustProxy,
       routerOptions: { maxParamLength: 2 * 1024 }
     });
     this.storageSettings = new StorageSettingsManager(config.dataDir);
     this.activeStorage = createEmailStore(config.dataDir, this.storageSettings.current());
     this.database = this.activeStorage.store;
+    this.properties = new PropertyStore(this.database.path);
+    this.propertyPlatform = new PropertyPlatformStore(this.database.path);
+    this.propertyAssets = new PropertyAssetService(config.dataDir);
+    this.propertyFiles = new PropertyFileService(config.dataDir);
+    this.propertyIntegrations = new PropertyIntegrationSettingsManager(config.dataDir, {
+      stripeSecretKey: config.stripeSecretKey,
+      stripeWebhookSecret: config.stripeWebhookSecret,
+      paypalClientId: config.paypalClientId,
+      paypalClientSecret: config.paypalClientSecret,
+      paypalWebhookId: config.paypalWebhookId,
+      paypalEnvironment: config.paypalEnvironment,
+      zelleRecipient: config.zelleRecipient,
+      zelleNote: config.zelleNote,
+      twilioAccountSid: config.twilioAccountSid,
+      twilioAuthToken: config.twilioAuthToken,
+      twilioMessagingServiceSid: config.twilioMessagingServiceSid,
+      gmailConnectionId: config.propertyGmailConnectionId
+    });
+    this.propertyPayments = new PropertyPaymentService(
+      this.properties,
+      () => this.propertyIntegrations.current()
+    );
     this.auth = new AuthService(this.database, config.sessionLifetimeMinutes);
     this.blobStore = new BlobStore(config.dataDir);
-    this.imports = new ImportService(this.database, this.blobStore);
+    this.imports = new ImportService(this.database, this.blobStore, {
+      concurrency: config.importConcurrency,
+      batchSize: config.importBatchSize,
+      throttleMs: config.importThrottleMs,
+      latencyThresholdMs: config.importLatencyThresholdMs
+    });
     this.gmailSettings = new GmailSettingsManager(config.dataDir, {
       clientId: config.gmailClientId,
       clientSecret: config.gmailClientSecret,
@@ -259,6 +424,19 @@ export class EmailApiRuntime {
       syncIntervalMinutes: this.gmailSettings.syncIntervalMinutes(),
       syncMailboxActions: this.gmailSettings.syncMailboxActions()
     });
+    this.propertyAutomation = new PropertyAutomationService(
+      this.properties,
+      this.propertyPlatform,
+      this.propertyPayments,
+      this.gmail,
+      this.propertyIntegrations,
+      config.propertyAutomationIntervalMinutes
+    );
+    this.propertyBackups = new PropertyBackupService(
+      config.dataDir,
+      this.database.path,
+      config.propertyBackupRetention
+    );
     this.calendar = new CalendarService(this.gmail, this.database);
     this.resumes = new ResumeService(this.database, this.blobStore);
     this.draftSettings = new DraftSettingsManager(config.dataDir);
@@ -277,6 +455,12 @@ export class EmailApiRuntime {
 
   async initialize(): Promise<void> {
     this.auth.initialize();
+    this.propertyAssets.installSeedImages(DEFAULT_PROPERTY_SEEDS.map((property) => property.imageFilename));
+    const primaryAdminUserId = this.database.primaryAdminUserId();
+    if (primaryAdminUserId) {
+      this.properties.seedDefaultProperties(primaryAdminUserId, DEFAULT_PROPERTY_SEEDS);
+      this.propertyPlatform.ensureDefaultOrganization(primaryAdminUserId);
+    }
     const gmailConfigurationError = this.gmailSettings.view().configurationError;
     if (gmailConfigurationError) {
       this.database.recordDiagnostic({
@@ -297,6 +481,7 @@ export class EmailApiRuntime {
     }
     this.ai.initialize();
     this.aiSchedules.start();
+    this.propertyAutomation.start();
     await this.imports.initialize();
     await this.registerPlugins();
     this.registerRoutes();
@@ -327,11 +512,14 @@ export class EmailApiRuntime {
       message: "Local email service shutting down"
     });
     await this.aiSchedules.close();
+    await this.propertyAutomation.close();
     await this.mailboxTasks.close();
     await this.ai.close();
     await this.gmail.close();
     await this.imports.close();
     await this.app.close();
+    this.propertyPlatform.close();
+    this.properties.close();
     this.database.close();
   }
 
@@ -432,6 +620,33 @@ export class EmailApiRuntime {
     }, (_request, body, done) => {
       done(null, body);
     });
+    this.app.addContentTypeParser("application/x-www-form-urlencoded", {
+      parseAs: "string",
+      bodyLimit: 1024 * 1024
+    }, (_request, body, done) => {
+      done(null, body);
+    });
+    for (const contentType of ["image/jpeg", "image/png", "image/webp"]) {
+      this.app.addContentTypeParser(contentType, {
+        parseAs: "buffer",
+        bodyLimit: 25 * 1024 * 1024
+      }, (_request, body, done) => {
+        done(null, body);
+      });
+    }
+    for (const contentType of [
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain"
+    ]) {
+      this.app.addContentTypeParser(contentType, {
+        parseAs: "buffer",
+        bodyLimit: 25 * 1024 * 1024
+      }, (_request, body, done) => {
+        done(null, body);
+      });
+    }
     this.app.addHook("preHandler", async (request, reply) => {
       if (!request.url.startsWith("/api/")
         || request.url.startsWith("/api/auth/")
@@ -519,6 +734,7 @@ export class EmailApiRuntime {
       }
     });
     this.app.addHook("onResponse", async (request, reply) => {
+      this.imports.recordApiLatency(reply.elapsedTime);
       if (!request.url.startsWith("/api/")
         || request.url.startsWith("/api/auth/")
         || request.url.startsWith("/api/health")) return;
@@ -529,11 +745,47 @@ export class EmailApiRuntime {
   private registerRoutes(): void {
     this.app.get("/api/health", async () => ({ status: "ok" }));
 
+    this.app.get<{ Querystring: { token?: string } }>("/api/auth/property-invitations/preview", async (request, reply) => {
+      try {
+        if (!request.query.token) return reply.code(400).send({ error: "Invitation token is required" });
+        return this.propertyPlatform.previewInvitation(request.query.token);
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Invitation could not be loaded");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/auth/property-invitations/accept", async (request, reply) => {
+      const parsed = propertyTenantInvitationAcceptSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid invitation account" });
+      }
+      try {
+        const invitation = this.propertyPlatform.previewInvitation(parsed.data.token);
+        const user = this.auth.createInvitedUser({
+          username: parsed.data.username,
+          displayName: invitation.tenantName,
+          password: parsed.data.password
+        });
+        this.propertyPlatform.acceptInvitation(parsed.data.token, user.id);
+        const result = this.auth.login({
+          username: parsed.data.username,
+          pin: parsed.data.password,
+          ipAddress: request.ip,
+          userAgent: request.headers["user-agent"] ?? null
+        });
+        this.setSessionCookie(request, reply, result.accessToken, result.session.expiresAt);
+        return reply.code(201).send(result);
+      } catch (error) {
+        if (error instanceof AuthConflictError) return reply.code(409).send({ error: error.message });
+        return this.propertyErrorReply(reply, error, "Invitation could not be accepted");
+      }
+    });
+
     this.app.post<{ Body: unknown }>("/api/auth/login", async (request, reply) => {
       const parsed = authLoginSchema.safeParse(request.body);
       if (!parsed.success) {
         this.recordAuthAudit(request, null, "auth.login", 400, false, { reason: "invalid_request" });
-        return reply.code(400).send({ error: "Enter a valid username and 4 to 12 digit PIN" });
+        return reply.code(400).send({ error: "Enter a valid username and password or PIN" });
       }
       const remote = !isLoopback(request.ip);
       const pairedViewer = remote && this.isValidPairingToken(parsed.data.pairingToken);
@@ -552,6 +804,7 @@ export class EmailApiRuntime {
         });
         const session = this.auth.authenticate(result.accessToken, request.ip);
         this.recordAuthAudit(request, session, "auth.login", 200, true);
+        this.setSessionCookie(request, reply, result.accessToken, result.session.expiresAt);
         return result;
       } catch (error) {
         const statusCode = error instanceof AuthRateLimitError ? 429 : 401;
@@ -576,6 +829,7 @@ export class EmailApiRuntime {
       if (!session) return reply.code(401).send({ error: "Login required" });
       this.recordAuthAudit(request, session, "auth.logout", 204, true);
       this.auth.logout(session.id);
+      reply.header("Set-Cookie", "archive_mail_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
       return reply.code(204).send();
     });
 
@@ -591,6 +845,603 @@ export class EmailApiRuntime {
       } catch (error) {
         this.recordAuthAudit(request, session, "auth.pin_change_failed", 400, false);
         return reply.code(400).send({ error: error instanceof Error ? error.message : "PIN could not be changed" });
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-webhooks/stripe", {
+      preParsing: async (request, _reply, payload) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of payload) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        const rawBody = Buffer.concat(chunks);
+        this.requestRawBodies.set(request, rawBody);
+        return Readable.from(rawBody);
+      }
+    }, async (request, reply) => {
+      try {
+        const rawBody = this.requestRawBodies.get(request);
+        if (!rawBody) return reply.code(400).send({ error: "Stripe webhook body is missing" });
+        const payload = this.propertyPayments.verifyStripeWebhook(
+          rawBody,
+          typeof request.headers["stripe-signature"] === "string" ? request.headers["stripe-signature"] : undefined
+        );
+        const eventId = typeof payload.id === "string" ? payload.id : null;
+        const eventType = typeof payload.type === "string" ? payload.type : null;
+        if (!eventId || !eventType) return reply.code(400).send({ error: "Stripe event ID and type are required" });
+        const queued = this.propertyPlatform.enqueueProviderEvent("stripe", eventId, eventType, payload);
+        void this.propertyAutomation.runNow();
+        return reply.code(202).send({ queued });
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Stripe webhook could not be accepted");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-webhooks/paypal", async (request, reply) => {
+      try {
+        if (!request.body || typeof request.body !== "object" || Array.isArray(request.body)) {
+          return reply.code(400).send({ error: "PayPal webhook payload is invalid" });
+        }
+        const payload = request.body as Record<string, unknown>;
+        await this.propertyPayments.verifyPayPalWebhook({
+          "paypal-auth-algo": stringHeader(request.headers["paypal-auth-algo"]),
+          "paypal-cert-url": stringHeader(request.headers["paypal-cert-url"]),
+          "paypal-transmission-id": stringHeader(request.headers["paypal-transmission-id"]),
+          "paypal-transmission-sig": stringHeader(request.headers["paypal-transmission-sig"]),
+          "paypal-transmission-time": stringHeader(request.headers["paypal-transmission-time"])
+        }, payload);
+        const eventId = typeof payload.id === "string" ? payload.id : null;
+        const eventType = typeof payload.event_type === "string" ? payload.event_type : null;
+        if (!eventId || !eventType) return reply.code(400).send({ error: "PayPal event ID and type are required" });
+        const queued = this.propertyPlatform.enqueueProviderEvent("paypal", eventId, eventType, payload);
+        void this.propertyAutomation.runNow();
+        return reply.code(202).send({ queued });
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "PayPal webhook could not be accepted");
+      }
+    });
+
+    this.app.post<{ Body: string }>("/api/property-webhooks/twilio/inbound", async (request, reply) => {
+      const body = new URLSearchParams(request.body ?? "");
+      const authToken = this.propertyIntegrations.current().twilioAuthToken;
+      const signature = stringHeader(request.headers["x-twilio-signature"]);
+      const webhookUrl = `${this.requestOrigin(request)}${request.url.split("?", 1)[0]}`;
+      if (!authToken || !signature || !verifyTwilioSignature(authToken, signature, webhookUrl, body)) {
+        return reply.code(403).send({ error: "Twilio signature verification failed" });
+      }
+      const command = (body.get("Body") ?? "").trim().toUpperCase();
+      const sender = body.get("From") ?? "";
+      if (["STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"].includes(command) && sender) {
+        this.propertyPlatform.recordSmsOptOut(sender);
+      }
+      reply.header("Content-Type", "application/xml; charset=utf-8");
+      return reply.send("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>");
+    });
+
+    this.app.get("/api/property-platform/overview", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      const userId = this.currentUserId(request);
+      if (!userId) return reply.code(401).send({ error: "Authorization required" });
+      return this.propertyPlatform.overview(userId, this.propertyIntegrations.view());
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-organizations", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyOrganizationCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid organization" });
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        return reply.code(201).send(this.propertyPlatform.createOrganization(userId, parsed.data.name, parsed.data.timezone));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Organization could not be created");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-units", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyUnitCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid unit" });
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        return reply.code(201).send(this.propertyPlatform.createUnit(userId, parsed.data));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Unit could not be created");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-tenant-invitations", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyTenantInvitationCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid invitation" });
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        return reply.code(201).send(this.propertyPlatform.createInvitation(
+          userId,
+          parsed.data.tenantId,
+          parsed.data.expiresHours,
+          this.requestOrigin(request)
+        ));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Invitation could not be created");
+      }
+    });
+
+    this.app.get("/api/properties/overview", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+      const userId = this.currentUserId(request);
+      if (!userId) return reply.code(401).send({ error: "Authorization required" });
+      return this.properties.overview(userId, this.propertyPayments.configuration());
+    });
+
+    this.app.post<{ Body: unknown }>("/api/properties", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = managedPropertyCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid property" });
+      const userId = this.currentUserId(request)!;
+      try {
+        const property = this.properties.createProperty(userId, parsed.data);
+        this.propertyPlatform.ensureDefaultOrganization(userId);
+        this.propertyPlatform.syncProperty(userId, property.id);
+        return reply.code(201).send(property);
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Property could not be created");
+      }
+    });
+
+    this.app.patch<{ Params: { propertyId: string }; Body: unknown }>(
+      "/api/properties/:propertyId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = managedPropertyPatchSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid property" });
+        try {
+          return this.properties.updateProperty(this.currentUserId(request)!, request.params.propertyId, parsed.data);
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Property could not be updated");
+        }
+      }
+    );
+
+    this.app.get<{ Params: { propertyId: string } }>(
+      "/api/properties/:propertyId/photo",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+        try {
+          const image = this.properties.propertyImage(this.currentUserId(request)!, request.params.propertyId);
+          if (!image) return reply.code(404).send({ error: "Property photo not found" });
+          const asset = this.propertyAssets.read(image.filename);
+          if (!asset) return reply.code(404).send({ error: "Property photo not found" });
+          reply.header("Content-Type", asset.contentType);
+          reply.header("Cache-Control", "private, max-age=3600");
+          return reply.send(asset.body);
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Property photo could not be loaded");
+        }
+      }
+    );
+
+    this.app.put<{ Params: { propertyId: string }; Body: Buffer }>(
+      "/api/properties/:propertyId/photo",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          const userId = this.currentUserId(request)!;
+          this.properties.assertOwnedProperty(userId, request.params.propertyId);
+          const filename = this.propertyAssets.save(
+            request.params.propertyId,
+            request.headers["content-type"],
+            request.body
+          );
+          return this.properties.setPropertyImage(userId, request.params.propertyId, filename);
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Property photo could not be saved");
+        }
+      }
+    );
+
+    this.app.post<{ Body: unknown }>("/api/property-tenants", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyTenantCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid tenant" });
+      try {
+        return reply.code(201).send(this.properties.createTenant(this.currentUserId(request)!, parsed.data));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Tenant could not be created");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-leases", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyLeaseCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid lease" });
+      try {
+        const userId = this.currentUserId(request)!;
+        const lease = this.properties.createLease(userId, parsed.data);
+        this.propertyPlatform.syncProperty(userId, parsed.data.propertyId);
+        return reply.code(201).send(lease);
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Lease could not be created");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-service-requests", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyServiceRequestCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid service request" });
+      try {
+        const userId = this.currentUserId(request)!;
+        const serviceRequest = this.properties.createServiceRequest(userId, parsed.data);
+        this.propertyPlatform.recordRequestCreated(userId, serviceRequest.id);
+        return reply.code(201).send(serviceRequest);
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Service request could not be created");
+      }
+    });
+
+    this.app.patch<{ Params: { requestId: string }; Body: unknown }>(
+      "/api/property-service-requests/:requestId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = propertyServiceRequestPatchSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid service request" });
+        try {
+          const userId = this.currentUserId(request)!;
+          const previous = this.properties.overview(userId, this.propertyPayments.configuration()).serviceRequests
+            .find((item) => item.id === request.params.requestId);
+          const updated = this.properties.updateServiceRequest(userId, request.params.requestId, parsed.data);
+          if (previous && previous.status !== updated.status) {
+            this.propertyPlatform.recordRequestStatus(userId, updated.id, previous.status, updated.status);
+          }
+          return updated;
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Service request could not be updated");
+        }
+      }
+    );
+
+    this.app.post<{ Body: unknown }>("/api/property-rent-charges", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyRentChargeCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid rent charge" });
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        const charge = this.properties.createRentCharge(userId, parsed.data);
+        this.propertyPlatform.recordCharge(userId, charge);
+        this.propertyPlatform.enqueueChargeReminders(charge.id, [-7, -3, 0, 3]);
+        return reply.code(201).send(charge);
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Rent charge could not be created");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-payments", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyPaymentCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid payment" });
+      try {
+        return reply.code(201).send(this.properties.createPayment(this.currentUserId(request)!, parsed.data));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Payment could not be created");
+      }
+    });
+
+    this.app.patch<{ Params: { paymentId: string }; Body: unknown }>(
+      "/api/property-payments/:paymentId",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = propertyPaymentPatchSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid payment" });
+        try {
+          const userId = this.currentUserId(request)!;
+          this.propertyPlatform.assertManager(userId);
+          const payment = this.properties.updatePayment(userId, request.params.paymentId, parsed.data);
+          if (payment.status === "succeeded") this.propertyPlatform.recordSuccessfulPayment(payment);
+          return payment;
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Payment could not be updated");
+        }
+      }
+    );
+
+    this.app.post<{ Params: { paymentId: string } }>(
+      "/api/property-payments/:paymentId/checkout",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          return await this.propertyPayments.createCheckout(
+            this.currentUserId(request)!,
+            request.params.paymentId,
+            this.requestOrigin(request)
+          );
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Payment checkout could not be created");
+        }
+      }
+    );
+
+    this.app.post<{ Params: { paymentId: string } }>(
+      "/api/property-payments/:paymentId/sync",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          const userId = this.currentUserId(request)!;
+          const payment = await this.propertyPayments.sync(userId, request.params.paymentId);
+          if (payment.status === "succeeded") this.propertyPlatform.recordSuccessfulPayment(payment);
+          return payment;
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Payment status could not be synchronized");
+        }
+      }
+    );
+
+    this.app.post<{ Params: { paymentId: string }; Body: unknown }>(
+      "/api/property-payments/:paymentId/refund",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = propertyRefundSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid refund" });
+        try {
+          const userId = this.currentUserId(request)!;
+          this.propertyPlatform.assertManager(userId);
+          const result = await this.propertyPayments.refund(
+            userId,
+            request.params.paymentId,
+            parsed.data.amountCents,
+            parsed.data.reason
+          );
+          this.propertyPlatform.recordRefund(
+            result.payment.id,
+            result.amountCents,
+            `Refund - ${parsed.data.reason}`,
+            result.providerRefundId ?? undefined
+          );
+          return result;
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Payment could not be refunded");
+        }
+      }
+    );
+
+    this.app.post<{ Querystring: { metadata?: string; filename?: string }; Body: Buffer }>(
+      "/api/property-documents",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          const userId = this.currentUserId(request)!;
+          this.propertyPlatform.assertManager(userId);
+          const parsed = propertyDocumentMetadataSchema.safeParse(parseJsonQuery(request.query.metadata));
+          if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid document metadata" });
+          const file = this.propertyFiles.save(
+            "documents",
+            request.query.filename ?? "document",
+            request.headers["content-type"],
+            request.body
+          );
+          return reply.code(201).send(this.propertyPlatform.createDocument(userId, parsed.data, file));
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Document could not be uploaded");
+        }
+      }
+    );
+
+    this.app.post<{ Params: { documentId: string }; Querystring: { filename?: string }; Body: Buffer }>(
+      "/api/property-documents/:documentId/versions",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          const userId = this.currentUserId(request)!;
+          this.propertyPlatform.assertManager(userId);
+          const file = this.propertyFiles.save(
+            "documents",
+            request.query.filename ?? "document",
+            request.headers["content-type"],
+            request.body
+          );
+          return reply.code(201).send(this.propertyPlatform.addDocumentVersion(userId, request.params.documentId, file));
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Document version could not be uploaded");
+        }
+      }
+    );
+
+    this.app.get<{ Params: { versionId: string }; Querystring: { disposition?: string } }>(
+      "/api/property-document-versions/:versionId/content",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+        try {
+          const version = this.propertyPlatform.documentVersionForUser(this.currentUserId(request)!, request.params.versionId);
+          const body = this.propertyFiles.read(version.storageKey);
+          if (!body) return reply.code(404).send({ error: "Document file not found" });
+          const disposition = request.query.disposition === "inline" ? "inline" : "attachment";
+          reply.header("Content-Type", version.contentType);
+          reply.header("Content-Disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(version.filename)}`);
+          reply.header("X-Content-Type-Options", "nosniff");
+          return reply.send(body);
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Document could not be loaded");
+        }
+      }
+    );
+
+    this.app.post<{ Params: { documentId: string } }>(
+      "/api/property-documents/:documentId/acknowledge",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          return this.propertyPlatform.acknowledgeDocument(this.currentUserId(request)!, request.params.documentId);
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Document could not be acknowledged");
+        }
+      }
+    );
+
+    this.app.post<{ Params: { requestId: string }; Body: unknown }>(
+      "/api/property-service-requests/:requestId/comments",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = propertyRequestCommentCreateSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid comment" });
+        try {
+          const session = this.resolveSession(request);
+          const userId = this.currentUserId(request)!;
+          return reply.code(201).send(this.propertyPlatform.addRequestComment(
+            userId,
+            request.params.requestId,
+            parsed.data.body,
+            parsed.data.tenantVisible,
+            session?.user.displayName ?? "Property manager"
+          ));
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Comment could not be added");
+        }
+      }
+    );
+
+    this.app.post<{ Params: { requestId: string }; Querystring: { filename?: string }; Body: Buffer }>(
+      "/api/property-service-requests/:requestId/attachments",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        try {
+          const userId = this.currentUserId(request)!;
+          this.propertyPlatform.assertRequestAccess(userId, request.params.requestId);
+          const file = this.propertyFiles.save(
+            "requests",
+            request.query.filename ?? "attachment",
+            request.headers["content-type"],
+            request.body
+          );
+          try {
+            return reply.code(201).send(this.propertyPlatform.addRequestAttachment(userId, request.params.requestId, file));
+          } catch (error) {
+            this.propertyFiles.remove(file.storageKey);
+            throw error;
+          }
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Request attachment could not be uploaded");
+        }
+      }
+    );
+
+    this.app.get<{ Params: { attachmentId: string }; Querystring: { disposition?: string } }>(
+      "/api/property-request-attachments/:attachmentId/content",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["viewer", "local", "admin"])) return;
+        try {
+          const attachment = this.propertyPlatform.requestAttachmentForUser(
+            this.currentUserId(request)!,
+            request.params.attachmentId
+          );
+          const body = this.propertyFiles.read(attachment.storageKey);
+          if (!body) return reply.code(404).send({ error: "Request attachment file not found" });
+          const disposition = request.query.disposition === "inline" ? "inline" : "attachment";
+          reply.header("Content-Type", attachment.contentType);
+          reply.header("Content-Disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(attachment.filename)}`);
+          reply.header("X-Content-Type-Options", "nosniff");
+          return reply.send(body);
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Request attachment could not be loaded");
+        }
+      }
+    );
+
+    this.app.put<{ Params: { requestId: string }; Body: unknown }>(
+      "/api/property-service-requests/:requestId/assignment",
+      async (request, reply) => {
+        if (!this.requireRole(request, reply, ["local", "admin"])) return;
+        const parsed = propertyRequestAssignmentSchema.safeParse(request.body);
+        if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid assignment" });
+        try {
+          const userId = this.currentUserId(request)!;
+          this.propertyPlatform.assertManager(userId);
+          this.propertyPlatform.assignRequest(userId, request.params.requestId, parsed.data.assigneeUserId, parsed.data.targetDate);
+          return reply.code(204).send();
+        } catch (error) {
+          return this.propertyErrorReply(reply, error, "Request could not be assigned");
+        }
+      }
+    );
+
+    this.app.post<{ Body: unknown }>("/api/property-rent-schedules", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyRentScheduleCreateSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid rent schedule" });
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        return reply.code(201).send(this.propertyPlatform.createRentSchedule(userId, parsed.data));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Rent schedule could not be created");
+      }
+    });
+
+    this.app.post<{ Body: unknown }>("/api/property-ledger/adjustments", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyLedgerAdjustmentSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid ledger adjustment" });
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        return reply.code(201).send(this.propertyPlatform.addAdjustment(userId, parsed.data));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Ledger adjustment could not be added");
+      }
+    });
+
+    this.app.put<{ Body: unknown }>("/api/property-consents", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      const parsed = propertyConsentPatchSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid communication consent" });
+      try {
+        return this.propertyPlatform.setConsent(this.currentUserId(request)!, parsed.data);
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Communication preference could not be saved");
+      }
+    });
+
+    this.app.patch<{ Body: unknown }>("/api/admin/property-integrations", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      const parsed = propertyIntegrationSettingsPatchSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? "Invalid integration settings" });
+      return this.propertyIntegrations.update(parsed.data);
+    });
+
+    this.app.get("/api/property-reports/financial.csv", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        reply.header("Content-Type", "text/csv; charset=utf-8");
+        reply.header("Content-Disposition", `attachment; filename="property-ledger-${new Date().toISOString().slice(0, 10)}.csv"`);
+        return reply.send(this.propertyPlatform.financialCsv(userId));
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Financial report could not be exported");
+      }
+    });
+
+    this.app.post("/api/property-automation/run", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      try {
+        const userId = this.currentUserId(request)!;
+        this.propertyPlatform.assertManager(userId);
+        return await this.propertyAutomation.runNow();
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Property automation could not be run");
+      }
+    });
+
+    this.app.get("/api/admin/property-backups", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      return this.propertyBackups.list();
+    });
+
+    this.app.post("/api/admin/property-backups", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["admin"])) return;
+      try {
+        return reply.code(201).send(await this.propertyBackups.create());
+      } catch (error) {
+        return this.propertyErrorReply(reply, error, "Backup could not be created");
       }
     });
 
@@ -1995,6 +2846,11 @@ export class EmailApiRuntime {
       return this.database.listImportJobs(this.currentUserId(request) ?? undefined);
     });
 
+    this.app.get("/api/import-jobs-runtime", async (request, reply) => {
+      if (!this.requireRole(request, reply, ["local", "admin"])) return;
+      return this.imports.status();
+    });
+
     this.app.get<{ Params: { jobId: string } }>(
       "/api/import-jobs/:jobId",
       async (request, reply) => {
@@ -3048,6 +3904,26 @@ export class EmailApiRuntime {
     return reply.code(502).send({ error: message });
   }
 
+  private propertyErrorReply(reply: FastifyReply, error: unknown, fallback: string): FastifyReply {
+    const message = error instanceof Error ? error.message : fallback;
+    if (error instanceof PropertyNotFoundError) return reply.code(404).send({ error: message });
+    if (error instanceof PropertyAccessError) return reply.code(403).send({ error: message });
+    if (error instanceof PropertyPlatformNotFoundError) return reply.code(404).send({ error: message });
+    if (error instanceof PropertyPlatformAccessError) return reply.code(403).send({ error: message });
+    if (error instanceof PropertyInvitationError) return reply.code(400).send({ error: message });
+    if (error instanceof PropertyImageValidationError) return reply.code(400).send({ error: message });
+    if (error instanceof PropertyFileValidationError) return reply.code(400).send({ error: message });
+    if (error instanceof PropertyPaymentConfigurationError) return reply.code(409).send({ error: message });
+    if (error instanceof PropertyPaymentProviderError) return reply.code(502).send({ error: message });
+    return reply.code(400).send({ error: message });
+  }
+
+  private requestOrigin(request: FastifyRequest): string {
+    if (this.config.publicUrl) return this.config.publicUrl;
+    const host = request.headers.host ?? `127.0.0.1:${this.listeningPort}`;
+    return `${request.protocol}://${host}`;
+  }
+
   private mailboxActionErrorReply(reply: FastifyReply, error: unknown, fallback: string): FastifyReply {
     const message = error instanceof Error ? error.message : fallback;
     if (message.toLowerCase().includes("not found")) return reply.code(404).send({ error: message });
@@ -3079,9 +3955,24 @@ export class EmailApiRuntime {
     if (cached !== undefined) return cached;
     const header = request.headers.authorization;
     const bearer = header?.startsWith("Bearer ") ? header.slice(7) : null;
-    const session = this.auth.authenticate(bearer, request.ip);
+    const cookie = parseCookie(request.headers.cookie ?? "", "archive_mail_session");
+    const session = this.auth.authenticate(bearer ?? cookie, request.ip);
     this.requestSessions.set(request, session);
     return session;
+  }
+
+  private setSessionCookie(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    accessToken: string,
+    expiresAt: string
+  ): void {
+    const maxAge = Math.max(0, Math.floor((Date.parse(expiresAt) - Date.now()) / 1_000));
+    const secure = request.protocol === "https" ? "; Secure" : "";
+    reply.header(
+      "Set-Cookie",
+      `archive_mail_session=${encodeURIComponent(accessToken)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`
+    );
   }
 
   private recordRequestAudit(request: FastifyRequest, statusCode: number): void {
@@ -3229,7 +4120,9 @@ export class EmailApiRuntime {
           || configured.connectionString !== this.activeStorage.connectionString,
         providers: DATABASE_PROVIDERS,
         structuredDataPath: this.database.path,
-        attachmentBlobPath: this.blobStore.rootDir
+        attachmentBlobPath: this.blobStore.rootDir,
+        postgresMigrationTargetConfigured: Boolean(process.env.PGHOST && process.env.PGDATABASE),
+        importRuntime: this.imports.status()
       },
       security: {
         sessionLifetimeMinutes: this.auth.sessionLifetimeMinutes,
@@ -3268,6 +4161,50 @@ export async function startServer(
 
 function randomToken(): string {
   return randomBytes(32).toString("base64url");
+}
+
+function parseCookie(header: string, name: string): string | null {
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function parseJsonQuery(value: string | undefined): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function stringHeader(value: string | string[] | undefined): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function verifyTwilioSignature(
+  authToken: string,
+  signature: string,
+  url: string,
+  body: URLSearchParams
+): boolean {
+  const sorted = [...body.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const payload = sorted.reduce((value, [key, entry]) => `${value}${key}${entry}`, url);
+  const expected = createHmac("sha1", authToken).update(payload).digest();
+  let actual: Buffer;
+  try {
+    actual = Buffer.from(signature, "base64");
+  } catch {
+    return false;
+  }
+  return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected);
 }
 
 function redactAiJobPrompt(job: AiJob): AiJob {

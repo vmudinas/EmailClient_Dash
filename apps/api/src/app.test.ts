@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2800,6 +2801,44 @@ describe("Email API per-user screen access", () => {
     });
     expect(promoted.statusCode).toBe(200);
     expect(promoted.json()).toMatchObject({ role: "admin", allowedScreens: null });
+  });
+});
+
+describe("Email API property request attachments", () => {
+  it("checks request access before saving an attachment", async () => {
+    const dataDir = await temporaryDirectory();
+    const runtime = new EmailApiRuntime(loadConfig({
+      dataDir,
+      port: 0,
+      devAuthBypass: false,
+      logger: false,
+      openAiApiKey: ""
+    }));
+    runtimes.push(runtime);
+    await runtime.initialize();
+
+    const login = await runtime.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      remoteAddress: "127.0.0.1",
+      payload: { username: "admin", pin: "2332" }
+    });
+    const headers = {
+      authorization: `Bearer ${(login.json() as { accessToken: string }).accessToken}`,
+      "content-type": "text/plain"
+    };
+    const saveAttachment = vi.spyOn(runtime.propertyFiles, "save");
+
+    const response = await runtime.app.inject({
+      method: "POST",
+      url: `/api/property-service-requests/${randomUUID()}/attachments?filename=details.txt`,
+      headers,
+      remoteAddress: "127.0.0.1",
+      payload: "Request details"
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(saveAttachment).not.toHaveBeenCalled();
   });
 });
 

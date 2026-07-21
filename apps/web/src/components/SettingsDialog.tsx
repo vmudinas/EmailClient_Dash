@@ -1330,8 +1330,11 @@ function DatabasePanel({
         <div><dt>Active connection</dt><dd><code>{settings.database.activeConnectionString}</code></dd></div>
         <div><dt>Structured data</dt><dd><code>{settings.database.structuredDataPath}</code></dd></div>
         <div><dt>Attachment bytes</dt><dd><code>{settings.database.attachmentBlobPath}</code></dd></div>
+        {settings.database.importRuntime && <div><dt>Import workers</dt><dd>{settings.database.importRuntime.activeJobs} active · {settings.database.importRuntime.queuedJobs} queued · limit {settings.database.importRuntime.concurrency}</dd></div>}
+        {settings.database.importRuntime && <div><dt>Import batches</dt><dd>{settings.database.importRuntime.batchSize} messages · {settings.database.importRuntime.throttledForApiLatency ? "API-protection throttle active" : `${settings.database.importRuntime.throttleMs} ms pause`}</dd></div>}
+        {settings.database.postgresMigrationTargetConfigured !== undefined && <div><dt>PostgreSQL target</dt><dd>{settings.database.postgresMigrationTargetConfigured ? "Configured" : "Not configured"}</dd></div>}
       </dl>
-      <div className="settings-warning neutral"><Database size={17} /><span>Changing the connection does not migrate existing data. Attachment bytes remain in the content-addressed blob directory.</span></div>
+      <div className="settings-warning neutral"><Database size={17} /><span>The migration command copies and validates SQLite data in PostgreSQL. Runtime cutover remains disabled until the asynchronous PostgreSQL adapter is installed; attachment bytes stay in the content-addressed blob directory.</span></div>
     </>
   );
 }

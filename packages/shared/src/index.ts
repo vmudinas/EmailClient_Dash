@@ -1047,7 +1047,7 @@ export interface RuntimeConfig {
   platform: "desktop" | "browser" | "mobile";
 }
 
-export const USER_SCREEN_IDS = ["calendar", "compose", "ai", "import", "settings"] as const;
+export const USER_SCREEN_IDS = ["calendar", "properties", "compose", "ai", "import", "settings"] as const;
 export type UserScreenId = typeof USER_SCREEN_IDS[number];
 
 export const USER_SCREENS: ReadonlyArray<{
@@ -1056,6 +1056,7 @@ export const USER_SCREENS: ReadonlyArray<{
   description: string;
 }> = [
   { id: "calendar", label: "Calendar", description: "Calendar view, events, and to-dos." },
+  { id: "properties", label: "Properties", description: "Properties, tenants, leases, service requests, rent, and payments." },
   { id: "compose", label: "Compose & Drafts", description: "Write, save, and send email." },
   { id: "ai", label: "AI tools", description: "AI review queue, analysis, and reply drafts." },
   { id: "import", label: "Import", description: "Import PST and MBOX archives." },
@@ -1136,6 +1137,16 @@ export interface AdminSettings {
     providers: DatabaseProviderOption[];
     structuredDataPath: string;
     attachmentBlobPath: string;
+    postgresMigrationTargetConfigured?: boolean;
+    importRuntime?: {
+      activeJobs: number;
+      queuedJobs: number;
+      concurrency: number;
+      batchSize: number;
+      throttleMs: number;
+      latencyThresholdMs: number;
+      throttledForApiLatency: boolean;
+    };
   };
   security: {
     sessionLifetimeMinutes: number;
@@ -1228,6 +1239,686 @@ export interface AiModelOption {
   description: string | null;
   pricing: string | null;
 }
+
+export const PROPERTY_STATUS_IDS = ["setup", "vacant", "occupied", "maintenance"] as const;
+export type PropertyStatus = typeof PROPERTY_STATUS_IDS[number];
+export const PROPERTY_SERVICE_REQUEST_STATUS_IDS = [
+  "submitted",
+  "triaged",
+  "scheduled",
+  "in_progress",
+  "waiting",
+  "completed",
+  "cancelled"
+] as const;
+export type PropertyServiceRequestStatus = typeof PROPERTY_SERVICE_REQUEST_STATUS_IDS[number];
+export const PROPERTY_SERVICE_REQUEST_PRIORITY_IDS = ["low", "normal", "high", "urgent"] as const;
+export type PropertyServiceRequestPriority = typeof PROPERTY_SERVICE_REQUEST_PRIORITY_IDS[number];
+export const PROPERTY_LEASE_STATUS_IDS = ["draft", "upcoming", "active", "expired", "terminated"] as const;
+export type PropertyLeaseStatus = typeof PROPERTY_LEASE_STATUS_IDS[number];
+export const RENT_CHARGE_STATUS_IDS = ["open", "partially_paid", "paid", "overdue", "void"] as const;
+export type RentChargeStatus = typeof RENT_CHARGE_STATUS_IDS[number];
+export const PROPERTY_PAYMENT_PROVIDER_IDS = ["stripe", "paypal", "zelle", "manual"] as const;
+export type PropertyPaymentProvider = typeof PROPERTY_PAYMENT_PROVIDER_IDS[number];
+export const PROPERTY_PAYMENT_METHOD_IDS = [
+  "card",
+  "apple_pay",
+  "google_pay",
+  "ach",
+  "paypal",
+  "venmo",
+  "zelle",
+  "cash",
+  "check",
+  "other"
+] as const;
+export type PropertyPaymentMethod = typeof PROPERTY_PAYMENT_METHOD_IDS[number];
+export const PROPERTY_PAYMENT_STATUS_IDS = [
+  "pending",
+  "processing",
+  "succeeded",
+  "failed",
+  "refunded",
+  "cancelled"
+] as const;
+export type PropertyPaymentStatus = typeof PROPERTY_PAYMENT_STATUS_IDS[number];
+
+export interface ManagedProperty {
+  id: string;
+  name: string;
+  addressLine1: string;
+  addressLine2: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  propertyType: "single_family" | "townhouse" | "condo" | "multi_unit" | "other";
+  status: PropertyStatus;
+  imageUrl: string | null;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  monthlyRentCents: number | null;
+  tenantName: string | null;
+  leaseEndDate: string | null;
+  openRequestCount: number;
+  outstandingBalanceCents: number;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyTenant {
+  id: string;
+  linkedUserId: string | null;
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  email: string;
+  phone: string;
+  status: "prospect" | "active" | "former";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyLease {
+  id: string;
+  propertyId: string;
+  unitId: string | null;
+  tenantId: string;
+  tenantName: string;
+  propertyName: string;
+  startDate: string;
+  endDate: string;
+  monthlyRentCents: number;
+  securityDepositCents: number;
+  dueDay: number;
+  status: PropertyLeaseStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyServiceRequest {
+  id: string;
+  propertyId: string;
+  tenantId: string | null;
+  propertyName: string;
+  tenantName: string | null;
+  title: string;
+  description: string;
+  category: string;
+  priority: PropertyServiceRequestPriority;
+  status: PropertyServiceRequestStatus;
+  preferredEntryAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyRentCharge {
+  id: string;
+  propertyId: string;
+  leaseId: string | null;
+  propertyName: string;
+  description: string;
+  amountCents: number;
+  paidCents: number;
+  balanceCents: number;
+  dueDate: string;
+  status: RentChargeStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyPayment {
+  id: string;
+  propertyId: string;
+  leaseId: string | null;
+  chargeId: string | null;
+  propertyName: string;
+  provider: PropertyPaymentProvider;
+  method: PropertyPaymentMethod;
+  amountCents: number;
+  currency: string;
+  status: PropertyPaymentStatus;
+  externalId: string | null;
+  providerTransactionId: string | null;
+  checkoutUrl: string | null;
+  reference: string | null;
+  paidAt: string | null;
+  failureReason: string | null;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyPaymentConfiguration {
+  stripe: {
+    configured: boolean;
+    methods: PropertyPaymentMethod[];
+  };
+  paypal: {
+    configured: boolean;
+    environment: "sandbox" | "live";
+    methods: PropertyPaymentMethod[];
+  };
+  zelle: {
+    configured: boolean;
+    recipient: string | null;
+    note: string;
+  };
+  manual: {
+    configured: true;
+    methods: PropertyPaymentMethod[];
+  };
+}
+
+export interface PropertyPortfolioOverview {
+  mode: "manager" | "tenant";
+  generatedAt: string;
+  stats: {
+    propertyCount: number;
+    occupiedCount: number;
+    openRequestCount: number;
+    outstandingBalanceCents: number;
+    paidThisMonthCents: number;
+  };
+  properties: ManagedProperty[];
+  tenants: PropertyTenant[];
+  leases: PropertyLease[];
+  serviceRequests: PropertyServiceRequest[];
+  rentCharges: PropertyRentCharge[];
+  payments: PropertyPayment[];
+  paymentConfiguration: PropertyPaymentConfiguration;
+}
+
+export const PROPERTY_MEMBERSHIP_ROLE_IDS = ["owner", "manager", "tenant", "maintenance"] as const;
+export type PropertyMembershipRole = typeof PROPERTY_MEMBERSHIP_ROLE_IDS[number];
+export const PROPERTY_DOCUMENT_VISIBILITY_IDS = ["manager", "tenant"] as const;
+export type PropertyDocumentVisibility = typeof PROPERTY_DOCUMENT_VISIBILITY_IDS[number];
+export const PROPERTY_NOTIFICATION_CHANNEL_IDS = ["in_app", "email", "sms"] as const;
+export type PropertyNotificationChannel = typeof PROPERTY_NOTIFICATION_CHANNEL_IDS[number];
+export const PROPERTY_AUTOMATION_JOB_STATUS_IDS = ["queued", "running", "completed", "failed", "cancelled"] as const;
+export type PropertyAutomationJobStatus = typeof PROPERTY_AUTOMATION_JOB_STATUS_IDS[number];
+
+export interface PropertyOrganization {
+  id: string;
+  name: string;
+  ownerUserId: string;
+  timezone: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyOrganizationMember {
+  id: string;
+  organizationId: string;
+  userId: string;
+  displayName: string;
+  role: PropertyMembershipRole;
+  createdAt: string;
+}
+
+export interface PropertyUnit {
+  id: string;
+  organizationId: string;
+  propertyId: string;
+  propertyName: string;
+  name: string;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  monthlyRentCents: number | null;
+  status: "available" | "occupied" | "maintenance" | "inactive";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyTenantInvitation {
+  id: string;
+  organizationId: string;
+  tenantId: string;
+  tenantName: string;
+  email: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  createdAt: string;
+  invitationUrl: string | null;
+}
+
+export interface PropertyInvitationPreview {
+  token: string;
+  tenantName: string;
+  email: string;
+  organizationName: string;
+  expiresAt: string;
+}
+
+export interface PropertyDocumentVersion {
+  id: string;
+  documentId: string;
+  version: number;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+}
+
+export interface PropertyDocument {
+  id: string;
+  organizationId: string;
+  propertyId: string;
+  propertyName: string;
+  leaseId: string | null;
+  tenantId: string | null;
+  title: string;
+  category: string;
+  visibility: PropertyDocumentVisibility;
+  requiresAcknowledgement: boolean;
+  acknowledgedAt: string | null;
+  latestVersion: PropertyDocumentVersion;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PropertyRequestComment {
+  id: string;
+  requestId: string;
+  authorUserId: string;
+  authorName: string;
+  body: string;
+  tenantVisible: boolean;
+  createdAt: string;
+}
+
+export interface PropertyRequestStatusEvent {
+  id: string;
+  requestId: string;
+  fromStatus: PropertyServiceRequestStatus | null;
+  toStatus: PropertyServiceRequestStatus;
+  actorUserId: string;
+  createdAt: string;
+}
+
+export interface PropertyRequestAttachment {
+  id: string;
+  requestId: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+}
+
+export interface PropertyRentSchedule {
+  id: string;
+  organizationId: string;
+  propertyId: string;
+  propertyName: string;
+  leaseId: string;
+  amountCents: number;
+  dueDay: number;
+  descriptionTemplate: string;
+  nextChargeDate: string;
+  reminderDays: number[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PropertyLedgerEntryType = "charge" | "payment" | "adjustment" | "refund" | "deposit";
+export interface PropertyLedgerEntry {
+  id: string;
+  organizationId: string;
+  propertyId: string;
+  leaseId: string | null;
+  chargeId: string | null;
+  paymentId: string | null;
+  entryType: PropertyLedgerEntryType;
+  amountCents: number;
+  description: string;
+  effectiveAt: string;
+  createdAt: string;
+}
+
+export interface PropertyReceipt {
+  id: string;
+  paymentId: string;
+  receiptNumber: string;
+  amountCents: number;
+  currency: string;
+  paidAt: string;
+  createdAt: string;
+}
+
+export interface PropertyNotificationJob {
+  id: string;
+  organizationId: string;
+  tenantId: string | null;
+  chargeId: string | null;
+  channel: PropertyNotificationChannel;
+  recipient: string;
+  subject: string;
+  body: string;
+  scheduledAt: string;
+  status: PropertyAutomationJobStatus;
+  attempts: number;
+  lastError: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export interface PropertyDeliveryAttempt {
+  id: string;
+  jobId: string;
+  provider: string;
+  providerId: string | null;
+  status: "succeeded" | "failed" | "suppressed";
+  error: string | null;
+  createdAt: string;
+}
+
+export interface PropertyCommunicationConsent {
+  id: string;
+  tenantId: string;
+  channel: "email" | "sms";
+  destination: string;
+  status: "opted_in" | "opted_out";
+  source: string;
+  consentedAt: string | null;
+  revokedAt: string | null;
+  updatedAt: string;
+}
+
+export interface PropertyIntegrationSettings {
+  stripeConfigured: boolean;
+  stripeSource: "admin" | "environment" | "none";
+  stripeWebhookConfigured: boolean;
+  paypalConfigured: boolean;
+  paypalSource: "admin" | "environment" | "none";
+  paypalEnvironment: "sandbox" | "live";
+  paypalWebhookConfigured: boolean;
+  zelleRecipient: string | null;
+  twilioConfigured: boolean;
+  twilioSource: "admin" | "environment" | "none";
+  gmailConnectionId: string | null;
+}
+
+export interface PropertyOperationsReport {
+  generatedAt: string;
+  totalChargesCents: number;
+  totalPaymentsCents: number;
+  totalAdjustmentsCents: number;
+  outstandingCents: number;
+  overdueCharges: number;
+  openRequests: number;
+  expiringLeases: number;
+  queuedNotifications: number;
+}
+
+export interface PropertyPlatformOverview {
+  organizations: PropertyOrganization[];
+  memberships: PropertyOrganizationMember[];
+  units: PropertyUnit[];
+  invitations: PropertyTenantInvitation[];
+  documents: PropertyDocument[];
+  requestComments: PropertyRequestComment[];
+  requestStatusHistory: PropertyRequestStatusEvent[];
+  requestAttachments: PropertyRequestAttachment[];
+  rentSchedules: PropertyRentSchedule[];
+  ledgerEntries: PropertyLedgerEntry[];
+  receipts: PropertyReceipt[];
+  notificationJobs: PropertyNotificationJob[];
+  deliveryAttempts: PropertyDeliveryAttempt[];
+  consents: PropertyCommunicationConsent[];
+  integrations: PropertyIntegrationSettings;
+  report: PropertyOperationsReport;
+}
+
+export interface PropertyAutomationRunResult {
+  startedAt: string;
+  completedAt: string;
+  chargesCreated: number;
+  providerEventsProcessed: number;
+  notificationsCompleted: number;
+  notificationsFailed: number;
+  alreadyRunning: boolean;
+}
+
+export interface PropertyBackupSummary {
+  id: string;
+  createdAt: string;
+  sizeBytes: number;
+  databaseBytes: number;
+  fileCount: number;
+}
+
+const propertyDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const propertyMoneySchema = z.number().int().min(0).max(100_000_000);
+
+export const managedPropertyCreateSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  addressLine1: z.string().trim().min(1).max(240),
+  addressLine2: z.string().trim().max(120).default(""),
+  city: z.string().trim().min(1).max(120),
+  state: z.string().trim().min(2).max(64),
+  postalCode: z.string().trim().min(3).max(20),
+  propertyType: z.enum(["single_family", "townhouse", "condo", "multi_unit", "other"]).default("single_family"),
+  status: z.enum(PROPERTY_STATUS_IDS).default("setup"),
+  bedrooms: z.number().min(0).max(100).nullable().default(null),
+  bathrooms: z.number().min(0).max(100).nullable().default(null),
+  monthlyRentCents: propertyMoneySchema.nullable().default(null),
+  notes: z.string().max(20_000).default("")
+}).strict();
+export type ManagedPropertyCreate = z.infer<typeof managedPropertyCreateSchema>;
+
+export const managedPropertyPatchSchema = managedPropertyCreateSchema.partial().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one property field is required"
+);
+export type ManagedPropertyPatch = z.infer<typeof managedPropertyPatchSchema>;
+
+export const propertyTenantCreateSchema = z.object({
+  linkedUserId: z.string().uuid().nullable().default(null),
+  firstName: z.string().trim().min(1).max(120),
+  lastName: z.string().trim().min(1).max(120),
+  email: z.string().trim().email().max(320),
+  phone: z.string().trim().max(40).default(""),
+  status: z.enum(["prospect", "active", "former"]).default("active")
+}).strict();
+export type PropertyTenantCreate = z.infer<typeof propertyTenantCreateSchema>;
+
+export const propertyLeaseCreateSchema = z.object({
+  propertyId: z.string().uuid(),
+  unitId: z.string().uuid().nullable().optional(),
+  tenantId: z.string().uuid(),
+  startDate: propertyDateSchema,
+  endDate: propertyDateSchema,
+  monthlyRentCents: propertyMoneySchema.min(1),
+  securityDepositCents: propertyMoneySchema.default(0),
+  dueDay: z.number().int().min(1).max(28).default(1),
+  status: z.enum(PROPERTY_LEASE_STATUS_IDS).default("active")
+}).strict().refine((value) => value.endDate >= value.startDate, {
+  message: "Lease end date must be on or after its start date",
+  path: ["endDate"]
+});
+export type PropertyLeaseCreate = z.infer<typeof propertyLeaseCreateSchema>;
+
+export const propertyServiceRequestCreateSchema = z.object({
+  propertyId: z.string().uuid(),
+  tenantId: z.string().uuid().nullable().default(null),
+  title: z.string().trim().min(1).max(240),
+  description: z.string().trim().min(1).max(20_000),
+  category: z.string().trim().min(1).max(80).default("General"),
+  priority: z.enum(PROPERTY_SERVICE_REQUEST_PRIORITY_IDS).default("normal"),
+  preferredEntryAt: z.string().datetime().nullable().default(null)
+}).strict();
+export type PropertyServiceRequestCreate = z.infer<typeof propertyServiceRequestCreateSchema>;
+
+export const propertyServiceRequestPatchSchema = z.object({
+  priority: z.enum(PROPERTY_SERVICE_REQUEST_PRIORITY_IDS).optional(),
+  status: z.enum(PROPERTY_SERVICE_REQUEST_STATUS_IDS).optional(),
+  preferredEntryAt: z.string().datetime().nullable().optional()
+}).strict().refine((value) => Object.keys(value).length > 0, "At least one request field is required");
+export type PropertyServiceRequestPatch = z.infer<typeof propertyServiceRequestPatchSchema>;
+
+export const propertyRentChargeCreateSchema = z.object({
+  propertyId: z.string().uuid(),
+  leaseId: z.string().uuid().nullable().default(null),
+  description: z.string().trim().min(1).max(240),
+  amountCents: propertyMoneySchema.min(1),
+  dueDate: propertyDateSchema
+}).strict();
+export type PropertyRentChargeCreate = z.infer<typeof propertyRentChargeCreateSchema>;
+
+export const propertyPaymentCreateSchema = z.object({
+  propertyId: z.string().uuid(),
+  leaseId: z.string().uuid().nullable().default(null),
+  chargeId: z.string().uuid().nullable().default(null),
+  provider: z.enum(PROPERTY_PAYMENT_PROVIDER_IDS),
+  method: z.enum(PROPERTY_PAYMENT_METHOD_IDS),
+  amountCents: propertyMoneySchema.min(1),
+  currency: z.string().trim().length(3).default("USD"),
+  status: z.enum(PROPERTY_PAYMENT_STATUS_IDS).default("pending"),
+  reference: z.string().trim().max(240).nullable().default(null),
+  paidAt: z.string().datetime().nullable().default(null),
+  notes: z.string().max(5_000).default("")
+}).strict();
+export type PropertyPaymentCreate = z.infer<typeof propertyPaymentCreateSchema>;
+
+export const propertyPaymentPatchSchema = z.object({
+  status: z.enum(PROPERTY_PAYMENT_STATUS_IDS),
+  reference: z.string().trim().max(240).nullable().optional(),
+  paidAt: z.string().datetime().nullable().optional(),
+  failureReason: z.string().trim().max(1_000).nullable().optional(),
+  notes: z.string().max(5_000).optional()
+}).strict();
+export type PropertyPaymentPatch = z.infer<typeof propertyPaymentPatchSchema>;
+
+export interface PropertyPaymentCheckoutResult {
+  payment: PropertyPayment;
+  action: "redirect" | "instructions";
+  url: string | null;
+  instructions: string | null;
+}
+
+export interface PropertyRefundResult {
+  payment: PropertyPayment;
+  amountCents: number;
+  providerRefundId: string | null;
+}
+
+export const propertyOrganizationCreateSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  timezone: z.string().trim().min(1).max(120).default("America/New_York")
+}).strict();
+export type PropertyOrganizationCreate = z.infer<typeof propertyOrganizationCreateSchema>;
+
+export const propertyUnitCreateSchema = z.object({
+  propertyId: z.string().uuid(),
+  name: z.string().trim().min(1).max(120),
+  bedrooms: z.number().min(0).max(100).nullable().default(null),
+  bathrooms: z.number().min(0).max(100).nullable().default(null),
+  monthlyRentCents: propertyMoneySchema.nullable().default(null),
+  status: z.enum(["available", "occupied", "maintenance", "inactive"]).default("available")
+}).strict();
+export type PropertyUnitCreate = z.infer<typeof propertyUnitCreateSchema>;
+
+export const propertyTenantInvitationCreateSchema = z.object({
+  tenantId: z.string().uuid(),
+  expiresHours: z.number().int().min(1).max(168).default(48)
+}).strict();
+export type PropertyTenantInvitationCreate = z.infer<typeof propertyTenantInvitationCreateSchema>;
+
+const tenantPasswordSchema = z.string().min(12).max(128)
+  .regex(/[a-z]/, "Password needs a lowercase letter")
+  .regex(/[A-Z]/, "Password needs an uppercase letter")
+  .regex(/[0-9]/, "Password needs a number")
+  .regex(/[^A-Za-z0-9]/, "Password needs a symbol");
+
+export const propertyTenantInvitationAcceptSchema = z.object({
+  token: z.string().min(32).max(256),
+  username: z.string().trim().toLowerCase().min(3).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/),
+  password: tenantPasswordSchema
+}).strict();
+export type PropertyTenantInvitationAccept = z.infer<typeof propertyTenantInvitationAcceptSchema>;
+
+export const propertyDocumentMetadataSchema = z.object({
+  propertyId: z.string().uuid(),
+  leaseId: z.string().uuid().nullable().default(null),
+  tenantId: z.string().uuid().nullable().default(null),
+  title: z.string().trim().min(1).max(240),
+  category: z.string().trim().min(1).max(80).default("Agreement"),
+  visibility: z.enum(PROPERTY_DOCUMENT_VISIBILITY_IDS).default("tenant"),
+  requiresAcknowledgement: z.boolean().default(false)
+}).strict();
+export type PropertyDocumentMetadata = z.infer<typeof propertyDocumentMetadataSchema>;
+
+export const propertyRequestCommentCreateSchema = z.object({
+  body: z.string().trim().min(1).max(10_000),
+  tenantVisible: z.boolean().default(true)
+}).strict();
+export type PropertyRequestCommentCreate = z.infer<typeof propertyRequestCommentCreateSchema>;
+
+export const propertyRequestAssignmentSchema = z.object({
+  assigneeUserId: z.string().uuid().nullable(),
+  targetDate: propertyDateSchema.nullable().default(null)
+}).strict();
+export type PropertyRequestAssignment = z.infer<typeof propertyRequestAssignmentSchema>;
+
+export const propertyRentScheduleCreateSchema = z.object({
+  propertyId: z.string().uuid(),
+  leaseId: z.string().uuid(),
+  amountCents: propertyMoneySchema.min(1),
+  dueDay: z.number().int().min(1).max(28),
+  descriptionTemplate: z.string().trim().min(1).max(240).default("{{month}} rent"),
+  nextChargeDate: propertyDateSchema,
+  reminderDays: z.array(z.number().int().min(-30).max(30)).max(12).default([-7, -3, 0, 3]),
+  enabled: z.boolean().default(true)
+}).strict();
+export type PropertyRentScheduleCreate = z.infer<typeof propertyRentScheduleCreateSchema>;
+
+export const propertyLedgerAdjustmentSchema = z.object({
+  propertyId: z.string().uuid(),
+  leaseId: z.string().uuid().nullable().default(null),
+  chargeId: z.string().uuid().nullable().default(null),
+  amountCents: z.number().int().min(-100_000_000).max(100_000_000).refine((value) => value !== 0),
+  description: z.string().trim().min(1).max(500),
+  effectiveAt: z.string().datetime().default(() => new Date().toISOString())
+}).strict();
+export type PropertyLedgerAdjustment = z.infer<typeof propertyLedgerAdjustmentSchema>;
+
+export const propertyConsentPatchSchema = z.object({
+  tenantId: z.string().uuid(),
+  channel: z.enum(["email", "sms"]),
+  destination: z.string().trim().min(3).max(320),
+  status: z.enum(["opted_in", "opted_out"]),
+  source: z.string().trim().min(1).max(240)
+}).strict();
+export type PropertyConsentPatch = z.infer<typeof propertyConsentPatchSchema>;
+
+export const propertyIntegrationSettingsPatchSchema = z.object({
+  stripeSecretKey: z.string().trim().min(1).max(1_000).optional(),
+  stripeWebhookSecret: z.string().trim().min(1).max(1_000).optional(),
+  clearStripeSecretKey: z.boolean().default(false),
+  clearStripeWebhookSecret: z.boolean().default(false),
+  paypalClientId: z.string().trim().min(1).max(1_000).optional(),
+  paypalClientSecret: z.string().trim().min(1).max(1_000).optional(),
+  paypalWebhookId: z.string().trim().min(1).max(240).optional(),
+  paypalEnvironment: z.enum(["sandbox", "live"]).optional(),
+  clearPaypalClientSecret: z.boolean().default(false),
+  zelleRecipient: z.string().trim().max(320).nullable().optional(),
+  zelleNote: z.string().max(1_000).optional(),
+  twilioAccountSid: z.string().trim().min(1).max(240).optional(),
+  twilioAuthToken: z.string().trim().min(1).max(1_000).optional(),
+  twilioMessagingServiceSid: z.string().trim().min(1).max(240).optional(),
+  clearTwilioAuthToken: z.boolean().default(false),
+  gmailConnectionId: z.string().uuid().nullable().optional()
+}).strict();
+export type PropertyIntegrationSettingsPatch = z.infer<typeof propertyIntegrationSettingsPatchSchema>;
+
+export const propertyRefundSchema = z.object({
+  amountCents: propertyMoneySchema.min(1).optional(),
+  reason: z.string().trim().min(1).max(500)
+}).strict();
+export type PropertyRefundRequest = z.infer<typeof propertyRefundSchema>;
 
 export const localMessageStatePatchSchema = z.object({
   isRead: z.boolean().optional(),
@@ -1510,10 +2201,11 @@ const usernameSchema = z.string().trim().toLowerCase().min(3).max(64).regex(
 );
 
 const pinSchema = z.string().regex(/^\d{4,12}$/, "PIN must contain 4 to 12 digits");
+const loginSecretSchema = z.string().min(4).max(128);
 
 export const authLoginSchema = z.object({
   username: usernameSchema,
-  pin: pinSchema,
+  pin: loginSecretSchema,
   pairingToken: z.string().min(20).max(256).optional()
 }).strict();
 

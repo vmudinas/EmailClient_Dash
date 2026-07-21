@@ -6,7 +6,7 @@ AI-powered message analysis (OpenAI or DeepSeek) is available manually and throu
 
 ## Product roadmap
 
-The planned multi-page Property Management and Tenant Portal expansion is documented in [`docs/property-management/README.md`](docs/property-management/README.md). The plan covers navigation, roles, tenant isolation, properties, leases, documents, service requests, rent ledgers, payments, reminders, deployment, and phased delivery.
+The Property Management and Tenant Portal module is documented in [`docs/property-management/README.md`](docs/property-management/README.md). It includes a responsive `/properties` workspace, five seeded properties, units, secure tenant invitations, isolated tenant data, document versioning and acknowledgement, service-request timelines, recurring rent schedules, an immutable ledger, receipts/refunds, Stripe and PayPal webhooks, Zelle/manual reconciliation, Gmail/Twilio reminders, reports, and backups. The same document covers provider configuration, webhook URLs, operations, security limits, and remaining production work.
 
 ## Run it
 
@@ -68,11 +68,15 @@ npm run start -w @email-client/desktop
 2. It copies the selected archive to local managed storage in 4 MB chunks.
 3. SQLite records the confirmed byte offset after every chunk.
 4. After the full file is present, the service validates its header and creates an import job.
-5. The import streams messages, extracts attachments, writes normalized data, and updates SQLite FTS5 indexes.
+5. The import worker streams messages and extracts attachments outside the API thread.
+6. One database-writing import runs by default, committing normalized messages and FTS rows in short batches.
+7. If API latency rises, the worker temporarily slows between batches so browsing and mailbox actions remain responsive.
 
 If a transfer is interrupted, select the same file again. The client resumes from the server-confirmed offset. A fetch or proxy failure before the import job is created is shown as an upload failure, not a parser failure.
 
 The Imports panel shows the current phase, overall percentage, processed and total email counts, and an estimated completion time. MBOX email boundaries are counted during the existing fingerprint scan. PST imports first count actual email items so skipped contacts, calendars, and tasks are not included. ETA appears after enough messages have been processed to measure throughput; an older paused MBOX uses byte progress until it is resumed and recounted.
+
+Import concurrency, batch size, normal pause, and API-latency threshold are configurable with `EMAIL_IMPORT_CONCURRENCY`, `EMAIL_IMPORT_BATCH_SIZE`, `EMAIL_IMPORT_THROTTLE_MS`, and `EMAIL_IMPORT_LATENCY_THRESHOLD_MS`. Keep concurrency at `1` while SQLite is active because SQLite has one writer.
 
 ### Import controls
 
