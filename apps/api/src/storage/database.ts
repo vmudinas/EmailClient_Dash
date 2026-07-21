@@ -1824,6 +1824,68 @@ export class EmailDatabase {
       }
       this.db.exec("PRAGMA user_version = 34;");
     }
+
+    const renterRoleVersion = this.db.pragma("user_version", { simple: true }) as number;
+    if (renterRoleVersion < 35) {
+      this.db.pragma("foreign_keys = OFF");
+      try {
+        this.db.exec(`
+          BEGIN;
+
+          CREATE TABLE users_with_renter_role (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            display_name TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('admin', 'user', 'renter')),
+            pin_hash TEXT NOT NULL,
+            pin_salt TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            must_change_pin INTEGER NOT NULL DEFAULT 0,
+            last_login_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            allowed_screens TEXT
+          );
+          INSERT INTO users_with_renter_role
+          SELECT id, username, display_name, role, pin_hash, pin_salt, is_active,
+            must_change_pin, last_login_at, created_at, updated_at, allowed_screens
+          FROM users;
+
+          CREATE TABLE auth_sessions_with_renter_role (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            effective_role TEXT NOT NULL CHECK(effective_role IN ('admin', 'user', 'renter', 'viewer')),
+            token_hash TEXT NOT NULL UNIQUE,
+            ip_address TEXT NOT NULL,
+            user_agent TEXT,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+          );
+          INSERT INTO auth_sessions_with_renter_role
+          SELECT id, user_id, effective_role, token_hash, ip_address, user_agent,
+            expires_at, revoked_at, created_at, last_seen_at
+          FROM auth_sessions;
+
+          DROP TABLE auth_sessions;
+          DROP TABLE users;
+          ALTER TABLE users_with_renter_role RENAME TO users;
+          ALTER TABLE auth_sessions_with_renter_role RENAME TO auth_sessions;
+          CREATE INDEX auth_sessions_user_idx ON auth_sessions(user_id, created_at DESC);
+          CREATE INDEX auth_sessions_expiry_idx ON auth_sessions(expires_at);
+
+          PRAGMA user_version = 35;
+          COMMIT;
+        `);
+      } catch (error) {
+        if (this.db.inTransaction) this.db.exec("ROLLBACK;");
+        throw error;
+      } finally {
+        this.db.pragma("foreign_keys = ON");
+      }
+    }
   }
 
   private reclassifyInboxCategories(): void {
@@ -2274,6 +2336,10 @@ export class EmailDatabase {
     set("updated_at", new Date().toISOString());
     this.db.prepare(`UPDATE users SET ${fields.join(", ")} WHERE id = ?`).run(...values, id);
     return this.getUser(id)!;
+  }
+
+  deleteUser(id: string): boolean {
+    return this.db.prepare("DELETE FROM users WHERE id = ?").run(id).changes > 0;
   }
 
   markUserLogin(id: string): void {

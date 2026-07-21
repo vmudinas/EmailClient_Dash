@@ -148,9 +148,9 @@ export class AuthService {
       pinHash: hashed.hash,
       pinSalt: hashed.salt,
       mustChangePin: false,
-      // Administrators always see every screen; screen restrictions only make
-      // sense for standard user accounts.
-      allowedScreens: input.role === "admin" ? null : input.allowedScreens ?? null
+      allowedScreens: input.role === "admin"
+        ? null
+        : input.role === "renter" ? ["properties"] : input.allowedScreens ?? null
     });
   }
 
@@ -162,7 +162,7 @@ export class AuthService {
     return this.database.createUser({
       username: input.username,
       displayName: input.displayName,
-      role: "user",
+      role: "renter",
       pinHash: hashed.hash,
       pinSalt: hashed.salt,
       mustChangePin: false,
@@ -175,7 +175,7 @@ export class AuthService {
     if (!current) throw new AuthError("User not found");
     const removesLastAdmin = current.role === "admin"
       && current.isActive
-      && (update.role === "user" || update.isActive === false)
+      && ((update.role !== undefined && update.role !== "admin") || update.isActive === false)
       && this.database.countActiveAdmins() <= 1;
     if (removesLastAdmin) {
       throw new AuthConflictError("At least one active administrator is required");
@@ -183,9 +183,13 @@ export class AuthService {
 
     const hashed = update.pin ? hashPin(update.pin) : null;
     const targetRole = update.role ?? current.role;
-    const allowedScreens = targetRole === "admin"
+    const allowedScreens: UserSummary["allowedScreens"] | undefined = targetRole === "admin"
       ? (update.role === "admin" || update.allowedScreens !== undefined ? null : undefined)
-      : update.allowedScreens;
+      : targetRole === "renter"
+        ? ["properties"]
+        : current.role === "renter" && update.role === "user" && update.allowedScreens === undefined
+          ? null
+          : update.allowedScreens;
     const user = this.database.updateUser(id, {
       displayName: update.displayName,
       role: update.role,
@@ -197,6 +201,15 @@ export class AuthService {
     });
     this.database.revokeUserSessions(id);
     return user;
+  }
+
+  deleteUser(id: string): void {
+    const current = this.database.getUserRecord(id);
+    if (!current) throw new AuthError("User not found");
+    if (current.role === "admin" && current.isActive && this.database.countActiveAdmins() <= 1) {
+      throw new AuthConflictError("At least one active administrator is required");
+    }
+    if (!this.database.deleteUser(id)) throw new AuthError("User not found");
   }
 
   changePin(session: AuthSessionRecord, currentPin: string, newPin: string): void {

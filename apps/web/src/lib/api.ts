@@ -1308,6 +1308,10 @@ export class ApiClient {
     });
   }
 
+  deleteUser(userId: string): Promise<void> {
+    return this.request(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
+  }
+
   audit(options: {
     username?: string;
     action?: string;

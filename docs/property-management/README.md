@@ -10,7 +10,8 @@ Archive Mail includes a property-management workspace for a private landlord or 
 - Five seeded properties using a repository-safe generic property illustration. Personal photos override it locally from ignored storage.
 - Organizations and organization memberships, with a default organization created for the primary administrator.
 - Single-family and multi-unit records. New single-family properties receive a default `Main unit`; leases can be assigned to a specific unit.
-- Time-limited tenant invitations that create a property-only user with a strong password.
+- Admin-created renter accounts and time-limited tenant invitations that create a property-only renter with a strong password.
+- Renter self-service PIN changes that revoke all existing sessions after a successful change.
 - Browser sessions use `HttpOnly`, `SameSite=Strict` cookies. Desktop sessions continue to use the local desktop bridge token.
 - Server-side tenant isolation for units, leases, documents, ledger entries, receipts, requests, comments, notifications, and communication consent.
 - Inaccessible property resources return not-found responses rather than disclosing that another user's resource exists.
@@ -18,8 +19,8 @@ Archive Mail includes a property-management workspace for a private landlord or 
 ### Documents and service requests
 
 - Authenticated document upload, preview, download, versioning, visibility, SHA-256 integrity metadata, and optional tenant acknowledgement.
-- Files are limited to 25 MB and checked by MIME type and file signature before storage.
-- Service-request comments, attachments, assignment metadata, and immutable status history.
+- Documents are limited to 25 MB; maintenance photos and files use the same limit, while supported MP4, MOV, and WebM videos may be up to 100 MB. MIME type and file signatures are checked before storage.
+- Service-request comments, photo/video/file attachments, assignment metadata, and immutable status history.
 - Tenant-visible and manager-only request comments.
 - Request attachment preview/download through authorized endpoints.
 
@@ -60,14 +61,14 @@ The web application exposes these role-aware areas:
 - **Accounting** — schedules, ledger, adjustments, and CSV export.
 - **Communications** — provider configuration status, consent, notification jobs, automation, and backups.
 
-Mail data is never exposed through the tenant portal. A tenant user receives only the `properties` screen permission at invitation acceptance.
+Mail data is never exposed through the tenant portal. Renter accounts receive only the `properties` screen permission whether an administrator creates them directly or a tenant accepts an invitation. Renters can view only linked leases, charges, payments, documents, and maintenance conversations; they can change their own PIN but cannot open any mail or administration API.
 
 ## Initial Setup
 
 1. Sign in as an administrator and immediately replace the bootstrap PIN.
 2. Open **Properties** and verify the seeded portfolio or create properties and units.
-3. Create tenants and leases, assigning each lease to the correct unit.
-4. Use **Invite** next to a tenant and send the copied 48-hour link through a trusted channel.
+3. Create renter accounts under **Admin settings > Users**, then create tenants and leases and link each tenant to the correct renter and unit.
+4. Alternatively, use **Invite** next to a tenant and send the copied 48-hour link through a trusted channel.
 5. Upload the rental agreement, select tenant visibility, and optionally require acknowledgement.
 6. Create a recurring rent schedule and choose reminder offsets such as `-7,-3,0,3`.
 7. Open **Communications > Configure** to save payment and notification provider settings, or provide them through the environment.
@@ -153,6 +154,7 @@ The in-app backup is useful for quick restore points, but production deployment 
 - Set `EMAIL_CLIENT_PUBLIC_URL` to the exact public origin.
 - Keep direct port `3001` inaccessible when using a reverse proxy.
 - Change the bootstrap administrator PIN and use strong tenant passwords.
+- Confirm renter accounts show only the tenant portal and personal PIN settings before sending credentials.
 - Restrict `/data`, `deploy/.env`, and backup ACLs.
 - Keep provider credentials in Admin settings or environment variables, never source control.
 - Enable SMS only after documenting consent language and opt-out handling.

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { basename, dirname, extname, resolve } from "node:path";
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_REQUEST_FILE_BYTES = 100 * 1024 * 1024;
 const ALLOWED_TYPES = new Map([
   ["application/pdf", ".pdf"],
   ["application/msword", ".doc"],
@@ -10,6 +11,9 @@ const ALLOWED_TYPES = new Map([
   ["image/jpeg", ".jpg"],
   ["image/png", ".png"],
   ["image/webp", ".webp"],
+  ["video/mp4", ".mp4"],
+  ["video/quicktime", ".mov"],
+  ["video/webm", ".webm"],
   ["text/plain", ".txt"]
 ]);
 
@@ -43,8 +47,11 @@ export class PropertyFileService {
     if (!Buffer.isBuffer(body) || body.byteLength === 0) {
       throw new PropertyFileValidationError("Choose a non-empty file");
     }
-    if (body.byteLength > MAX_FILE_BYTES) {
-      throw new PropertyFileValidationError("Property files cannot exceed 25 MB");
+    const maxBytes = namespace === "requests" ? MAX_REQUEST_FILE_BYTES : MAX_FILE_BYTES;
+    if (body.byteLength > maxBytes) {
+      throw new PropertyFileValidationError(
+        namespace === "requests" ? "Maintenance attachments cannot exceed 100 MB" : "Property files cannot exceed 25 MB"
+      );
     }
     validateSignature(normalizedType, body);
     const safeFilename = safeName(filename, expectedExtension);
@@ -95,5 +102,12 @@ function validateSignature(contentType: string, body: Buffer): void {
   }
   if (contentType.endsWith("wordprocessingml.document") && body.subarray(0, 2).toString("ascii") !== "PK") {
     throw new PropertyFileValidationError("The uploaded file is not a valid DOCX document");
+  }
+  if ((contentType === "video/mp4" || contentType === "video/quicktime")
+    && body.subarray(4, 8).toString("ascii") !== "ftyp") {
+    throw new PropertyFileValidationError("The uploaded file is not a valid MP4 or MOV video");
+  }
+  if (contentType === "video/webm" && !body.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) {
+    throw new PropertyFileValidationError("The uploaded file is not a valid WebM video");
   }
 }

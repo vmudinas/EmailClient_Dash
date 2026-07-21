@@ -38,7 +38,9 @@ describe("AuthService", () => {
     const { auth, database } = await createService();
     const admin = database.getUserRecordByUsername("admin")!;
     expect(() => auth.updateUser(admin.id, { role: "user" })).toThrow(AuthConflictError);
+    expect(() => auth.updateUser(admin.id, { role: "renter" })).toThrow(AuthConflictError);
     expect(() => auth.updateUser(admin.id, { isActive: false })).toThrow(AuthConflictError);
+    expect(() => auth.deleteUser(admin.id)).toThrow(AuthConflictError);
 
     const second = auth.createUser({
       username: "jordan",
@@ -58,6 +60,42 @@ describe("AuthService", () => {
       roleCap: "viewer"
     });
     expect(login.session.role).toBe("viewer");
+  });
+
+  it("creates isolated renter accounts and deletes them", async () => {
+    const { auth, database } = await createService();
+    const renter = auth.createUser({
+      username: "taylor",
+      displayName: "Taylor Tenant",
+      role: "renter",
+      pin: "4826",
+      allowedScreens: ["mail", "calendar"]
+    });
+
+    expect(renter).toMatchObject({
+      role: "renter",
+      allowedScreens: ["properties"]
+    });
+    const login = auth.login({
+      username: renter.username,
+      pin: "4826",
+      ipAddress: "10.0.0.9",
+      userAgent: "test"
+    });
+    expect(login.session).toMatchObject({
+      role: "renter",
+      user: { id: renter.id, role: "renter", allowedScreens: ["properties"] }
+    });
+
+    auth.deleteUser(renter.id);
+    expect(database.getUserRecord(renter.id)).toBeNull();
+    expect(auth.authenticate(login.accessToken, "10.0.0.9")).toBeNull();
+    expect(() => auth.login({
+      username: renter.username,
+      pin: "4826",
+      ipAddress: "10.0.0.9",
+      userAgent: "test"
+    })).toThrow("Invalid username or PIN");
   });
 });
 

@@ -58,6 +58,10 @@ export class PropertyStore {
     this.db.close();
   }
 
+  hasOwnedProperties(userId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM managed_properties WHERE owner_user_id = ? LIMIT 1").get(userId));
+  }
+
   seedDefaultProperties(ownerUserId: string, properties: SeedProperty[]): void {
     const existing = this.db.prepare(
       "SELECT COUNT(*) AS count FROM managed_properties WHERE owner_user_id = ?"

@@ -66,6 +66,16 @@ export class PropertyPlatformStore {
     this.db.close();
   }
 
+  unlinkUserAccount(userId: string): void {
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE property_tenants SET linked_user_id = NULL, updated_at = ? WHERE linked_user_id = ?")
+        .run(new Date().toISOString(), userId);
+      this.db.prepare("DELETE FROM property_organization_members WHERE user_id = ?").run(userId);
+      this.db.prepare("UPDATE property_request_assignments SET assignee_user_id = NULL WHERE assignee_user_id = ?")
+        .run(userId);
+    })();
+  }
+
   isManager(userId: string): boolean {
     return Boolean(this.db.prepare(`
       SELECT 1 FROM property_organizations o

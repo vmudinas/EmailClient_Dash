@@ -3,10 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NewsHeadline } from "@email-client/shared";
 import { NewsTickerBar } from "./NewsTickerBar.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+  vi.restoreAllMocks();
+});
 
 describe("NewsTickerBar", () => {
-  it("shows headlines with source labels in a repeated scrolling row, each linking out", () => {
+  it("shows headlines with source labels and asks before opening an article", () => {
     const headlines: NewsHeadline[] = [{
       id: "https://bbc.test/1",
       sourceId: "bbc",
@@ -37,11 +41,40 @@ describe("NewsTickerBar", () => {
     expect(visibleLink.getAttribute("target")).toBe("_blank");
     expect(visibleLink.getAttribute("rel")).toBe("noreferrer");
 
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    fireEvent.click(visibleLink);
+    expect(open).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Open or remove this story?" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open article" }));
+    expect(open).toHaveBeenCalledWith("https://bbc.test/1", "_blank", "noopener,noreferrer");
+
     fireEvent.click(screen.getByRole("button", { name: "Refresh headlines" }));
     expect(onRefresh).toHaveBeenCalledOnce();
 
     const track = document.querySelector(".news-ticker-track") as HTMLElement;
     expect(track.style.animationDuration).toBe("24s");
+  });
+
+  it("removes a selected story from every ticker copy and remembers the dismissal", () => {
+    const headline: NewsHeadline = {
+      id: "https://bbc.test/remove-me",
+      sourceId: "bbc",
+      sourceName: "BBC News",
+      title: "Remove this story",
+      link: "https://bbc.test/remove-me",
+      publishedAt: null
+    };
+    const first = render(<NewsTickerBar headlines={[headline]} loading={false} error="" secondsPerHeadline={8} onRefresh={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("link", { name: /Remove this story/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove from feed" }));
+    expect(screen.queryByText("Remove this story")).toBeNull();
+    expect(screen.getByText("All current headlines were removed")).toBeTruthy();
+
+    first.unmount();
+    render(<NewsTickerBar headlines={[headline]} loading={false} error="" secondsPerHeadline={8} onRefresh={vi.fn()} />);
+    expect(screen.queryByText("Remove this story")).toBeNull();
+    expect(screen.getByText("All current headlines were removed")).toBeTruthy();
   });
 
   it("scrolls slower as more headlines are shown, instead of a fixed duration", () => {

@@ -48,6 +48,7 @@ import {
 import type {
   AdminInsights,
   AdminSettings,
+  AccountRole,
   AiAgentSkillId,
   AiModelOption,
   AiProviderId,
@@ -135,7 +136,12 @@ const PERSONAL_MENU: Array<{ id: SettingsSection; label: string; icon: typeof Da
   { id: "sender-filing", label: "Sender rules", icon: ListFilter },
   { id: "smart-rules", label: "Smart rules", icon: MailCheck },
   { id: "inbox-tabs", label: "Inbox tabs", icon: ListFilter },
-  { id: "resumes", label: "Resumes", icon: Paperclip }
+  { id: "resumes", label: "Resumes", icon: Paperclip },
+  { id: "security", label: "Security", icon: ShieldCheck }
+];
+
+const RENTER_MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }> = [
+  { id: "security", label: "Security", icon: ShieldCheck }
 ];
 
 export function SettingsDialog({
@@ -154,7 +160,8 @@ export function SettingsDialog({
   onInboxTabSettingsChanged
 }: SettingsDialogProps) {
   const isAdmin = session.role === "admin";
-  const menu = isAdmin ? MENU : PERSONAL_MENU;
+  const isRenter = session.user.role === "renter";
+  const menu = isAdmin ? MENU : isRenter ? RENTER_MENU : PERSONAL_MENU;
   const [section, setSection] = useState<SettingsSection>("database");
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [users, setUsers] = useState<UserSummary[]>([]);
@@ -185,10 +192,10 @@ export function SettingsDialog({
   useEffect(() => {
     if (open) {
       setMobileMenuOpen(true);
-      setSection(isAdmin ? "database" : "calendars");
+      setSection(isAdmin ? "database" : isRenter ? "security" : "calendars");
       if (isAdmin) void loadAdminData();
     }
-  }, [open, isAdmin, loadAdminData]);
+  }, [open, isAdmin, isRenter, loadAdminData]);
 
   if (!open) return null;
 
@@ -353,7 +360,7 @@ export function SettingsDialog({
                     onNotice={showNotice}
                   />
                 )}
-                {section === "security" && settings && (
+                {section === "security" && (
                   <SecurityPanel
                     api={api!}
                     settings={settings}
@@ -3361,7 +3368,7 @@ function UsersPanel({
 }) {
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [role, setRole] = useState<"admin" | "user">("user");
+  const [role, setRole] = useState<AccountRole>("user");
   const [pin, setPin] = useState("");
   const [createScreens, setCreateScreens] = useState<UserScreenId[]>(USER_SCREENS.map((screen) => screen.id));
   const [resetUser, setResetUser] = useState<UserSummary | null>(null);
@@ -3378,6 +3385,7 @@ function UsersPanel({
 
   const screenAccessLabel = (user: UserSummary): string => {
     if (user.role === "admin" || user.allowedScreens === null) return "All screens";
+    if (user.role === "renter") return "Tenant portal only";
     return `Mail + ${user.allowedScreens.length} of ${USER_SCREENS.length}`;
   };
 
@@ -3393,16 +3401,18 @@ function UsersPanel({
         pin,
         // A full selection is stored as null so the account automatically gains
         // screens added in future versions.
-        allowedScreens: role === "admin" || createScreens.length === USER_SCREENS.length
-          ? null
-          : createScreens
+        allowedScreens: role === "renter"
+          ? ["properties"]
+          : role === "admin" || createScreens.length === USER_SCREENS.length ? null : createScreens
       });
       onUsers([...users, created].sort((a, b) => a.username.localeCompare(b.username)));
       setUsername("");
       setDisplayName("");
       setPin("");
       setCreateScreens(USER_SCREENS.map((screen) => screen.id));
-      onNotice(`User ${created.username} created with an empty private mail and calendar workspace.`);
+      onNotice(role === "renter"
+        ? `Renter ${created.username} created with tenant-portal-only access.`
+        : `User ${created.username} created with an empty private mail and calendar workspace.`);
     } catch (createError) {
       onError(errorText(createError));
     } finally {
@@ -3412,7 +3422,7 @@ function UsersPanel({
 
   const update = async (
     user: UserSummary,
-    patch: { role?: "admin" | "user"; isActive?: boolean; pin?: string; allowedScreens?: UserScreenId[] | null }
+    patch: { role?: AccountRole; isActive?: boolean; pin?: string; allowedScreens?: UserScreenId[] | null }
   ) => {
     onBusy(true);
     onError("");
@@ -3444,10 +3454,25 @@ function UsersPanel({
     setAccessUser(null);
   };
 
+  const remove = async (user: UserSummary) => {
+    if (!window.confirm(`Delete ${user.displayName}'s account? Their sessions and portal login will be removed. Property, payment, request, and audit history will be retained.`)) return;
+    onBusy(true);
+    onError("");
+    try {
+      await api.deleteUser(user.id);
+      onUsers(users.filter((item) => item.id !== user.id));
+      onNotice(`Account ${user.username} deleted.`);
+    } catch (deleteError) {
+      onError(errorText(deleteError));
+    } finally {
+      onBusy(false);
+    }
+  };
+
   return (
     <>
       <h3>Users</h3>
-      <p>Each named account has a private mail and calendar workspace. Administrators manage users and service settings; users manage their own connections, archives, calendars, drafts, rules, and preferences.</p>
+      <p>Administrators have full control, users receive private mail and calendar workspaces, and renters can only open their linked tenant portal.</p>
       <div className="settings-table-wrap">
         <table className="settings-table">
           <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Access</th><th>Last login</th><th>Actions</th></tr></thead>
@@ -3456,14 +3481,14 @@ function UsersPanel({
               <tr key={user.id}>
                 <td><strong>{user.displayName}</strong><small>{user.username}{user.id === currentUserId ? " · current" : ""}</small></td>
                 <td>
-                  <select value={user.role} disabled={busy} onChange={(event) => void update(user, { role: event.target.value as "admin" | "user" })} aria-label={`Role for ${user.username}`}>
-                    <option value="user">User</option><option value="admin">Admin</option>
+                  <select value={user.role} disabled={busy} onChange={(event) => void update(user, { role: event.target.value as AccountRole })} aria-label={`Role for ${user.username}`}>
+                    <option value="user">User</option><option value="renter">Renter</option><option value="admin">Admin</option>
                   </select>
                 </td>
                 <td><span className={`status-text ${user.isActive ? "active" : "inactive"}`}>{user.isActive ? "Active" : "Disabled"}</span></td>
                 <td>
-                  {user.role === "admin" ? (
-                    <span className="status-text active">All screens</span>
+                  {user.role === "admin" || user.role === "renter" ? (
+                    <span className="status-text active">{user.role === "admin" ? "All screens" : "Tenant portal only"}</span>
                   ) : (
                     <button
                       className="text-button"
@@ -3482,6 +3507,7 @@ function UsersPanel({
                 <td className="settings-actions">
                   <button className="icon-button subtle" onClick={() => void update(user, { isActive: !user.isActive })} disabled={busy} title={user.isActive ? "Disable user" : "Enable user"} aria-label={`${user.isActive ? "Disable" : "Enable"} ${user.username}`}><Power size={15} /></button>
                   <button className="icon-button subtle" onClick={() => { setResetUser(user); setResetPin(""); }} disabled={busy} title="Reset PIN" aria-label={`Reset PIN for ${user.username}`}><KeyRound size={15} /></button>
+                  <button className="icon-button danger" onClick={() => void remove(user)} disabled={busy || user.id === currentUserId} title={user.id === currentUserId ? "You cannot delete your own account" : "Delete account"} aria-label={`Delete ${user.username}`}><Trash2 size={15} /></button>
                 </td>
               </tr>
             ))}
@@ -3524,7 +3550,7 @@ function UsersPanel({
         <div className="settings-form-grid">
           <label>Username<input value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} pattern="[a-z0-9][a-z0-9._-]{2,63}" required /></label>
           <label>Display name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={120} required /></label>
-          <label>Role<select value={role} onChange={(event) => setRole(event.target.value as "admin" | "user")}><option value="user">User</option><option value="admin">Admin</option></select></label>
+          <label>Role<select value={role} onChange={(event) => setRole(event.target.value as AccountRole)}><option value="user">User</option><option value="renter">Renter</option><option value="admin">Admin</option></select></label>
           <label>PIN<input type="password" inputMode="numeric" pattern="[0-9]{4,12}" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 12))} required /></label>
         </div>
         {role === "user" && (
@@ -3548,6 +3574,7 @@ function UsersPanel({
             </ul>
           </fieldset>
         )}
+        {role === "renter" && <p className="settings-warning neutral">Renter accounts can only access linked leases, charges, payments, documents, and maintenance conversations in the tenant portal.</p>}
         <button className="primary-button" disabled={busy || username.length < 3 || !displayName.trim() || pin.length < 4}><UserPlus size={16} /> Create user</button>
       </form>
     </>
@@ -3563,7 +3590,7 @@ function SecurityPanel({
   onSignedOut
 }: {
   api: ApiClient;
-  settings: AdminSettings;
+  settings: AdminSettings | null;
   busy: boolean;
   onBusy(value: boolean): void;
   onError(value: string): void;
@@ -3594,8 +3621,10 @@ function SecurityPanel({
   return (
     <>
       <h3>Security</h3>
-      <p>Sessions are stored as token hashes, bound to the login IP address, and expire after {settings.security.sessionLifetimeMinutes} minutes. Closing the client removes its browser-held session token.</p>
-      {settings.security.defaultPinWarning && (
+      <p>{settings
+        ? `Sessions are stored as token hashes, bound to the login IP address, and expire after ${settings.security.sessionLifetimeMinutes} minutes.`
+        : "Change your personal PIN here. You will be signed out on every device after the change."}</p>
+      {settings?.security.defaultPinWarning && (
         <div className="settings-warning"><AlertTriangle size={17} /><span>The first-run administrator PIN is still active.</span></div>
       )}
       <form className="settings-form security-form" onSubmit={(event) => void changePin(event)}>

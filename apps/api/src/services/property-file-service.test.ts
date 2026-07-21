@@ -21,4 +21,20 @@ describe("PropertyFileService", () => {
     files.remove(saved.storageKey);
     expect(files.read(saved.storageKey)).toBeNull();
   });
+
+  it("stores supported maintenance videos", () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "archive-mail-property-files-"));
+    temporaryDirs.push(directory);
+    const files = new PropertyFileService(directory);
+    const mp4 = Buffer.concat([
+      Buffer.from([0, 0, 0, 24]),
+      Buffer.from("ftyp"),
+      Buffer.from("isom0000isomiso2")
+    ]);
+
+    const saved = files.save("requests", "leak.mp4", "video/mp4", mp4);
+
+    expect(saved).toMatchObject({ filename: "leak.mp4", contentType: "video/mp4" });
+    expect(files.read(saved.storageKey)).toEqual(mp4);
+  });
 });
