@@ -16,15 +16,26 @@ interface FolderNode {
 
 export async function importPstFile(sourcePath: string, context: ImporterContext): Promise<void> {
   const pst = new PSTFile(sourcePath);
-  const root = pst.getRootFolder();
-  const folders = flattenFolders(root);
-  const total = await countEmailMessages(folders, context.signal);
+  await importFromRootFolder(pst.getRootFolder(), context);
+}
+
+// Split out from importPstFile so tests can drive the folder-walking and
+// error-tolerance logic against a fake PSTFolder tree without a real PST file.
+export async function importFromRootFolder(root: PSTFolder, context: ImporterContext): Promise<void> {
+  const folders = flattenFolders(root, (path, error) => context.onError("folder", error, path));
+  const total = await countEmailMessages(folders, context);
   context.onTotal(total);
   let processed = 0;
 
   for (const node of folders) {
-    node.folder.moveChildCursorTo(0);
-    let child = node.folder.getNextChild();
+    let child: PSTMessage | null;
+    try {
+      node.folder.moveChildCursorTo(0);
+      child = node.folder.getNextChild();
+    } catch (error) {
+      context.onError("folder", error, node.path);
+      continue;
+    }
     while (child != null) {
       if (context.signal.aborted) throw abortError();
       if (child instanceof PSTMessage && isEmailMessage(child.messageClass)) {
@@ -39,21 +50,40 @@ export async function importPstFile(sourcePath: string, context: ImporterContext
         }
         context.onProgress(processed, total, processed);
       }
-      child = node.folder.getNextChild();
+      try {
+        child = node.folder.getNextChild();
+      } catch (error) {
+        context.onError("folder", error, node.path);
+        break;
+      }
       await yieldToEventLoop();
     }
   }
 }
 
-async function countEmailMessages(folders: FolderNode[], signal: AbortSignal): Promise<number> {
+async function countEmailMessages(
+  folders: FolderNode[],
+  context: Pick<ImporterContext, "signal" | "onError">
+): Promise<number> {
   let count = 0;
   for (const node of folders) {
-    node.folder.moveChildCursorTo(0);
-    let child = node.folder.getNextChild();
-    while (child != null) {
-      if (signal.aborted) throw abortError();
-      if (child instanceof PSTMessage && isEmailMessage(child.messageClass)) count += 1;
+    let child: PSTMessage | null;
+    try {
+      node.folder.moveChildCursorTo(0);
       child = node.folder.getNextChild();
+    } catch (error) {
+      context.onError("folder", error, node.path);
+      continue;
+    }
+    while (child != null) {
+      if (context.signal.aborted) throw abortError();
+      if (child instanceof PSTMessage && isEmailMessage(child.messageClass)) count += 1;
+      try {
+        child = node.folder.getNextChild();
+      } catch (error) {
+        context.onError("folder", error, node.path);
+        break;
+      }
       await yieldToEventLoop();
     }
   }
@@ -91,13 +121,25 @@ export function normalizePstMessage(message: PSTMessage, folderPath: string): No
   };
 }
 
-function flattenFolders(root: PSTFolder): FolderNode[] {
+// Some PST files carry orphaned internal search/system folders (e.g. Outlook's
+// "To-Do Search", "ItemProcSearch") whose child-folder pointer is broken even
+// though the folder itself holds no real mail. getSubFolders() throws for
+// exactly that folder; treating it as childless (rather than aborting the
+// whole import) loses nothing since these folders are never real mailboxes.
+function flattenFolders(root: PSTFolder, onFolderError: (path: string, error: unknown) => void): FolderNode[] {
   const output: FolderNode[] = [];
   const visit = (folder: PSTFolder, parentPath: string) => {
     const name = folder.displayName?.trim() || (parentPath ? "Unnamed" : "Mailbox");
     const path = parentPath ? `${parentPath}/${name}` : name;
     output.push({ folder, path });
-    for (const child of folder.getSubFolders()) visit(child, path);
+    let children: PSTFolder[];
+    try {
+      children = folder.getSubFolders();
+    } catch (error) {
+      onFolderError(path, error);
+      return;
+    }
+    for (const child of children) visit(child, path);
   };
   visit(root, "");
   return output;
