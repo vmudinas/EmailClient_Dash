@@ -65,6 +65,8 @@ When an API request exceeds the latency threshold, the import worker temporarily
 
 Compose starts a private `postgres:17-alpine` service without publishing port `5432`. Set `ARCHIVE_MAIL_POSTGRES_DIR`, `POSTGRES_DB`, `POSTGRES_USER`, and a long random `POSTGRES_PASSWORD` in `deploy/.env`.
 
+The project also runs a one-shot `postgres-migrate` service before Archive Mail starts. With `ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY=true`, every deployment replaces the PostgreSQL migration schema with a row-count-validated copy of the current SQLite database. Set it to `false` to start PostgreSQL without repeating the copy. A fresh installation without a SQLite database skips the migration and starts normally.
+
 To stop Archive Mail, copy all non-FTS SQLite tables into PostgreSQL, recreate compatible indexes and foreign keys, add PostgreSQL full-text indexes, validate every table's row count, and restart the application:
 
 ```bash
@@ -120,7 +122,7 @@ After that one-time root-task setup, every deployment is one command from the re
 ./deploy/scripts/push-synology.sh
 ```
 
-The command asks for the Synology SSH password once, uploads a clean snapshot without local dependencies, build output, Git metadata, or `deploy/.env`, preserves the existing NAS environment file, writes a deployment request for the scheduled root task, waits for the health check, and prints the build result. Override `ARCHIVE_MAIL_NAS_HOST`, `ARCHIVE_MAIL_NAS_APP_DIR`, or `ARCHIVE_MAIL_NAS_BACKUP_DIR` when deploying to a different NAS or path. SSH keys can remove the password prompt, but the script never stores a password.
+The command asks for the Synology SSH password once, uploads a clean snapshot without local dependencies, build output, Git metadata, or `deploy/.env`, preserves the existing NAS environment file, backfills missing PostgreSQL settings with a generated password, writes a deployment request for the scheduled root task, waits for the migration and health check, and prints the build result. Override `ARCHIVE_MAIL_NAS_HOST`, `ARCHIVE_MAIL_NAS_APP_DIR`, `ARCHIVE_MAIL_NAS_BACKUP_DIR`, or `ARCHIVE_MAIL_NAS_POSTGRES_DIR` when deploying to a different NAS or path. SSH keys can remove the password prompt, but the script never stores a password.
 
 To avoid typing the override every time, keep a personal launcher next to the scripts — any `*.local.sh` file is git-ignored and excluded from the uploaded snapshot:
 

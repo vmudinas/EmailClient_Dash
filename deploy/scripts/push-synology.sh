@@ -4,17 +4,23 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPOSITORY_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
-NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-gliukaz@192.168.68.57}
+NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-gliukaz@synology.local}
 NAS_APP_DIR=${ARCHIVE_MAIL_NAS_APP_DIR:-/volume1/docker/archive-mail/app}
 NAS_BACKUP_DIR=${ARCHIVE_MAIL_NAS_BACKUP_DIR:-/volume1/docker/archive-mail/backups}
+NAS_POSTGRES_DIR=${ARCHIVE_MAIL_NAS_POSTGRES_DIR:-/volume1/docker/archive-mail/postgres}
 CONTROL_PATH="$HOME/.ssh/archive-mail-deploy-$$"
 
-case "$NAS_APP_DIR$NAS_BACKUP_DIR" in
+case "$NAS_APP_DIR$NAS_BACKUP_DIR$NAS_POSTGRES_DIR" in
   *[!A-Za-z0-9_./-]*)
     echo "NAS paths may contain only letters, numbers, underscores, periods, slashes, and hyphens." >&2
     exit 1
     ;;
 esac
+
+if ! POSTGRES_PASSWORD_DEFAULT=$(openssl rand -hex 32 2>/dev/null); then
+  echo "OpenSSL is required to generate the initial PostgreSQL password." >&2
+  exit 1
+fi
 
 cleanup() {
   ssh -S "$CONTROL_PATH" -O exit "$NAS_HOST" >/dev/null 2>&1 || true
@@ -71,7 +77,25 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
       echo 'Missing existing deploy/.env on the NAS.' >&2
       exit 1
     fi
-    cp \"\$app_dir/deploy/.env\" \"\$staging/deploy/.env\"
+    env_file=\"\$app_dir/deploy/.env\"
+    ensure_env_value() {
+      key=\"\$1\"
+      value=\"\$2\"
+      current=\$(grep \"^\$key=\" \"\$env_file\" | tail -n 1 | cut -d= -f2- || true)
+      case \"\$current\" in
+        ''|replace-with-*)
+          printf '\n%s=%s\n' \"\$key\" \"\$value\" >> \"\$env_file\"
+          ;;
+      esac
+    }
+    ensure_env_value ARCHIVE_MAIL_POSTGRES_DIR '${NAS_POSTGRES_DIR}'
+    ensure_env_value POSTGRES_DB archive_mail
+    ensure_env_value POSTGRES_USER archive_mail
+    ensure_env_value POSTGRES_PASSWORD '${POSTGRES_PASSWORD_DEFAULT}'
+    ensure_env_value ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY true
+    mkdir -p '${NAS_POSTGRES_DIR}' '${NAS_BACKUP_DIR}'
+    chmod 600 \"\$env_file\"
+    cp \"\$env_file\" \"\$staging/deploy/.env\"
     chmod 755 \"\$staging/deploy/scripts/\"*.sh
     mv \"\$app_dir\" \"\$previous\"
     mv \"\$staging\" \"\$app_dir\"
@@ -89,7 +113,7 @@ if remote "sudo -n -l $REBUILD_BIN" >/dev/null 2>&1; then
     echo "Refresh the root-owned copy when convenient (see deploy/README.md)." >&2
   fi
   if remote "sudo -n $REBUILD_BIN"; then
-    echo "Deployment completed successfully."
+    echo "Deployment and PostgreSQL migration completed successfully."
     exit 0
   fi
   echo "Direct rebuild failed." >&2
@@ -111,7 +135,7 @@ while [ "$attempt" -lt 180 ]; do
   case "$deployment_status" in
     success)
       remote "cat '$NAS_BACKUP_DIR/rebuild.log'"
-      echo "Deployment completed successfully."
+      echo "Deployment and PostgreSQL migration completed successfully."
       exit 0
       ;;
     failed)

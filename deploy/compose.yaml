@@ -9,6 +9,11 @@ services:
     container_name: archive-mail
     init: true
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     user: "${ARCHIVE_MAIL_UID:-1000}:${ARCHIVE_MAIL_GID:-1000}"
     ports:
       - "${ARCHIVE_MAIL_BIND_ADDRESS:-127.0.0.1}:${ARCHIVE_MAIL_PORT:-3001}:3001"
@@ -69,6 +74,44 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  postgres-migrate:
+    image: archive-mail:${ARCHIVE_MAIL_IMAGE_TAG:-local}
+    container_name: archive-mail-postgres-migrate
+    restart: "no"
+    user: "${ARCHIVE_MAIL_UID:-1000}:${ARCHIVE_MAIL_GID:-1000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY: "${ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY:-true}"
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: "${POSTGRES_DB:-archive_mail}"
+      PGUSER: "${POSTGRES_USER:-archive_mail}"
+      PGPASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/.env}"
+    volumes:
+      - type: bind
+        source: "${ARCHIVE_MAIL_DATA_DIR:?ARCHIVE_MAIL_DATA_DIR must be set in deploy/.env}"
+        target: /data
+    command:
+      - sh
+      - -lc
+      - |
+        if [ "$${ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY}" != "true" ]; then
+          echo "Automatic PostgreSQL migration is disabled."
+        elif [ ! -f /data/archive-mail.sqlite ]; then
+          echo "No SQLite database exists yet; skipping the initial PostgreSQL migration."
+        else
+          npm run db:migrate:postgres -- --sqlite /data/archive-mail.sqlite --reset
+        fi
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: json-file
       options:
