@@ -18,11 +18,13 @@ set -a
 set +a
 
 : "${ARCHIVE_MAIL_DATA_DIR:?Set ARCHIVE_MAIL_DATA_DIR in $ENV_FILE}"
+: "${ARCHIVE_MAIL_POSTGRES_DIR:?Set ARCHIVE_MAIL_POSTGRES_DIR in $ENV_FILE}"
+: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in $ENV_FILE}"
 case "$ARCHIVE_MAIL_DATA_DIR" in
   /) echo "ARCHIVE_MAIL_DATA_DIR cannot be /" >&2; exit 1 ;;
 esac
 
-mkdir -p "$ARCHIVE_MAIL_DATA_DIR"
+mkdir -p "$ARCHIVE_MAIL_DATA_DIR" "$ARCHIVE_MAIL_POSTGRES_DIR"
 permission_probe="$ARCHIVE_MAIL_DATA_DIR/.archive-mail-write-test-$$"
 if ! (umask 077 && : > "$permission_probe") 2>/dev/null; then
   echo "Cannot write to $ARCHIVE_MAIL_DATA_DIR. Fix ownership for UID ${ARCHIVE_MAIL_UID:-1000} and GID ${ARCHIVE_MAIL_GID:-1000}." >&2
@@ -42,7 +44,7 @@ fi
 docker info >/dev/null
 
 compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build --pull archive-mail
-compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --remove-orphans archive-mail
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --remove-orphans postgres archive-mail
 
 container_id=$(compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -q archive-mail)
 if [ -z "$container_id" ]; then

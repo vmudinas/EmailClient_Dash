@@ -1,347 +1,177 @@
-# Property Management Expansion Plan
+# Property Management
 
-## Purpose
+Archive Mail includes a property-management workspace for a private landlord or small property manager. It shares the existing React/Fastify application shell while keeping property resources separate from every user's private mail, calendar, drafts, AI configuration, and Gmail connections.
 
-Archive Mail currently combines private email archives, Gmail synchronization, calendars, to-dos, drafts, AI review, rules, and administration in one React/Fastify application. This plan expands it into a multi-page personal operations platform while preserving Mail as a focused module.
+## Implemented Features
 
-The new Property Management module should let a property owner or manager:
+### Portfolio and access
 
-- create houses and units;
-- invite tenants into private portal accounts;
-- create and manage leases;
-- upload, preview, share, and audit rental agreements and related documents;
-- receive, assign, and track service requests;
-- generate rent charges and track balances;
-- accept rent payments safely through a payment provider;
-- send configurable email, SMS, and in-app reminders;
-- retain a complete audit trail without exposing the manager's private mailbox to tenants.
+- A manager dashboard with properties, units, tenants, leases, service requests, balances, and payment history.
+- Five seeded properties using a repository-safe generic property illustration. Personal photos override it locally from ignored storage.
+- Organizations and organization memberships, with a default organization created for the primary administrator.
+- Single-family and multi-unit records. New single-family properties receive a default `Main unit`; leases can be assigned to a specific unit.
+- Time-limited tenant invitations that create a property-only user with a strong password.
+- Browser sessions use `HttpOnly`, `SameSite=Strict` cookies. Desktop sessions continue to use the local desktop bridge token.
+- Server-side tenant isolation for units, leases, documents, ledger entries, receipts, requests, comments, notifications, and communication consent.
+- Inaccessible property resources return not-found responses rather than disclosing that another user's resource exists.
 
-## Product Shape
+### Documents and service requests
 
-Build one application with a shared authenticated shell and separate modules:
+- Authenticated document upload, preview, download, versioning, visibility, SHA-256 integrity metadata, and optional tenant acknowledgement.
+- Files are limited to 25 MB and checked by MIME type and file signature before storage.
+- Service-request comments, attachments, assignment metadata, and immutable status history.
+- Tenant-visible and manager-only request comments.
+- Request attachment preview/download through authorized endpoints.
 
-1. **Mail** — the current archive and Gmail experience.
-2. **Calendar** — current calendars and to-dos.
-3. **Property Management** — manager-facing properties, leases, requests, payments, documents, and communications.
-4. **Tenant Portal** — tenant-only home, payments, requests, documents, and profile pages.
-5. **Administration** — users, integrations, templates, security, audit, and system configuration.
+### Rent, payments, and reporting
 
-Property data must not be implemented as another email folder hierarchy. Mail remains private to its owner. A manager may explicitly link an email or attachment to a property, lease, payment, or service request, but that action must copy or reference only the selected item and must not grant mailbox access.
+- Dated rent charges, recurring monthly rent schedules, immutable ledger entries, adjustments, allocations, receipts, refunds, and CSV export.
+- Stripe-hosted Checkout for eligible cards, Apple Pay, Google Pay, and ACH methods enabled in the Stripe account.
+- PayPal Orders and captures.
+- Zelle instructions and manager reconciliation, plus manual cash/check/other records.
+- Provider transaction IDs and payment status history without storing card or bank credentials.
+- Signature-verified Stripe and PayPal webhooks stored in a durable, idempotent event queue.
+- Successful provider events create payment ledger entries and receipts exactly once.
+- Manager-triggered full or partial refunds for supported providers.
 
-## Navigation and Pages
+### Notifications and operations
 
-The current web application switches between Mail and Calendar with local component state. Replace that with URL-based routing and a reusable application shell.
+- Durable SQLite notification jobs with idempotency keys, attempt counts, retry timing, provider IDs, and delivery history.
+- In-app reminders, Gmail-delivered email reminders, and optional Twilio Messaging Service SMS.
+- Explicit SMS opt-in records and signed Twilio STOP webhook handling. Opted-out numbers are suppressed.
+- A non-overlapping automation worker that creates due rent charges, processes provider events, and sends queued reminders.
+- A **Run now** control and visible job/delivery state in the Communications tab.
+- Online SQLite backups containing the database, property files, images, and relevant settings, with retention and an Admin backup history panel.
+- NAS-friendly SQLite WAL mode with a 30-second busy timeout on property connections.
 
-### Manager routes
+## Application Areas
 
-| Route | Purpose |
+The web application exposes these role-aware areas:
+
+- `/properties` — manager portfolio or tenant portal, selected from the shared application navigation.
+- `/portal` — tenant-friendly entry point after accepting an invitation.
+- `/portal/invite?token=...` — public invitation acceptance screen.
+- **Overview** — portfolio or tenant summary.
+- **Properties** — properties, photos, and units.
+- **Tenants & leases** — tenant records, invitation links, and lease details.
+- **Requests** — service request workflow, comments, attachments, and history.
+- **Payments** — charges, payment attempts, hosted checkout, sync, receipts, and refunds.
+- **Documents** — agreements and other shared property files.
+- **Accounting** — schedules, ledger, adjustments, and CSV export.
+- **Communications** — provider configuration status, consent, notification jobs, automation, and backups.
+
+Mail data is never exposed through the tenant portal. A tenant user receives only the `properties` screen permission at invitation acceptance.
+
+## Initial Setup
+
+1. Sign in as an administrator and immediately replace the bootstrap PIN.
+2. Open **Properties** and verify the seeded portfolio or create properties and units.
+3. Create tenants and leases, assigning each lease to the correct unit.
+4. Use **Invite** next to a tenant and send the copied 48-hour link through a trusted channel.
+5. Upload the rental agreement, select tenant visibility, and optionally require acknowledgement.
+6. Create a recurring rent schedule and choose reminder offsets such as `-7,-3,0,3`.
+7. Open **Communications > Configure** to save payment and notification provider settings, or provide them through the environment.
+8. Run automation once, inspect the notification queue, and create a backup before enabling public tenant access.
+
+## Provider Configuration
+
+Admin-saved property integration secrets are stored in `/data/property-integrations.json` with mode `0600` and take precedence over environment fallbacks. Secrets are never returned to the browser. On Synology, also restrict the `/data` shared-folder ACL to the service administrator and container account.
+
+```dotenv
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+PAYPAL_CLIENT_ID=...
+PAYPAL_CLIENT_SECRET=...
+PAYPAL_ENVIRONMENT=live
+PAYPAL_WEBHOOK_ID=...
+
+ZELLE_RECIPIENT=rent@example.com
+ZELLE_PAYMENT_NOTE=Include the property address and payment reference in the memo.
+
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_MESSAGING_SERVICE_SID=MG...
+PROPERTY_GMAIL_CONNECTION_ID=<gmail-connection-uuid>
+
+PROPERTY_AUTOMATION_INTERVAL_MINUTES=5
+PROPERTY_BACKUP_RETENTION=7
+```
+
+Leaving provider environment variables unset keeps the fields editable in the Admin UI. A Gmail connection ID must reference a connected account with send permission.
+
+## Webhook Endpoints
+
+Tenant access and provider webhooks require a stable HTTPS origin in `EMAIL_CLIENT_PUBLIC_URL`.
+
+| Provider | Public endpoint |
 | --- | --- |
-| `/dashboard` | Portfolio summary, rent due, overdue balances, expiring leases, and open requests. |
-| `/mail` | Existing Archive Mail experience. |
-| `/calendar` | Existing calendar and to-do experience. |
-| `/properties` | Search, create, and manage houses and units. |
-| `/properties/:propertyId` | Property overview, occupants, lease, documents, requests, and financial history. |
-| `/tenants` | Tenant directory, invitations, contact details, and active leases. |
-| `/leases` | Draft, active, upcoming, expired, and renewal workflows. |
-| `/requests` | Service-request board with assignment, priority, status, and aging. |
-| `/payments` | Charges, balances, payment attempts, receipts, failures, and reconciliation. |
-| `/documents` | Agreements, notices, inspections, receipts, and access history. |
-| `/communications` | Reminder rules, templates, delivery history, and consent status. |
-| `/settings` | Personal and organization settings. |
+| Stripe | `https://mail.example.com/api/property-webhooks/stripe` |
+| PayPal | `https://mail.example.com/api/property-webhooks/paypal` |
+| Twilio incoming messages | `https://mail.example.com/api/property-webhooks/twilio/inbound` |
 
-### Tenant routes
+Configure the Stripe signing secret and PayPal webhook ID returned by those providers. Configure Twilio's Messaging Service incoming-message webhook with the exact public URL. The reverse proxy must preserve the public host and protocol; set `EMAIL_CLIENT_TRUST_PROXY=true` only when clients cannot bypass that proxy.
 
-| Route | Purpose |
-| --- | --- |
-| `/portal` | Current home, lease summary, balance, next due date, and open requests. |
-| `/portal/payments` | Pay rent, view charges, download receipts, and review payment history. |
-| `/portal/requests` | Create, comment on, and track service requests. |
-| `/portal/documents` | View and download documents shared through the tenant's lease. |
-| `/portal/messages` | Property notices and notification history. |
-| `/portal/profile` | Contact details, password, notification preferences, and SMS consent. |
+The Stripe handler verifies the timestamped HMAC signature before JSON parsing. The PayPal handler calls PayPal's verification endpoint. The Twilio handler validates `X-Twilio-Signature` before processing STOP-like commands.
 
-Desktop navigation should use a module switcher and a module-specific side panel. Mobile navigation should show only the actions relevant to the active role and module.
+References: [Stripe fulfillment](https://docs.stripe.com/checkout/fulfillment), [Stripe webhooks](https://docs.stripe.com/webhooks?lang=node), [PayPal webhooks](https://developer.paypal.com/api/rest/webhooks/), [PayPal event names](https://developer.paypal.com/api/rest/webhooks/event-names/), [Twilio messaging policy](https://www.twilio.com/en-us/legal/messaging-policy), and [Twilio consent API](https://www.twilio.com/docs/messaging/features/consent-api).
 
-## Identity, Roles, and Authorization
+## Durable Automation
 
-Keep `users` as the global identity table, but do not use one global role to authorize every property operation. Add organization memberships and property/lease relationships.
+The API process runs one non-overlapping property automation loop. Durable work is claimed from SQLite, so a restart does not lose queued reminders or provider events.
 
-Recommended roles:
+The loop:
 
-- **System administrator** — manages the installation and global integrations.
-- **Organization owner** — controls an organization's properties, managers, billing configuration, and templates.
-- **Property manager** — manages assigned properties, leases, requests, documents, and charges.
-- **Tenant** — sees only leases, units, documents, charges, and requests available through their membership.
-- **Maintenance user** — optional role limited to assigned service requests.
+1. Claims each due rent schedule by schedule ID and charge date.
+2. Creates the charge and immutable ledger entry exactly once.
+3. Enqueues reminder jobs with deterministic idempotency keys.
+4. Claims and applies verified provider events.
+5. Claims up to 100 due notification jobs per run.
+6. Records success, suppression, retry, or terminal failure in delivery history.
 
-Authorization rules must be enforced in Fastify before loading or mutating a resource:
+Failed notification jobs use bounded exponential retry timing and stop after five attempts. SMS is checked against current consent immediately before delivery.
 
-- private mail resources continue using `owner_user_id`;
-- property resources use `organization_id` and, where relevant, `property_id`;
-- tenant access is derived from an active or historically relevant lease-party record;
-- document access requires an explicit visibility rule or lease assignment;
-- maintenance users cannot see rent, payment, or unrelated tenant data;
-- returning `404` instead of `403` for inaccessible resource IDs prevents existence disclosure;
-- every privileged action writes an audit event.
+## Financial Rules
 
-Do not expose the current short PIN flow directly to the public internet. Before tenant launch, add verified email, password or magic-link authentication, secure HTTP-only session cookies, password reset, optional multi-factor authentication for managers, CSRF protection, and public-login rate limiting.
+- The browser return URL never marks a payment successful.
+- Stripe or PayPal status synchronization and verified provider events are authoritative.
+- Ledger history is append-only; corrections use adjustments or refunds.
+- A positive ledger amount increases the tenant balance. Payments are stored as negative ledger entries.
+- Receipt numbers and provider event IDs are idempotent.
+- Hosted providers collect card and bank credentials; this application stores only amounts, states, references, and provider IDs.
+- Zelle and manual payments require manager confirmation because no general-purpose Zelle merchant-status API is used.
 
-## Domain Model
+## Documents and Backups
 
-### Organizations and properties
+Property documents and request attachments are stored under `/data/property-files`; seeded and uploaded property photos are under `/data/property-images`. For local development, private seed photos can be placed in the ignored repository folder `data/property-images` using the filenames referenced by the seed records. Missing private photos use `apps/api/property-assets/generic-property.svg`. Backup creation uses SQLite's online backup API, then asynchronously copies property files, images, and integration settings into `/data/property-backups/<timestamp>`.
 
-- `organizations`
-- `organization_members`
-- `properties`
-- `units`
-- `property_contacts`
-- `property_assignments`
+The in-app backup is useful for quick restore points, but production deployment should also run `deploy/scripts/backup.sh`, copy encrypted backups to another physical device, and test `deploy/scripts/restore.sh` periodically. Stop the application before a manual restore.
 
-Represent a single-family house as one property containing one unit. This supports apartments and multi-unit buildings later without changing the lease model.
+## Security Checklist
 
-### Tenants and leases
+- Publish the tenant portal only behind HTTPS.
+- Set `EMAIL_CLIENT_PUBLIC_URL` to the exact public origin.
+- Keep direct port `3001` inaccessible when using a reverse proxy.
+- Change the bootstrap administrator PIN and use strong tenant passwords.
+- Restrict `/data`, `deploy/.env`, and backup ACLs.
+- Keep provider credentials in Admin settings or environment variables, never source control.
+- Enable SMS only after documenting consent language and opt-out handling.
+- Test Stripe and PayPal in sandbox/test mode before switching to live credentials.
+- Back up before upgrades and regularly perform a restore drill.
+- Do not run two containers against the same SQLite data directory.
 
-- `tenant_profiles`
-- `tenant_invitations`
-- `leases`
-- `lease_parties`
-- `lease_terms`
-- `rent_schedules`
-- `security_deposits`
+## Current Scope and Remaining Production Work
 
-A lease may have multiple tenants. Preserve historical memberships after move-out so former tenants can access only the documents and receipts that policy allows.
+This implementation is intended for one private installation and a small portfolio. Before operating it as a commercial property-management SaaS or serving unrelated landlords, complete legal, accounting, and security review. The largest remaining product expansions are:
 
-### Documents
+- email verification, password reset, manager MFA, and CSRF tokens for a broad public deployment;
+- multiple lease parties, co-signers, deposits held in dedicated trust-account workflows, late-fee policy engines, and lease renewals;
+- vendor accounts, work orders, estimates, invoices, inspections, and recurring maintenance;
+- e-signature integration and malware scanning for external uploads;
+- charge disputes, chargebacks, bank reconciliation, owner statements, tax reports, and accounting-system integrations;
+- quiet hours and organization-editable notification templates;
+- accessibility audit, automated browser acceptance tests, security review, and disaster-recovery drill;
+- PostgreSQL plus separate workers before multi-instance scale;
+- Stripe Connect before routing money for multiple independent landlords.
 
-- `documents`
-- `document_versions`
-- `document_assignments`
-- `document_acknowledgements`
-- `document_access_events`
-
-Reuse the content-addressed blob store, but generalize file metadata beyond resumes and email attachments. Files need authenticated preview/download endpoints, MIME validation, size limits, SHA-256 integrity, version history, visibility controls, and access auditing. Malware scanning can be added before broader external uploads are enabled.
-
-### Service requests
-
-- `service_requests`
-- `service_request_comments`
-- `service_request_attachments`
-- `service_request_assignments`
-- `service_request_status_history`
-
-Suggested statuses: `submitted`, `triaged`, `scheduled`, `in_progress`, `waiting`, `completed`, and `cancelled`. Status history should be immutable. Tenants may add comments and attachments but may not rewrite manager notes or historical events.
-
-### Rent and payments
-
-- `rent_charges`
-- `charge_adjustments`
-- `payment_attempts`
-- `payment_allocations`
-- `ledger_entries`
-- `payment_provider_events`
-- `receipts`
-
-The monthly rent schedule generates dated charges. Payments are allocated to charges through immutable ledger entries. Correct mistakes with adjustments rather than rewriting completed financial records.
-
-Store provider customer, Checkout Session, Payment Intent, charge, refund, and event identifiers. Never store complete card numbers, bank-account numbers, or provider secrets in application tables.
-
-### Notifications
-
-- `notification_preferences`
-- `notification_templates`
-- `notification_rules`
-- `notification_jobs`
-- `delivery_attempts`
-- `communication_consents`
-- `in_app_notifications`
-
-Notification jobs must be durable database records rather than process-only timers. Every job needs an idempotency key, scheduled time, status, attempt count, next retry time, provider ID, and final result.
-
-## Core Workflows
-
-### Property and tenant onboarding
-
-1. Manager creates an organization, property, and unit.
-2. Manager enters tenant contact details and sends a time-limited invitation.
-3. Tenant verifies their email and creates secure credentials.
-4. Manager creates lease dates, rent amount, due day, deposit, and reminder policy.
-5. Manager uploads the rental agreement and shares it with lease parties.
-6. Tenant can view or acknowledge the agreement without seeing unrelated documents or mail.
-
-### Monthly rent cycle
-
-1. A durable scheduled job generates the next rent charge exactly once.
-2. Reminder jobs are created from the lease policy, for example seven days before, three days before, due date, and overdue.
-3. Tenant opens the hosted payment flow from the portal.
-4. The provider collects card or ACH authorization; Archive Mail never receives raw payment credentials.
-5. A signature-verified webhook stores the provider event and updates the payment attempt idempotently.
-6. Successful funds are allocated to the charge and a receipt becomes available.
-7. Delayed, failed, refunded, or disputed payments remain visible and trigger appropriate notifications.
-
-For the initial single-owner deployment, use the owner's normal Stripe account. Consider Stripe Connect only if the product later serves unrelated landlords and routes money to multiple independent recipients.
-
-ACH is a delayed and disputable payment method. Do not mark rent paid from the browser return URL. The webhook-confirmed provider state is authoritative.
-
-References:
-
-- [Stripe ACH Direct Debit](https://docs.stripe.com/payments/ach-direct-debit)
-- [Stripe webhook signature verification](https://docs.stripe.com/webhooks?lang=node)
-
-### Service requests
-
-1. Tenant selects a category and adds description, preferred entry time, and attachments.
-2. System confirms submission and notifies assigned managers.
-3. Manager sets priority, assignment, target date, and status.
-4. Comments and status changes create an auditable timeline.
-5. Tenant receives portal, email, or consented SMS updates.
-6. Tenant may confirm completion or reopen according to policy.
-
-### Email and SMS reminders
-
-Use a provider-neutral notification service:
-
-- existing Gmail sending for initial transactional email;
-- Twilio Messaging Service for optional SMS;
-- in-app notifications for every tenant account;
-- template variables scoped to organization, property, unit, lease, charge, and request;
-- delivery logs with retry and failure information.
-
-SMS must remain opt-in. Store the consent source, wording, timestamp, phone number, and revocation status. Process STOP-like messages immediately and suppress future deliveries.
-
-References:
-
-- [Twilio Messaging Policy](https://www.twilio.com/en-us/legal/messaging-policy)
-- [Twilio Consent Management API](https://www.twilio.com/docs/messaging/features/consent-api)
-
-## Technical Architecture
-
-### Web application
-
-- Add React Router and route guards.
-- Introduce `AppShell`, `ModuleSwitcher`, `ManagerNavigation`, and `TenantNavigation`.
-- Extract current Mail state and effects from `App.tsx` into a `/mail` route and mail-specific hooks.
-- Keep route components lazy-loaded so the Property module does not increase initial Mail startup cost.
-- Split API clients by domain: `mailApi`, `propertyApi`, `tenantApi`, `paymentApi`, and `adminApi`.
-- Preserve responsive layouts and implement tenant pages mobile-first.
-
-### API application
-
-- Split route registration into domain modules instead of continuing to grow `app.ts`.
-- Add property repositories/services behind explicit interfaces.
-- Add centralized organization/resource authorization helpers.
-- Expose payment and messaging webhook routes separately from authenticated UI routes.
-- Verify webhook signatures before parsing or applying events.
-- Require idempotency for charge generation, provider events, reminders, and receipts.
-
-### Database and jobs
-
-SQLite remains suitable for a small, single-instance NAS deployment when kept on a local volume with WAL and tested backups. Use short transactions and indexes beginning with `organization_id` or the primary resource scope.
-
-Critical property jobs must be persisted in SQLite. A scheduler may run in the API process initially, but it must claim jobs transactionally with a lease/lock time so restarts and duplicate workers cannot send duplicate reminders or create duplicate rent charges.
-
-Move to PostgreSQL before multi-instance deployment or materially higher concurrent write volume. Do not advertise PostgreSQL support until the property repositories, migrations, search, tests, backup, and restore paths are implemented for it.
-
-### Deployment
-
-The existing Synology container can host an early single-owner version. Tenant access and provider webhooks require:
-
-- a stable public hostname;
-- HTTPS through a trusted reverse proxy;
-- secure secrets management;
-- public webhook endpoints for payments and SMS;
-- tested automated backups and restore drills;
-- monitoring for failed jobs, failed webhooks, and disk usage;
-- a clear privacy policy and appropriate legal review for leases, rent, fees, and communications.
-
-## Delivery Phases
-
-### Phase 1 — Application shell
-
-- Add URL routing and route-level authorization.
-- Extract Mail and Calendar into independent route modules.
-- Add desktop and mobile module navigation.
-- Preserve all existing Mail behavior and tests.
-
-**Exit criteria:** refreshing `/mail` or `/calendar` restores the correct page; unauthorized modules do not appear or load.
-
-### Phase 2 — Property foundation
-
-- Add organizations, memberships, properties, units, and assignments.
-- Add manager property list, create/edit forms, and property detail page.
-- Add ownership and cross-organization isolation tests.
-
-**Exit criteria:** two managers cannot access each other's property IDs, units, or dashboard counts.
-
-### Phase 3 — Tenant accounts and leases
-
-- Add tenant invitations and hardened public authentication.
-- Add tenant profiles, leases, lease parties, and rent schedules.
-- Add the tenant home page and manager tenant/lease pages.
-
-**Exit criteria:** invited tenants see only their active or explicitly retained historical lease data.
-
-### Phase 4 — Documents
-
-- Generalize blob storage and add document metadata, versions, assignments, and auditing.
-- Add manager upload/preview/share flows.
-- Add tenant view/download/acknowledge flows.
-
-**Exit criteria:** direct document IDs cannot bypass lease or organization permissions; backups include every document blob and metadata row.
-
-### Phase 5 — Service requests
-
-- Add tenant submission, attachments, comments, and status tracking.
-- Add manager board, assignment, filtering, priority, and notifications.
-- Add optional maintenance-user access.
-
-**Exit criteria:** requests have complete history and tenants receive only updates for their own unit.
-
-### Phase 6 — Rent ledger and email reminders
-
-- Generate recurring charges idempotently.
-- Add balances, adjustments, receipts, and overdue state.
-- Add durable notification jobs and email templates.
-
-**Exit criteria:** restarts cannot duplicate charges or reminders; every balance can be reconstructed from ledger entries.
-
-### Phase 7 — Stripe payments
-
-- Add hosted Checkout, card and ACH options, webhook verification, refunds, reconciliation, and payment audit history.
-- Add test-mode simulations for success, delay, failure, refund, and dispute.
-
-**Exit criteria:** browser redirects never mark charges paid; replayed webhook events produce no duplicate ledger entries.
-
-### Phase 8 — SMS and production hardening
-
-- Add Twilio configuration, consent, STOP handling, quiet hours, retries, and delivery history.
-- Add monitoring, security review, restore test, accessibility review, and mobile acceptance testing.
-
-**Exit criteria:** opted-out numbers are suppressed, failed deliveries are visible, and a complete environment can be restored from backup.
-
-## Recommended MVP
-
-The safest useful MVP is Phases 1 through 6:
-
-- multi-page shell;
-- properties and units;
-- tenant invitations and leases;
-- document sharing;
-- service requests;
-- rent ledger;
-- email reminders.
-
-Add live payments and SMS only after tenant isolation, public authentication, HTTPS, backups, and durable background jobs are proven. This keeps the first release valuable without introducing payment and messaging compliance before the core tenancy model is stable.
-
-## Deferred Enhancements
-
-- AI extraction of property, tenant, invoice, and service-request details from selected emails;
-- reviewable AI draft replies for tenant communications;
-- lease renewal workflows and e-signature provider integration;
-- vendor directory and work-order billing;
-- inspection checklists and recurring maintenance;
-- owner statements and accounting exports;
-- multiple independent landlord organizations through Stripe Connect;
-- PostgreSQL and multi-instance workers;
-- native mobile applications.
-
-AI automation should remain reviewable. It may recommend links, categories, requests, reminders, or drafts, but it must not send legal notices, apply fees, change leases, or initiate payments without explicit authorized approval.
+AI may later suggest property links, categories, service requests, reminders, or response drafts. It must remain reviewable and must not send legal notices, apply fees, change leases, or initiate payments without explicit authorized approval.

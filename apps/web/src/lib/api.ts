@@ -62,6 +62,9 @@ import type {
   MessageDraftReplyRequest,
   MessageDraftReplyStart,
   MessageSummary,
+  ManagedProperty,
+  ManagedPropertyCreate,
+  ManagedPropertyPatch,
   NewsHeadline,
   NewsSettingsPatch,
   RuntimeConfig,
@@ -84,6 +87,44 @@ import type {
   SmartMailRuleSuggestionRequest,
   StockQuote,
   StockSettingsPatch,
+  PropertyLease,
+  PropertyLeaseCreate,
+  PropertyInvitationPreview,
+  PropertyDocument,
+  PropertyDocumentMetadata,
+  PropertyIntegrationSettings,
+  PropertyIntegrationSettingsPatch,
+  PropertyLedgerAdjustment,
+  PropertyLedgerEntry,
+  PropertyPlatformOverview,
+  PropertyRentSchedule,
+  PropertyRentScheduleCreate,
+  PropertyRefundRequest,
+  PropertyRefundResult,
+  PropertyRequestAttachment,
+  PropertyRequestComment,
+  PropertyRequestCommentCreate,
+  PropertyTenantInvitation,
+  PropertyTenantInvitationCreate,
+  PropertyCommunicationConsent,
+  PropertyConsentPatch,
+  PropertyAutomationRunResult,
+  PropertyBackupSummary,
+  PropertyPayment,
+  PropertyPaymentCheckoutResult,
+  PropertyPaymentCreate,
+  PropertyPaymentPatch,
+  PropertyPortfolioOverview,
+  PropertyRentCharge,
+  PropertyRentChargeCreate,
+  PropertyServiceRequest,
+  PropertyServiceRequestCreate,
+  PropertyServiceRequestPatch,
+  PropertyTenant,
+  PropertyTenantCreate,
+  PropertyTenantInvitationAccept,
+  PropertyUnit,
+  PropertyUnitCreate,
   TodoCreate,
   TodoItem,
   TodoPatch,
@@ -165,6 +206,195 @@ export class ApiClient {
     return this.request("/api/auth/pin", {
       method: "PATCH",
       body: JSON.stringify({ currentPin, newPin })
+    });
+  }
+
+  previewPropertyInvitation(token: string): Promise<PropertyInvitationPreview> {
+    return this.request(`/api/auth/property-invitations/preview?${queryString({ token })}`);
+  }
+
+  async acceptPropertyInvitation(input: PropertyTenantInvitationAccept): Promise<AuthLoginResult> {
+    const result = await this.request<AuthLoginResult>("/api/auth/property-invitations/accept", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+    this.setAccessToken(result.accessToken);
+    return result;
+  }
+
+  propertyOverview(): Promise<PropertyPortfolioOverview> {
+    return this.request("/api/properties/overview");
+  }
+
+  propertyPlatformOverview(): Promise<PropertyPlatformOverview> {
+    return this.request("/api/property-platform/overview");
+  }
+
+  createPropertyUnit(input: PropertyUnitCreate): Promise<PropertyUnit> {
+    return this.request("/api/property-units", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  createPropertyTenantInvitation(input: PropertyTenantInvitationCreate): Promise<PropertyTenantInvitation> {
+    return this.request("/api/property-tenant-invitations", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  uploadPropertyDocument(metadata: PropertyDocumentMetadata, file: File): Promise<PropertyDocument> {
+    return this.request(`/api/property-documents?${queryString({ metadata: JSON.stringify(metadata), filename: file.name })}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file
+    });
+  }
+
+  uploadPropertyDocumentVersion(documentId: string, file: File): Promise<PropertyDocument> {
+    return this.request(`/api/property-documents/${encodeURIComponent(documentId)}/versions?${queryString({ filename: file.name })}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file
+    });
+  }
+
+  acknowledgePropertyDocument(documentId: string): Promise<PropertyDocument> {
+    return this.request(`/api/property-documents/${encodeURIComponent(documentId)}/acknowledge`, { method: "POST" });
+  }
+
+  propertyDocumentBlob(versionId: string, inline = false): Promise<Blob> {
+    return this.blobRequest(`/api/property-document-versions/${encodeURIComponent(versionId)}/content?${queryString({ disposition: inline ? "inline" : "attachment" })}`);
+  }
+
+  addPropertyRequestComment(requestId: string, input: PropertyRequestCommentCreate): Promise<PropertyRequestComment> {
+    return this.request(`/api/property-service-requests/${encodeURIComponent(requestId)}/comments`, {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  uploadPropertyRequestAttachment(requestId: string, file: File): Promise<PropertyRequestAttachment> {
+    return this.request(`/api/property-service-requests/${encodeURIComponent(requestId)}/attachments?${queryString({ filename: file.name })}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file
+    });
+  }
+
+  propertyRequestAttachmentBlob(attachmentId: string, inline = false): Promise<Blob> {
+    return this.blobRequest(`/api/property-request-attachments/${encodeURIComponent(attachmentId)}/content?${queryString({ disposition: inline ? "inline" : "attachment" })}`);
+  }
+
+  createPropertyRentSchedule(input: PropertyRentScheduleCreate): Promise<PropertyRentSchedule> {
+    return this.request("/api/property-rent-schedules", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  createPropertyLedgerAdjustment(input: PropertyLedgerAdjustment): Promise<PropertyLedgerEntry> {
+    return this.request("/api/property-ledger/adjustments", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updatePropertyConsent(input: PropertyConsentPatch): Promise<PropertyCommunicationConsent> {
+    return this.request("/api/property-consents", { method: "PUT", body: JSON.stringify(input) });
+  }
+
+  updatePropertyIntegrations(input: PropertyIntegrationSettingsPatch): Promise<PropertyIntegrationSettings> {
+    return this.request("/api/admin/property-integrations", { method: "PATCH", body: JSON.stringify(input) });
+  }
+
+  async downloadPropertyFinancialReport(): Promise<void> {
+    const response = await fetch(`${this.config.apiBaseUrl}/api/property-reports/financial.csv`, {
+      credentials: "same-origin",
+      headers: this.headers(undefined, false)
+    });
+    if (!response.ok) throw await responseError(response);
+    downloadBlob(await response.blob(), `property-ledger-${new Date().toISOString().slice(0, 10)}.csv`);
+  }
+
+  runPropertyAutomation(): Promise<PropertyAutomationRunResult> {
+    return this.request("/api/property-automation/run", { method: "POST" });
+  }
+
+  listPropertyBackups(): Promise<PropertyBackupSummary[]> {
+    return this.request("/api/admin/property-backups");
+  }
+
+  createPropertyBackup(): Promise<PropertyBackupSummary> {
+    return this.request("/api/admin/property-backups", { method: "POST" });
+  }
+
+  createProperty(input: ManagedPropertyCreate): Promise<ManagedProperty> {
+    return this.request("/api/properties", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateProperty(propertyId: string, input: ManagedPropertyPatch): Promise<ManagedProperty> {
+    return this.request(`/api/properties/${encodeURIComponent(propertyId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  async propertyPhoto(propertyId: string): Promise<Blob> {
+    const response = await fetch(
+      `${this.config.apiBaseUrl}/api/properties/${encodeURIComponent(propertyId)}/photo`,
+      { headers: this.headers(undefined, false) }
+    );
+    if (!response.ok) throw await responseError(response);
+    return response.blob();
+  }
+
+  uploadPropertyPhoto(propertyId: string, image: File): Promise<ManagedProperty> {
+    return this.request(`/api/properties/${encodeURIComponent(propertyId)}/photo`, {
+      method: "PUT",
+      headers: { "Content-Type": image.type },
+      body: image
+    });
+  }
+
+  createPropertyTenant(input: PropertyTenantCreate): Promise<PropertyTenant> {
+    return this.request("/api/property-tenants", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  createPropertyLease(input: PropertyLeaseCreate): Promise<PropertyLease> {
+    return this.request("/api/property-leases", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  createPropertyServiceRequest(input: PropertyServiceRequestCreate): Promise<PropertyServiceRequest> {
+    return this.request("/api/property-service-requests", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updatePropertyServiceRequest(
+    requestId: string,
+    input: PropertyServiceRequestPatch
+  ): Promise<PropertyServiceRequest> {
+    return this.request(`/api/property-service-requests/${encodeURIComponent(requestId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  createPropertyRentCharge(input: PropertyRentChargeCreate): Promise<PropertyRentCharge> {
+    return this.request("/api/property-rent-charges", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  createPropertyPayment(input: PropertyPaymentCreate): Promise<PropertyPayment> {
+    return this.request("/api/property-payments", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updatePropertyPayment(paymentId: string, input: PropertyPaymentPatch): Promise<PropertyPayment> {
+    return this.request(`/api/property-payments/${encodeURIComponent(paymentId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  createPropertyPaymentCheckout(paymentId: string): Promise<PropertyPaymentCheckoutResult> {
+    return this.request(`/api/property-payments/${encodeURIComponent(paymentId)}/checkout`, { method: "POST" });
+  }
+
+  syncPropertyPayment(paymentId: string): Promise<PropertyPayment> {
+    return this.request(`/api/property-payments/${encodeURIComponent(paymentId)}/sync`, { method: "POST" });
+  }
+
+  refundPropertyPayment(paymentId: string, input: PropertyRefundRequest): Promise<PropertyRefundResult> {
+    return this.request(`/api/property-payments/${encodeURIComponent(paymentId)}/refund`, {
+      method: "POST",
+      body: JSON.stringify(input)
     });
   }
 
@@ -1125,6 +1355,15 @@ export class ApiClient {
     return this.requestWithContext(path, init, diagnosticContext);
   }
 
+  private async blobRequest(path: string): Promise<Blob> {
+    const response = await fetch(`${this.config.apiBaseUrl}${path}`, {
+      credentials: "same-origin",
+      headers: this.headers(undefined, false)
+    });
+    if (!response.ok) throw await responseError(response);
+    return response.blob();
+  }
+
   private async requestWithContext<T>(
     path: string,
     init: RequestInit = {},
@@ -1133,6 +1372,7 @@ export class ApiClient {
     try {
       const response = await fetch(`${this.config.apiBaseUrl}${path}`, {
         ...init,
+        credentials: "same-origin",
         headers: this.headers(
           init.headers,
           init.body !== undefined && init.body !== null && !(init.body instanceof FormData)
@@ -1204,6 +1444,15 @@ function queryString(values: Record<string, unknown>): string {
     params.set(key, String(value));
   }
   return params.toString();
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 async function responseError(response: Response): Promise<Error> {

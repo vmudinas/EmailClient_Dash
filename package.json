@@ -14,6 +14,7 @@
     "start": "npm run start:built",
     "start:fresh": "npm run build && npm run start:built",
     "start:built": "node start.mjs",
+    "db:migrate:postgres": "node deploy/scripts/migrate-sqlite-to-postgres.mjs",
     "test": "npm run test -w @email-client/api && npm run test -w @email-client/web",
     "test:run": "npm run test:run -w @email-client/api && npm run test:run -w @email-client/web",
     "typecheck": "npm run build -w @email-client/shared && npm run typecheck -w @email-client/api && npm run build -w @email-client/api && npm run typecheck -w @email-client/web && npm run typecheck -w @email-client/desktop"

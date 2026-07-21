@@ -427,18 +427,27 @@ export class EmailDatabase {
   readonly path: string;
   private readonly db: SqliteDatabase;
   private readonly inboxTabSettingsCache = new Map<string, InboxTabSettings>();
+  private insertBatchCache: {
+    senderRules: Map<string, Map<string, string>>;
+    smartRules: Map<string, SmartMailRule[]>;
+  } | null = null;
 
   constructor(dataDir: string, filename = "archive-mail.sqlite", options: EmailDatabaseOptions = {}) {
     this.path = resolve(dataDir, filename);
     mkdirSync(dirname(this.path), { recursive: true });
     this.db = new BetterSqlite3(this.path);
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
     // The import and mailbox-task worker threads open their own connections to this
     // file, and on slow disks (e.g. a NAS) one of their chunk transactions can hold
     // the write lock well past 5s — long enough that concurrent writers were failing
     // with SQLITE_BUSY instead of waiting their turn.
     this.db.pragma("busy_timeout = 30000");
+    this.db.pragma("temp_store = MEMORY");
+    this.db.pragma("cache_size = -65536");
+    this.db.pragma("wal_autocheckpoint = 2000");
+    this.db.pragma("journal_size_limit = 67108864");
     if (options.migrate !== false) this.migrate();
     if (options.recoverInterruptedJobs !== false) this.recoverInterruptedJobs();
   }
@@ -5453,16 +5462,11 @@ export class EmailDatabase {
     }
     const senderAddress = input.sender.address.trim().toLowerCase();
     const isInbox = requestedFolder.name.trim().toLowerCase() === "inbox";
-    const matchingRule = isInbox && senderAddress
-      ? this.db.prepare(`
-          SELECT r.folder_id FROM sender_filing_rules r
-          JOIN folders f ON f.id = r.folder_id
-          WHERE r.archive_id = ? AND r.sender_address = ? AND f.archive_id = ?
-          LIMIT 1
-        `).get(input.archiveId, senderAddress, input.archiveId) as Row | undefined
+    const matchingRuleFolderId = isInbox && senderAddress
+      ? this.senderRuleFolderForInsert(input.archiveId, senderAddress)
       : undefined;
     const matchingSmartRules = isInbox
-      ? this.listSmartMailRules(input.archiveId).filter((rule) => rule.enabled && smartMailRuleMatches(rule, {
+      ? this.smartRulesForInsert(input.archiveId).filter((rule) => rule.enabled && smartMailRuleMatches(rule, {
           senderAddress: input.sender.address,
           subject: input.subject,
           bodyText: input.bodyText,
@@ -5470,8 +5474,8 @@ export class EmailDatabase {
         }))
       : [];
     const smartTargetFolderId = matchingSmartRules.find((rule) => rule.targetFolderId)?.targetFolderId ?? null;
-    const effectiveFolderId = matchingRule
-      ? String(matchingRule.folder_id)
+    const effectiveFolderId = matchingRuleFolderId
+      ? matchingRuleFolderId
       : smartTargetFolderId ?? input.folderId;
     const folder = effectiveFolderId === input.folderId
       ? requestedFolder
@@ -5613,6 +5617,57 @@ export class EmailDatabase {
     });
 
     return insert();
+  }
+
+  insertMessages(inputs: MessageInput[]): string[] {
+    if (inputs.length === 0) return [];
+    const previousCache = this.insertBatchCache;
+    this.insertBatchCache = { senderRules: new Map(), smartRules: new Map() };
+    try {
+      const insertBatch = this.db.transaction((rows: MessageInput[]) => rows.map((row) => this.insertMessage(row)));
+      return insertBatch(inputs);
+    } finally {
+      this.insertBatchCache = previousCache;
+    }
+  }
+
+  optimizeAfterBulkWrite(): void {
+    this.db.pragma("optimize");
+    this.db.pragma("wal_checkpoint(PASSIVE)");
+  }
+
+  private senderRuleFolderForInsert(archiveId: string, senderAddress: string): string | undefined {
+    if (!this.insertBatchCache) {
+      const row = this.db.prepare(`
+        SELECT r.folder_id FROM sender_filing_rules r
+        JOIN folders f ON f.id = r.folder_id
+        WHERE r.archive_id = ? AND r.sender_address = ? AND f.archive_id = ?
+        LIMIT 1
+      `).get(archiveId, senderAddress, archiveId) as Row | undefined;
+      return row ? String(row.folder_id) : undefined;
+    }
+    let rules = this.insertBatchCache.senderRules.get(archiveId);
+    if (!rules) {
+      const rows = this.db.prepare(`
+        SELECT lower(trim(r.sender_address)) AS sender_address, r.folder_id
+        FROM sender_filing_rules r
+        JOIN folders f ON f.id = r.folder_id
+        WHERE r.archive_id = ? AND f.archive_id = ?
+      `).all(archiveId, archiveId) as Row[];
+      rules = new Map(rows.map((row) => [String(row.sender_address), String(row.folder_id)]));
+      this.insertBatchCache.senderRules.set(archiveId, rules);
+    }
+    return rules.get(senderAddress);
+  }
+
+  private smartRulesForInsert(archiveId: string): SmartMailRule[] {
+    if (!this.insertBatchCache) return this.listSmartMailRules(archiveId);
+    let rules = this.insertBatchCache.smartRules.get(archiveId);
+    if (!rules) {
+      rules = this.listSmartMailRules(archiveId);
+      this.insertBatchCache.smartRules.set(archiveId, rules);
+    }
+    return rules;
   }
 
   hasMessage(archiveId: string, sourceKey: string): boolean {

@@ -29,6 +29,29 @@ services:
       GMAIL_SYNC_MAILBOX_ACTIONS: "${GMAIL_SYNC_MAILBOX_ACTIONS:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:-}"
+      PAYPAL_CLIENT_ID: "${PAYPAL_CLIENT_ID:-}"
+      PAYPAL_CLIENT_SECRET: "${PAYPAL_CLIENT_SECRET:-}"
+      PAYPAL_ENVIRONMENT: "${PAYPAL_ENVIRONMENT:-sandbox}"
+      PAYPAL_WEBHOOK_ID: "${PAYPAL_WEBHOOK_ID:-}"
+      ZELLE_RECIPIENT: "${ZELLE_RECIPIENT:-}"
+      ZELLE_PAYMENT_NOTE: "${ZELLE_PAYMENT_NOTE:-}"
+      TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID:-}"
+      TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN:-}"
+      TWILIO_MESSAGING_SERVICE_SID: "${TWILIO_MESSAGING_SERVICE_SID:-}"
+      PROPERTY_GMAIL_CONNECTION_ID: "${PROPERTY_GMAIL_CONNECTION_ID:-}"
+      PROPERTY_AUTOMATION_INTERVAL_MINUTES: "${PROPERTY_AUTOMATION_INTERVAL_MINUTES:-5}"
+      PROPERTY_BACKUP_RETENTION: "${PROPERTY_BACKUP_RETENTION:-7}"
+      EMAIL_IMPORT_CONCURRENCY: "${EMAIL_IMPORT_CONCURRENCY:-1}"
+      EMAIL_IMPORT_BATCH_SIZE: "${EMAIL_IMPORT_BATCH_SIZE:-50}"
+      EMAIL_IMPORT_THROTTLE_MS: "${EMAIL_IMPORT_THROTTLE_MS:-5}"
+      EMAIL_IMPORT_LATENCY_THRESHOLD_MS: "${EMAIL_IMPORT_LATENCY_THRESHOLD_MS:-250}"
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: "${POSTGRES_DB:-archive_mail}"
+      PGUSER: "${POSTGRES_USER:-archive_mail}"
+      PGPASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/.env}"
     volumes:
       - type: bind
         source: "${ARCHIVE_MAIL_DATA_DIR:?ARCHIVE_MAIL_DATA_DIR must be set in deploy/.env}"
@@ -46,6 +69,31 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: archive-mail-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-archive_mail}"
+      POSTGRES_USER: "${POSTGRES_USER:-archive_mail}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/.env}"
+    volumes:
+      - type: bind
+        source: "${ARCHIVE_MAIL_POSTGRES_DIR:?ARCHIVE_MAIL_POSTGRES_DIR must be set in deploy/.env}"
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: json-file
       options:

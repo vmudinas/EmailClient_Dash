@@ -1,11 +1,12 @@
 # Archive Mail server deployment
 
-This deployment runs the API, scheduler, Gmail sync, import workers, and static web UI in one production container. The Electron desktop application is not included. All durable state lives in one host directory mounted at `/data`.
+This deployment runs the API, scheduler, Gmail sync, import workers, and static web UI in one production container, plus a private PostgreSQL container used as the migration target. The Electron desktop application is not included. SQLite and uploaded content remain under `/data`; PostgreSQL uses its own host directory.
 
 ## Requirements
 
 - Docker Engine with Docker Compose, or Synology DSM 7 Container Manager.
 - A writable local-disk directory for SQLite, blobs, uploads, OAuth tokens, saved API keys, and settings.
+- A second writable local-disk directory for PostgreSQL and a long random `POSTGRES_PASSWORD`.
 - A reverse proxy with HTTPS when the app is accessed outside a trusted LAN or when Gmail is authorized from another computer.
 
 Do not place the data directory on NFS, SMB, Synology Drive, Cloud Sync, or another synchronized/network filesystem. SQLite and its WAL files need local filesystem semantics.
@@ -45,7 +46,34 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml restart archive-mai
 
 Run `./deploy/scripts/deploy.sh` again after pulling source changes. It rebuilds the production image, recreates the service, and waits for `/api/health` to report healthy.
 
-Database migrations run automatically when the recreated container starts. On the first build containing private user workspaces, existing mail and account configuration are assigned to the first active administrator; newly created users begin with empty private mail and calendar workspaces.
+SQLite schema migrations run automatically when the recreated container starts. On the first build containing private user workspaces, existing mail and account configuration are assigned to the first active administrator; newly created users begin with empty private mail and calendar workspaces.
+
+## Large imports
+
+Imports parse and extract attachments in Node worker threads with a separate SQLite connection. SQLite permits one writer, so the production defaults run one database-writing import at a time and commit messages in short batches. This prevents multiple imports from fighting over the same write lock while preserving resumable checkpoints.
+
+```dotenv
+EMAIL_IMPORT_CONCURRENCY=1
+EMAIL_IMPORT_BATCH_SIZE=50
+EMAIL_IMPORT_THROTTLE_MS=5
+EMAIL_IMPORT_LATENCY_THRESHOLD_MS=250
+```
+
+When an API request exceeds the latency threshold, the import worker temporarily increases the pause between batches. Current active/queued workers, batch size, and throttle state are shown under **Admin settings > Database** and returned by `GET /api/import-jobs-runtime`.
+
+## PostgreSQL container and data migration
+
+Compose starts a private `postgres:17-alpine` service without publishing port `5432`. Set `ARCHIVE_MAIL_POSTGRES_DIR`, `POSTGRES_DB`, `POSTGRES_USER`, and a long random `POSTGRES_PASSWORD` in `deploy/.env`.
+
+To stop Archive Mail, copy all non-FTS SQLite tables into PostgreSQL, recreate compatible indexes and foreign keys, add PostgreSQL full-text indexes, validate every table's row count, and restart the application:
+
+```bash
+./deploy/scripts/migrate-to-postgres.sh
+```
+
+The migration is repeatable and replaces the PostgreSQL `archive_mail` schema when `--reset` is used by the wrapper. Attachment bytes remain under `/data/blobs`; database rows retain their content-addressed blob references.
+
+**Runtime status:** the PostgreSQL container and validated data migration are implemented, but the existing `EmailStore` contract is synchronous and backed by `better-sqlite3`. Archive Mail therefore continues serving SQLite after the copy. Selecting PostgreSQL in Admin settings remains disabled until the API storage contract and all service/database calls are converted to the asynchronous PostgreSQL adapter. The migration target is a safe cutover rehearsal and backup, not yet the active runtime database.
 
 ## Synology NAS
 
@@ -59,6 +87,8 @@ Database migrations run automatically when the recreated container starts. On th
 ```dotenv
 ARCHIVE_MAIL_DATA_DIR=/volume1/docker/archive-mail/data
 ARCHIVE_MAIL_BACKUP_DIR=/volume1/docker/archive-mail/backups
+ARCHIVE_MAIL_POSTGRES_DIR=/volume1/docker/archive-mail/postgres
+POSTGRES_PASSWORD=replace-with-a-long-random-password
 ARCHIVE_MAIL_UID=1026
 ARCHIVE_MAIL_GID=100
 ARCHIVE_MAIL_BIND_ADDRESS=0.0.0.0
@@ -171,6 +201,22 @@ Environment-managed Gmail credentials make those Admin fields read-only. Leaving
 
 Leave `OPENAI_API_KEY` and `DEEPSEEK_API_KEY` unset to enter keys under **Admin settings > AI**. Set them in `deploy/.env` only when environment management is preferred. The `.env` file and every backup contain sensitive credentials and mail data; restrict access accordingly.
 
+## Property payments and reminders
+
+Property integrations can be configured under **Properties > Communications > Configure**, or with the environment variables listed in [`deploy/.env.example`](.env.example). Admin-saved values take precedence over environment fallbacks and are stored in the persistent data directory.
+
+With `EMAIL_CLIENT_PUBLIC_URL=https://mail.example.com`, configure these exact HTTPS callbacks:
+
+```text
+Stripe: https://mail.example.com/api/property-webhooks/stripe
+PayPal: https://mail.example.com/api/property-webhooks/paypal
+Twilio: https://mail.example.com/api/property-webhooks/twilio/inbound
+```
+
+Set `STRIPE_WEBHOOK_SECRET` to Stripe's endpoint signing secret and `PAYPAL_WEBHOOK_ID` to the created PayPal webhook ID. Twilio's incoming-message callback uses the account auth token to validate `X-Twilio-Signature`. The property automation interval defaults to five minutes and can be changed with `PROPERTY_AUTOMATION_INTERVAL_MINUTES`.
+
+Run a provider test-mode transaction before enabling live payments. Browser redirects do not mark payments successful; verified provider state is authoritative. SMS reminders require an explicit opt-in recorded in the Communications tab, and STOP-like inbound messages revoke consent.
+
 ## Backups and restore
 
 Create a consistent backup:
@@ -179,7 +225,13 @@ Create a consistent backup:
 ./deploy/scripts/backup.sh
 ```
 
-The backup script gracefully stops the container so SQLite checkpoints and closes its WAL, archives the complete data directory, restarts the service, and removes backups older than `ARCHIVE_MAIL_BACKUP_RETENTION_DAYS`.
+The backup script gracefully stops the application so SQLite checkpoints and closes its WAL, archives the complete `/data` directory, restarts the service, and removes backups older than `ARCHIVE_MAIL_BACKUP_RETENTION_DAYS`. Until PostgreSQL becomes the active runtime adapter, create an additional PostgreSQL dump after each migration rehearsal:
+
+```bash
+docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T postgres \
+  pg_dump -U archive_mail -d archive_mail --clean --if-exists --no-owner \
+  | gzip > /srv/archive-mail/backups/archive-mail-postgres.sql.gz
+```
 
 Restore a backup:
 
@@ -188,6 +240,8 @@ Restore a backup:
 ```
 
 Restore creates a separate safety backup of the current data first. Test restores periodically and copy backups to another physical device.
+
+Administrators can also create an online property restore point under **Properties > Communications > Backups**. These snapshots are kept under `/data/property-backups` and include SQLite, property documents, request attachments, photos, and relevant integration settings. `PROPERTY_BACKUP_RETENTION` controls the number retained. They complement rather than replace the full stopped-container backup above.
 
 ## Security checklist
 

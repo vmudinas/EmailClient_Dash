@@ -6,6 +6,10 @@ interface ImportWorkerData {
   databasePath: string;
   blobDataDir: string;
   jobId: string;
+  batchSize: number;
+  throttleMs: number;
+  latencyThresholdMs: number;
+  pressureBuffer: SharedArrayBuffer;
 }
 
 const input = workerData as ImportWorkerData;
@@ -32,7 +36,13 @@ async function run(): Promise<void> {
     recoverInterruptedJobs: false
   });
   const blobs = new BlobStore(input.blobDataDir);
-  const importService = new ImportService(database, blobs, { useWorker: false });
+  const importService = new ImportService(database, blobs, {
+    useWorker: false,
+    batchSize: input.batchSize,
+    throttleMs: input.throttleMs,
+    latencyThresholdMs: input.latencyThresholdMs,
+    pressureSignal: new Int32Array(input.pressureBuffer)
+  });
   service = importService;
   let failure: { error: string; stack: string | null } | null = null;
   try {

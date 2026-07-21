@@ -15,7 +15,8 @@ import {
   UNKNOWN_DATE_FOLDER_NAME,
   type AttachmentInput,
   type EmailStore,
-  type ImportJobRecord
+  type ImportJobRecord,
+  type MessageInput
 } from "../storage/database.js";
 import { AttachmentTextExtractor } from "./attachment-text.js";
 import { fingerprintArchive } from "./archive-fingerprint.js";
@@ -26,6 +27,21 @@ export class UnsupportedArchiveError extends Error {}
 
 export interface ImportServiceOptions {
   useWorker?: boolean;
+  concurrency?: number;
+  batchSize?: number;
+  throttleMs?: number;
+  latencyThresholdMs?: number;
+  pressureSignal?: Int32Array;
+}
+
+export interface ImportRuntimeStatus {
+  activeJobs: number;
+  queuedJobs: number;
+  concurrency: number;
+  batchSize: number;
+  throttleMs: number;
+  latencyThresholdMs: number;
+  throttledForApiLatency: boolean;
 }
 
 export class ImportService {
@@ -34,12 +50,25 @@ export class ImportService {
   private readonly folderCache = new Map<string, Map<string, string>>();
   private readonly workers = new Map<string, Worker>();
   private readonly extractor = new AttachmentTextExtractor();
+  private readonly queue: string[] = [];
+  private readonly concurrency: number;
+  private readonly batchSize: number;
+  private readonly throttleMs: number;
+  private readonly latencyThresholdMs: number;
+  private readonly pressureSignal: Int32Array;
+  private closed = false;
 
   constructor(
     readonly database: EmailStore,
     readonly blobStore: BlobStore,
     private readonly options: ImportServiceOptions = {}
-  ) {}
+  ) {
+    this.concurrency = boundedInteger(options.concurrency, 1, 1, 4);
+    this.batchSize = boundedInteger(options.batchSize, 50, 10, 500);
+    this.throttleMs = boundedInteger(options.throttleMs, 5, 0, 1_000);
+    this.latencyThresholdMs = boundedInteger(options.latencyThresholdMs, 250, 25, 10_000);
+    this.pressureSignal = options.pressureSignal ?? new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  }
 
   async initialize(): Promise<void> {
     await this.blobStore.initialize();
@@ -94,6 +123,7 @@ export class ImportService {
     const controller = this.controllers.get(jobId);
     if (controller) controller.abort();
     this.workers.get(jobId)?.postMessage({ type: "cancel" });
+    this.removeQueuedJob(jobId);
     const cancelled = this.database.updateImportJob(jobId, {
       status: "cancelled",
       canResume: true,
@@ -169,6 +199,7 @@ export class ImportService {
     for (const job of jobs) {
       this.controllers.get(job.id)?.abort();
       this.workers.get(job.id)?.postMessage({ type: "cancel" });
+      this.removeQueuedJob(job.id);
     }
     await Promise.allSettled(
       jobs.map((job) => this.runs.get(job.id)).filter((run): run is Promise<void> => Boolean(run))
@@ -214,7 +245,20 @@ export class ImportService {
     signal: AbortSignal;
     onAttachmentError?(error: unknown, attachment: RawAttachment): void;
   }): Promise<boolean> {
-    if (this.database.hasMessage(input.archiveId, input.message.sourceKey)) return false;
+    const prepared = await this.prepareNormalizedMessage(input);
+    if (!prepared) return false;
+    this.database.insertMessage(prepared);
+    return true;
+  }
+
+  private async prepareNormalizedMessage(input: {
+    archiveId: string;
+    message: NormalizedMessage;
+    ocrEnabled: boolean;
+    signal: AbortSignal;
+    onAttachmentError?(error: unknown, attachment: RawAttachment): void;
+  }): Promise<MessageInput | null> {
+    if (this.database.hasMessage(input.archiveId, input.message.sourceKey)) return null;
     const folderId = this.ensureFolderPath(
       input.archiveId,
       destinationFolderPath(input.message)
@@ -230,7 +274,7 @@ export class ImportService {
       )
     );
 
-    this.database.insertMessage({
+    return {
       archiveId: input.archiveId,
       folderId,
       inboxCategory: input.message.inboxCategory,
@@ -248,8 +292,7 @@ export class ImportService {
       headers: input.message.headers,
       sizeBytes: input.message.sizeBytes,
       attachments
-    });
-    return true;
+    };
   }
 
   invalidateFolderCache(archiveId: string): void {
@@ -257,6 +300,7 @@ export class ImportService {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     for (const controller of this.controllers.values()) controller.abort();
     for (const worker of this.workers.values()) worker.postMessage({ type: "cancel" });
     await Promise.allSettled(this.runs.values());
@@ -267,15 +311,61 @@ export class ImportService {
     this.controllers.get(jobId)?.abort();
   }
 
+  recordApiLatency(elapsedMs: number): void {
+    if (!Number.isFinite(elapsedMs) || elapsedMs < this.latencyThresholdMs) return;
+    Atomics.store(this.pressureSignal, 0, Math.floor(Date.now() / 1_000) + 5);
+  }
+
+  status(): ImportRuntimeStatus {
+    return {
+      activeJobs: this.runs.size,
+      queuedJobs: this.queue.length,
+      concurrency: this.concurrency,
+      batchSize: this.batchSize,
+      throttleMs: this.throttleMs,
+      latencyThresholdMs: this.latencyThresholdMs,
+      throttledForApiLatency: this.isUnderApiPressure()
+    };
+  }
+
   private launchJob(jobId: string): void {
-    if (this.runs.has(jobId)) return;
-    const run = this.options.useWorker === false
-      ? this.runJobInCurrentThread(jobId)
-      : this.runJobInWorker(jobId);
-    this.runs.set(jobId, run);
-    void run.finally(() => {
-      if (this.runs.get(jobId) === run) this.runs.delete(jobId);
-    }).catch(() => undefined);
+    if (this.closed || this.runs.has(jobId) || this.queue.includes(jobId)) return;
+    this.queue.push(jobId);
+    this.refreshQueueMessages();
+    this.pumpQueue();
+  }
+
+  private pumpQueue(): void {
+    while (!this.closed && this.runs.size < this.concurrency && this.queue.length > 0) {
+      const jobId = this.queue.shift()!;
+      const job = this.database.getImportJob(jobId);
+      if (!job || job.status !== "queued") continue;
+      const run = this.options.useWorker === false
+        ? this.runJobInCurrentThread(jobId)
+        : this.runJobInWorker(jobId);
+      this.runs.set(jobId, run);
+      void run.finally(() => {
+        if (this.runs.get(jobId) === run) this.runs.delete(jobId);
+        this.refreshQueueMessages();
+        this.pumpQueue();
+      }).catch(() => undefined);
+    }
+    this.refreshQueueMessages();
+  }
+
+  private refreshQueueMessages(): void {
+    for (const [index, jobId] of this.queue.entries()) {
+      const job = this.database.getImportJob(jobId);
+      if (!job || job.status !== "queued") continue;
+      const message = `Queued for import · position ${index + 1}`;
+      if (job.message !== message) this.database.updateImportJob(jobId, { phase: "queued", message });
+    }
+  }
+
+  private removeQueuedJob(jobId: string): void {
+    const index = this.queue.indexOf(jobId);
+    if (index >= 0) this.queue.splice(index, 1);
+    this.refreshQueueMessages();
   }
 
   async runJobInCurrentThread(jobId: string): Promise<void> {
@@ -339,6 +429,33 @@ export class ImportService {
       let latestProcessed = startAfterMessage;
       let latestTotal: number | null = knownTotal;
       let latestSourceOffset = Number(job.checkpoint.sourceOffset ?? 0);
+      let durableProcessed = startAfterMessage;
+      let durableSourceOffset = latestSourceOffset;
+      let messagesSinceFlush = 0;
+      const pendingMessages: MessageInput[] = [];
+      const flushBatch = async () => {
+        if (pendingMessages.length > 0) {
+          this.database.insertMessages(pendingMessages.splice(0));
+        }
+        durableProcessed = latestProcessed;
+        durableSourceOffset = latestSourceOffset;
+        messagesSinceFlush = 0;
+        lastProgressWrite = Date.now();
+        this.database.updateImportJob(jobId, {
+          processedItems: durableProcessed,
+          totalItems: latestTotal,
+          processedBytes: job.sourceType === "mbox" ? durableSourceOffset : 0,
+          checkpoint: { messageIndex: durableProcessed, sourceOffset: durableSourceOffset },
+          message: this.isUnderApiPressure()
+            ? "Importing messages · throttled to keep the app responsive"
+            : "Importing messages"
+        });
+        const pauseMs = this.isUnderApiPressure()
+          ? Math.max(50, this.throttleMs * 10)
+          : this.throttleMs;
+        if (pauseMs > 0) await delay(pauseMs);
+        await yieldToEventLoop();
+      };
       const context: ImporterContext = {
         signal: controller.signal,
         sourceName: job.sourceName,
@@ -352,17 +469,23 @@ export class ImportService {
           if (controller.signal.aborted) throw abortError();
           latestProcessed = index + 1;
           latestSourceOffset = sourceOffset;
-          await this.persistMessage(job, message, controller.signal);
-          if (Date.now() - lastProgressWrite > 200) {
-            lastProgressWrite = Date.now();
-            this.database.updateImportJob(jobId, {
-              processedItems: index + 1,
-              processedBytes: job.sourceType === "mbox" ? sourceOffset : 0,
-              checkpoint: { messageIndex: index + 1, sourceOffset },
-              message: "Importing messages"
-            });
-          }
-          if ((index + 1) % 250 === 0) await yieldToEventLoop();
+          const prepared = await this.prepareNormalizedMessage({
+            archiveId: job.archiveId,
+            message,
+            ocrEnabled: job.ocrEnabled,
+            signal: controller.signal,
+            onAttachmentError: (error, attachment) => {
+              this.database.addImportError(
+                job.id,
+                "attachment",
+                `${attachment.filename}: ${errorMessage(error)}`,
+                message.sourceKey
+              );
+            }
+          });
+          if (prepared) pendingMessages.push(prepared);
+          messagesSinceFlush += 1;
+          if (messagesSinceFlush >= this.batchSize) await flushBatch();
         },
         onTotal: (total: number) => {
           latestTotal = total;
@@ -380,10 +503,10 @@ export class ImportService {
           if (Date.now() - lastProgressWrite <= 200) return;
           lastProgressWrite = Date.now();
           this.database.updateImportJob(jobId, {
-            processedItems: reportedProcessed,
+            processedItems: durableProcessed,
             totalItems: total,
-            processedBytes: job.sourceType === "mbox" ? sourceOffset : 0,
-            checkpoint: { messageIndex: reportedProcessed, sourceOffset }
+            processedBytes: job.sourceType === "mbox" ? durableSourceOffset : 0,
+            checkpoint: { messageIndex: durableProcessed, sourceOffset: durableSourceOffset }
           });
         },
         onError: (stage: string, error: unknown, sourceKey?: string) => {
@@ -398,13 +521,14 @@ export class ImportService {
       }
 
       if (controller.signal.aborted) throw abortError();
+      if (messagesSinceFlush > 0) await flushBatch();
       this.database.updateImportJob(jobId, {
-        processedItems: latestProcessed,
+        processedItems: durableProcessed,
         totalItems: latestTotal,
         processedBytes: file.size,
         checkpoint: {
-          messageIndex: latestProcessed,
-          sourceOffset: latestSourceOffset
+          messageIndex: durableProcessed,
+          sourceOffset: durableSourceOffset
         }
       });
       this.database.updateImportJob(jobId, {
@@ -415,6 +539,7 @@ export class ImportService {
       const finishedJob = this.database.getImportJob(jobId)!;
       const replaceArchiveId = this.database.getReplaceArchiveId(job.archiveId);
       this.database.completeArchive(job.archiveId, finishedJob.errorCount);
+      this.database.optimizeAfterBulkWrite();
 
       if (replaceArchiveId) {
         this.database.copyMessageState(replaceArchiveId, job.archiveId);
@@ -440,7 +565,11 @@ export class ImportService {
         jobId,
         archiveId: job.archiveId,
         sourceName: job.sourceName,
-        context: { processedItems: latestProcessed, errorCount: finishedJob.errorCount }
+        context: {
+          processedItems: durableProcessed,
+          errorCount: finishedJob.errorCount,
+          batchSize: this.batchSize
+        }
       });
 
       if (job.temporarySource) await rm(job.sourcePath, { force: true });
@@ -483,7 +612,11 @@ export class ImportService {
     const worker = createServiceWorker(import.meta.url, "./import-worker.ts", "./import-worker.js", {
       databasePath: this.database.path,
       blobDataDir: dirname(this.blobStore.rootDir),
-      jobId
+      jobId,
+      batchSize: this.batchSize,
+      throttleMs: this.throttleMs,
+      latencyThresholdMs: this.latencyThresholdMs,
+      pressureBuffer: this.pressureSignal.buffer
     });
     this.workers.set(jobId, worker);
     try {
@@ -638,6 +771,10 @@ export class ImportService {
     if (!job) throw new Error(`Import job ${jobId} not found`);
     return job;
   }
+
+  private isUnderApiPressure(): boolean {
+    return Atomics.load(this.pressureSignal, 0) >= Math.floor(Date.now() / 1_000);
+  }
 }
 
 function destinationFolderPath(message: NormalizedMessage): string {
@@ -686,4 +823,13 @@ function abortError(): Error {
   const error = new Error("Import cancelled");
   error.name = "AbortError";
   return error;
+}
+
+function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(value!)));
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

@@ -154,6 +154,22 @@ export class AuthService {
     });
   }
 
+  createInvitedUser(input: { username: string; displayName: string; password: string }): UserSummary {
+    if (this.database.getUserRecordByUsername(input.username)) {
+      throw new AuthConflictError("That username already exists");
+    }
+    const hashed = hashPin(input.password);
+    return this.database.createUser({
+      username: input.username,
+      displayName: input.displayName,
+      role: "user",
+      pinHash: hashed.hash,
+      pinSalt: hashed.salt,
+      mustChangePin: false,
+      allowedScreens: ["properties"]
+    });
+  }
+
   updateUser(id: string, update: UserUpdate): UserSummary {
     const current = this.database.getUserRecord(id);
     if (!current) throw new AuthError("User not found");
