@@ -14,6 +14,7 @@
     "dev": "npm run build -w @email-client/shared && concurrently -k -n api,web -c green,cyan \"dotnet watch --project apps/api-dotnet/ArchiveMail.Api/ArchiveMail.Api.csproj run\" \"npm run dev -w @email-client/web\"",
     "start": "dotnet run --project apps/api-dotnet/ArchiveMail.Api/ArchiveMail.Api.csproj",
     "test": "dotnet test apps/api-dotnet/ArchiveMail.Api.Tests/ArchiveMail.Api.Tests.csproj && npm run test:run -w @email-client/web",
+    "smoke:api": "node deploy/scripts/smoke-api.mjs",
     "test:run": "npm test",
     "typecheck": "npm run build -w @email-client/shared && npm run typecheck -w @email-client/web && dotnet build apps/api-dotnet/ArchiveMail.Api/ArchiveMail.Api.csproj"
   },

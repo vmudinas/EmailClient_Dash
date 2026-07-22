@@ -522,6 +522,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         string ownerUserId,
         CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(folderId)) throw new ArgumentException("Choose a destination mailbox");
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         const string sql = """
@@ -728,9 +729,9 @@ public sealed class MailRepository(NpgsqlDataSource database)
         catch (JsonException) { return fallback; }
     }
 
-    private static string NormalizeName(string value, string label)
+    private static string NormalizeName(string? value, string label)
     {
-        var normalized = value.Trim();
+        var normalized = value?.Trim() ?? "";
         if (normalized.Length is < 1 or > 200) throw new ArgumentException($"{label} must be between 1 and 200 characters");
         return normalized;
     }

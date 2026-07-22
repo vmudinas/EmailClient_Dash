@@ -381,22 +381,22 @@ public sealed class AuthService(NpgsqlDataSource database)
 
     private static readonly HashSet<string> ScreenIds = ["calendar", "properties", "compose", "ai", "import", "settings"];
 
-    private static string NormalizeUsername(string value)
+    private static string NormalizeUsername(string? value)
     {
-        var normalized = value.Trim().ToLowerInvariant();
+        var normalized = value?.Trim().ToLowerInvariant() ?? "";
         if (normalized.Length is < 3 or > 64 || !System.Text.RegularExpressions.Regex.IsMatch(normalized, "^[a-z0-9][a-z0-9._-]*$"))
             throw new ArgumentException("Use 3 to 64 letters, numbers, periods, underscores, or hyphens");
         return normalized;
     }
 
-    private static string NormalizeDisplayName(string value)
+    private static string NormalizeDisplayName(string? value)
     {
-        var normalized = value.Trim();
+        var normalized = value?.Trim() ?? "";
         if (normalized.Length is < 1 or > 120) throw new ArgumentException("Enter a valid display name");
         return normalized;
     }
 
-    private static string NormalizeRole(string value) => value.Trim().ToLowerInvariant() switch
+    private static string NormalizeRole(string? value) => value?.Trim().ToLowerInvariant() switch
     {
         "admin" => "admin",
         "user" => "user",
@@ -415,9 +415,9 @@ public sealed class AuthService(NpgsqlDataSource database)
         return normalized;
     }
 
-    private static void ValidatePin(string pin)
+    private static void ValidatePin(string? pin)
     {
-        if (pin.Length is < 4 or > 12 || pin.Any(character => !char.IsAsciiDigit(character)))
+        if (pin is null || pin.Length is < 4 or > 12 || pin.Any(character => !char.IsAsciiDigit(character)))
             throw new ArgumentException("PIN must contain 4 to 12 digits");
     }
 

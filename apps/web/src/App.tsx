@@ -2213,7 +2213,7 @@ export function App() {
 
       <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""} ${folderPanelVisible ? "" : "folders-collapsed"} ${viewMode === "properties" ? "property-workspace" : ""}`}>
         {viewMode === "calendar" ? (
-          api && <CalendarView api={api} connections={gmailConnections} onReauthorize={reauthorizeGmail} onError={showError} />
+          api && <CalendarView api={api} connections={gmailConnections} onAddGoogle={openGmail} onReauthorize={reauthorizeGmail} onError={showError} />
         ) : viewMode === "properties" ? (
           api && (
             <Suspense fallback={<div className="property-loading"><LoaderCircle className="spin" size={24} /> Loading property workspace…</div>}>

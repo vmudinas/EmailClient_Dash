@@ -22,7 +22,7 @@ public sealed class ObservabilityRepository(NpgsqlDataSource database, ILogger<O
     public async Task<DiagnosticEventDto> RecordDiagnosticAsync(
         string ownerUserId, ClientDiagnosticRequest request, string? userAgent, CancellationToken cancellationToken)
     {
-        var level = request.Level.Trim().ToLowerInvariant();
+        var level = request.Level?.Trim().ToLowerInvariant() ?? "";
         if (level is not ("debug" or "info" or "warning" or "error")) throw new ArgumentException("Invalid diagnostic level");
         if (string.IsNullOrWhiteSpace(request.Message) || request.Message.Length > 4_000) throw new ArgumentException("Invalid diagnostic message");
         if (request.Stack?.Length > 20_000) throw new ArgumentException("Diagnostic stack is too long");

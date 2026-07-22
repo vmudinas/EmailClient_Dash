@@ -263,9 +263,10 @@ public sealed class UploadService(
         reader.IsDBNull(6) ? null : reader.GetString(6),
         reader.IsDBNull(7) ? null : reader.GetString(7), reader.GetString(8), reader.GetString(9));
 
-    private static void ValidateFilename(string filename)
+    private static void ValidateFilename(string? filename)
     {
-        if (Path.GetExtension(filename).ToLowerInvariant() is not (".pst" or ".mbox" or ".mbx"))
+        if (string.IsNullOrWhiteSpace(filename)
+            || Path.GetExtension(filename).ToLowerInvariant() is not (".pst" or ".mbox" or ".mbx"))
             throw new InvalidOperationException("Choose a .pst, .mbox, or .mbx archive");
     }
 

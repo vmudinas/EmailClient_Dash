@@ -214,7 +214,7 @@ public sealed class SmartRuleService(NpgsqlDataSource database, ILogger<SmartRul
     public async Task<object?> CancelAsync(string id, string owner, CancellationToken token)
     {
         await using var command = database.CreateCommand(
-            "UPDATE mailbox_tasks t SET cancel_requested=1,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,completed_at=CASE WHEN status='queued' THEN $3 ELSE completed_at END FROM archives a WHERE t.id=$1 AND a.id=t.archive_id AND a.owner_user_id=$2"
+            "UPDATE mailbox_tasks t SET cancel_requested=1,status=CASE WHEN t.status='queued' THEN 'cancelled' ELSE t.status END,completed_at=CASE WHEN t.status='queued' THEN $3 ELSE t.completed_at END FROM archives a WHERE t.id=$1 AND a.id=t.archive_id AND a.owner_user_id=$2"
         );
         command.Parameters.AddWithValue(id);
         command.Parameters.AddWithValue(owner);

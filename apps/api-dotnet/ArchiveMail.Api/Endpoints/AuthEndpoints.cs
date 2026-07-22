@@ -15,7 +15,7 @@ public static class AuthEndpoints
             SharingService sharing,
             CancellationToken cancellationToken) =>
         {
-            if (string.IsNullOrWhiteSpace(request.Username) || request.Pin.Length is < 4 or > 128)
+            if (string.IsNullOrWhiteSpace(request.Username) || request.Pin is null || request.Pin.Length is < 4 or > 128)
                 return Results.BadRequest(new { error = "Enter a valid username and password or PIN" });
             try
             {

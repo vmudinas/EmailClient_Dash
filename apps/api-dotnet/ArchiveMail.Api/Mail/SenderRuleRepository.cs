@@ -234,6 +234,7 @@ public sealed class SenderRuleRepository(NpgsqlDataSource database)
         string ownerUserId,
         CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(archiveId)) throw new ArgumentException("Choose a valid archive");
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         const string archiveSql = "SELECT status FROM archives WHERE id=@archive AND owner_user_id=@owner FOR UPDATE";
@@ -462,9 +463,9 @@ public sealed class SenderRuleRepository(NpgsqlDataSource database)
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static string NormalizeAddress(string value)
+    private static string NormalizeAddress(string? value)
     {
-        var normalized = value.Trim().ToLowerInvariant();
+        var normalized = value?.Trim().ToLowerInvariant() ?? "";
         try { _ = new MailAddress(normalized); }
         catch { throw new ArgumentException("Enter a valid email address"); }
         if (normalized.Length > 320) throw new ArgumentException("Email address is too long");
@@ -506,9 +507,9 @@ public sealed class SenderRuleRepository(NpgsqlDataSource database)
         return candidate;
     }
 
-    private static string OneOf(string value, params string[] allowed)
+    private static string OneOf(string? value, params string[] allowed)
     {
-        var normalized = value.Trim().ToLowerInvariant();
+        var normalized = value?.Trim().ToLowerInvariant() ?? "";
         return allowed.Contains(normalized, StringComparer.Ordinal) ? normalized : throw new ArgumentException("Invalid rule option");
     }
 }

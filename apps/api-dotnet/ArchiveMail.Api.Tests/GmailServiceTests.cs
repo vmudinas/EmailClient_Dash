@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ArchiveMail.Api.Gmail;
 using ArchiveMail.Api.Infrastructure;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -39,6 +40,12 @@ public sealed class GmailServiceTests : IDisposable
         Assert.NotNull(authorizationUrl);
         Assert.Contains("client_id=desktop.apps.googleusercontent.com", authorizationUrl, StringComparison.Ordinal);
         Assert.Contains("code_challenge=", authorizationUrl, StringComparison.Ordinal);
+        var scopes = QueryHelpers.ParseQuery(new Uri(authorizationUrl).Query)["scope"].ToString().Split(' ');
+        Assert.Contains("https://www.googleapis.com/auth/gmail.readonly", scopes);
+        Assert.Contains("https://www.googleapis.com/auth/gmail.send", scopes);
+        Assert.Contains("https://www.googleapis.com/auth/gmail.settings.basic", scopes);
+        Assert.Contains("https://www.googleapis.com/auth/calendar.events", scopes);
+        Assert.Contains("https://www.googleapis.com/auth/calendar.calendarlist.readonly", scopes);
     }
 
     public void Dispose()

@@ -259,6 +259,7 @@ export function SettingsDialog({
                     onSettings={setSettings}
                     onError={setError}
                     onNotice={showNotice}
+                    onAddGoogle={onAddGoogleCalendar}
                     onReauthorize={onReauthorizeGoogleCalendar}
                   />
                 )}
@@ -1525,6 +1526,7 @@ function GmailPanel({
   onSettings,
   onError,
   onNotice,
+  onAddGoogle,
   onReauthorize
 }: {
   api: ApiClient;
@@ -1534,6 +1536,7 @@ function GmailPanel({
   onSettings(value: AdminSettings): void;
   onError(value: string): void;
   onNotice(value: string): void;
+  onAddGoogle?(): void;
   onReauthorize?(connection: GmailConnection): void;
 }) {
   const [clientId, setClientId] = useState(settings.gmail.clientId);
@@ -1792,9 +1795,14 @@ function GmailPanel({
             <h3>Connected account pulls</h3>
             <p>Pull every message from Gmail across the full account history. When mailbox mirroring is enabled, the pull also repairs local folder changes that have not reached Gmail.</p>
           </div>
-          <button type="button" className="secondary-button" disabled={connectionsLoading} onClick={() => void refreshConnections(true)}>
-            <RefreshCw size={16} className={connectionsLoading ? "spin" : ""} /> Refresh
-          </button>
+          <div className="settings-button-row">
+            <button type="button" className="primary-button compact" disabled={busy || !onAddGoogle || !settings.gmail.configured} onClick={onAddGoogle}>
+              <Plus size={15} /> Authorize new Google account
+            </button>
+            <button type="button" className="secondary-button compact" disabled={connectionsLoading} onClick={() => void refreshConnections(true)}>
+              <RefreshCw size={16} className={connectionsLoading ? "spin" : ""} /> Refresh
+            </button>
+          </div>
         </div>
         {connectionsLoading ? (
           <div className="settings-loading"><LoaderCircle className="spin" size={18} /> Loading Gmail accounts</div>
@@ -1835,7 +1843,7 @@ function GmailPanel({
                     )}
                   </div>
                   <div className="settings-button-row">
-                    {onReauthorize && (connection.status === "error" || (syncMailboxActions && !connection.canModifyMailbox)) && (
+                    {onReauthorize && (
                       <button type="button" className="secondary-button compact" disabled={acting || busy} onClick={() => onReauthorize(connection)}>
                         <KeyRound size={15} /> Reauthorize
                       </button>
@@ -1970,9 +1978,10 @@ function CalendarAccountsPanel({
             {connections.map((connection) => (
               <li key={connection.id}>
                 <div><strong>{connection.email}</strong><small>{connection.status === "error" ? (connection.lastError ?? "Google authorization failed") : connection.canManageCalendar ? "Calendar authorized" : "Calendar permission missing"}</small></div>
-                {connection.canManageCalendar && connection.status !== "error" ? <span className="status-badge success">Connected</span> : (
+                <div className="calendar-account-actions">
+                  {connection.canManageCalendar && connection.status !== "error" && <span className="status-badge success">Connected</span>}
                   <button className="secondary-button compact" onClick={() => onReauthorizeGoogle?.(connection)} disabled={busy || !onReauthorizeGoogle}><KeyRound size={14} /> Reauthorize</button>
-                )}
+                </div>
               </li>
             ))}
           </ul>

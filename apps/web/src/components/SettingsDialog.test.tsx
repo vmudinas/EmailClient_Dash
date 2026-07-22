@@ -715,7 +715,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByDisplayValue("web-secret")).toBeTruthy();
   });
 
-  it("enables Gmail mailbox action sync and offers reauthorization for older connections", async () => {
+  it("offers Google authorization controls and enables Gmail mailbox action sync", async () => {
     const currentSettings: AdminSettings = {
       ...SETTINGS,
       gmail: {
@@ -750,6 +750,7 @@ describe("SettingsDialog", () => {
       createdAt: "2026-07-15T00:00:00.000Z",
       updatedAt: "2026-07-15T00:00:00.000Z"
     };
+    const onAddGoogle = vi.fn();
     const onReauthorize = vi.fn();
     const api = {
       adminSettings: vi.fn().mockResolvedValue(currentSettings),
@@ -764,12 +765,18 @@ describe("SettingsDialog", () => {
         session={SESSION}
         onClose={vi.fn()}
         onSignedOut={vi.fn()}
+        onAddGoogleCalendar={onAddGoogle}
         onReauthorizeGoogleCalendar={onReauthorize}
       />
     );
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Gmail" })[0]).toBeTruthy());
     fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
+    fireEvent.click(await screen.findByRole("button", { name: "Authorize new Google account" }));
+    expect(onAddGoogle).toHaveBeenCalledOnce();
+    const reauthorize = await screen.findByRole("button", { name: "Reauthorize" });
+    fireEvent.click(reauthorize);
+    expect(onReauthorize).toHaveBeenCalledWith(connection);
     const toggle = await screen.findByRole("checkbox", { name: /Mirror mailbox actions to Gmail/ });
     fireEvent.click(toggle);
     fireEvent.click(screen.getByRole("button", { name: /Save Gmail configuration/ }));
@@ -779,9 +786,6 @@ describe("SettingsDialog", () => {
       syncIntervalMinutes: 5,
       syncMailboxActions: true
     }));
-    const reauthorize = await screen.findByRole("button", { name: "Reauthorize" });
-    fireEvent.click(reauthorize);
-    expect(onReauthorize).toHaveBeenCalledWith(connection);
   });
 
   it("starts a full-history Gmail pull from the admin panel and shows progress", async () => {

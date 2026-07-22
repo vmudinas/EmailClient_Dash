@@ -112,8 +112,9 @@ public sealed class InboxTabRepository(NpgsqlDataSource database)
 
     private static IReadOnlyList<InboxTabDefinitionDto> Validate(InboxTabSettingsUpdateRequest request)
     {
+        if (request.Tabs is null) throw new ArgumentException("Configure every built-in Inbox tab exactly once");
         if (request.AiConfidenceThreshold is < 0 or > 1) throw new ArgumentException("AI confidence must be between 0 and 1");
-        if (request.Tabs.Count != CategoryIds.Length
+        if (request.Tabs.Count != CategoryIds.Length || request.Tabs.Any(tab => tab is null)
             || request.Tabs.Select(tab => tab.Id).Distinct().Count() != CategoryIds.Length
             || CategoryIds.Any(id => request.Tabs.All(tab => tab.Id != id)))
             throw new ArgumentException("Configure every built-in Inbox tab exactly once");
@@ -123,8 +124,12 @@ public sealed class InboxTabRepository(NpgsqlDataSource database)
             throw new ArgumentException("Primary must remain enabled");
         foreach (var tab in request.Tabs)
         {
-            if (tab.Label.Trim().Length is < 1 or > 40 || tab.Description.Trim().Length > 240
+            if (string.IsNullOrWhiteSpace(tab.Id) || string.IsNullOrWhiteSpace(tab.Label) || tab.Description is null
+                || tab.Label.Trim().Length is < 1 or > 40 || tab.Description.Trim().Length > 240
+                || string.IsNullOrWhiteSpace(tab.Color)
                 || !System.Text.RegularExpressions.Regex.IsMatch(tab.Color, "^#[0-9a-fA-F]{6}$")
+                || tab.Keywords is null || tab.SenderDomains is null
+                || tab.Keywords.Any(value => value is null) || tab.SenderDomains.Any(value => value is null)
                 || tab.Keywords.Length > 40 || tab.SenderDomains.Length > 40)
                 throw new ArgumentException("Invalid Inbox tab settings");
         }

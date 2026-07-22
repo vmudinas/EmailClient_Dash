@@ -575,11 +575,11 @@ export function GmailDialog({
                           </>
                         )}
                         <button
-                          className="icon-button"
+                          className="secondary-button compact gmail-reauthorize-button"
                           onClick={() => onReauthorize(connection)}
-                          title="Reauthorize (grants newly added permissions like Calendar or send-as)"
+                          title="Reauthorize Gmail, send-as settings, and Google Calendar permissions"
                           aria-label={`Reauthorize ${connection.email}`}
-                        ><KeyRound size={15} /></button>
+                        ><KeyRound size={14} /> Reauthorize</button>
                         <button className="icon-button" onClick={() => onDisconnect(connection)} title="Disconnect Gmail" aria-label={`Disconnect ${connection.email}`}><Unplug size={15} /></button>
                       </div>
                     </div>
@@ -655,7 +655,7 @@ export function GmailDialog({
               <input type="checkbox" checked={ocrEnabled} onChange={(event) => setOcrEnabled(event.target.checked)} />
             </label>
             <p className="gmail-destination-note">Gmail labels are mirrored underneath this local folder: Inbox, Sent, Drafts, Spam, Trash, and custom labels each become their own sub-folder. Mail with no matching label is filed under Archived.</p>
-            <div className="gmail-safety"><ShieldCheck size={18} /><span>Gmail starts with read access. If mailbox mirroring is enabled in Admin settings, authorization also grants permission to archive, move, mark Spam, move to Trash, change read state, and star messages. Permanent deletion is never performed.</span></div>
+            <div className="gmail-safety"><ShieldCheck size={18} /><span>Authorization includes Gmail read, send, send-as settings, Google Calendar lists, and Calendar event access. If mailbox mirroring is enabled in Admin settings, it also grants permission to archive, move, mark Spam, move to Trash, change read state, and star messages. Permanent deletion is never performed.</span></div>
           </section>
           {error && <div className="import-error" role="alert"><CircleAlert size={18} /><div><strong>Gmail action failed</strong><span>{error}</span></div></div>}
         </div>
@@ -673,7 +673,7 @@ export function GmailDialog({
               ocrEnabled
             })}
           >
-            {busy ? <LoaderCircle className="spin" size={17} /> : <MailCheck size={17} />} Add Gmail account
+            {busy ? <LoaderCircle className="spin" size={17} /> : <MailCheck size={17} />} Authorize new Google account
           </button>
         </footer>
       </section>

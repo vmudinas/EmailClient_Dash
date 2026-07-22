@@ -38,6 +38,7 @@ const CALENDAR_SELECTION_KEY = "archive-mail.calendar.sources.v1";
 interface CalendarViewProps {
   api: ApiClient;
   connections: GmailConnection[];
+  onAddGoogle(): void;
   onReauthorize(connection: GmailConnection): void;
   onError(message: string): void;
 }
@@ -70,7 +71,7 @@ interface DaySummary {
   todoTexts: string[];
 }
 
-export function CalendarView({ api, connections, onReauthorize, onError }: CalendarViewProps) {
+export function CalendarView({ api, connections, onAddGoogle, onReauthorize, onError }: CalendarViewProps) {
   const mobile = useMediaQuery("(max-width: 800px)");
   const [date, setDate] = useState(todayIso());
   const [month, setMonth] = useState(todayIso().slice(0, 7));
@@ -306,6 +307,24 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
             <button className="icon-button mobile-only" onClick={() => setMobilePanel(null)} aria-label="Close calendar filters"><X size={17} /></button>
           </div>
         </div>
+        <section className="calendar-google-actions" aria-label="Google Calendar accounts">
+          <button className="primary-button compact" onClick={onAddGoogle}>
+            <Plus size={14} /> Add Google account
+          </button>
+          {connections.map((connection) => (
+            <div className="calendar-google-account" key={connection.id}>
+              <span title={connection.email}>{connection.email}</span>
+              <button
+                className="secondary-button compact"
+                onClick={() => onReauthorize(connection)}
+                aria-label={`Reauthorize ${connection.email} for Gmail and Calendar`}
+              >
+                <KeyRound size={13} /> Reauthorize
+              </button>
+            </div>
+          ))}
+          <small>Authorizes Gmail read/send/settings plus Google Calendar lists and events.</small>
+        </section>
         <div className="calendar-selection-actions">
           <button className="text-button" onClick={() => setSelectedSourceIds(new Set(sources.map((source) => source.id)))}>Select all</button>
           <button className="text-button" onClick={() => setSelectedSourceIds(new Set())}>Clear</button>
