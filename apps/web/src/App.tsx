@@ -98,6 +98,14 @@ import { StockTickerBar } from "./components/StockTickerBar.js";
 import { NewsTickerBar } from "./components/NewsTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
+const GMAIL_OAUTH_RESULT_KEY = "archive-mail-gmail-oauth-result";
+
+interface GmailOAuthResult {
+  type: "archive-mail-gmail-oauth";
+  success?: boolean;
+  message?: string;
+}
+
 type MobileView = "folders" | "messages" | "reader";
 type AppView = "mail" | "calendar" | "properties";
 type SmartMailbox = "starred";
@@ -300,7 +308,6 @@ export function App() {
     if (viewMode === "calendar" && !canAccessScreen("calendar")) navigateView("mail", true);
     if (viewMode === "properties" && !canAccessScreen("properties")) navigateView("mail", true);
   }, [session, viewMode]);
-  const electron = Boolean(window.emailClient);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
   const searchFolderId = filters.folderId === ALL_MAIL_SEARCH_SCOPE
@@ -442,11 +449,7 @@ export function App() {
     setLoginError("");
     try {
       const result = await api.login(username, pin);
-      if (runtime?.platform === "desktop") {
-        sessionStorage.setItem(SESSION_STORAGE_KEY, result.accessToken);
-      } else {
-        sessionStorage.removeItem(SESSION_STORAGE_KEY);
-      }
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
       setSession(result.session);
       await loadAuthenticatedData(api, result.session.user.role);
     } catch (error) {
@@ -758,6 +761,39 @@ export function App() {
   }, [api, readOnly, refreshGmailConnections]);
 
   useEffect(() => {
+    const handleResult = (result: GmailOAuthResult | null | undefined) => {
+      if (!result || result.type !== "archive-mail-gmail-oauth") return;
+      const message = result.message ?? (result.success === false
+        ? "Google authorization failed"
+        : "Google account connected");
+      if (result.success === false) setGmailError(message);
+      else {
+        setGmailError("");
+        void refreshGmailConnections(false);
+      }
+      showError(message);
+    };
+    const handleGmailAuthorization = (event: MessageEvent<GmailOAuthResult>) => {
+      if (event.origin !== window.location.origin) return;
+      handleResult(event.data);
+    };
+    const handleStoredAuthorization = (event: StorageEvent) => {
+      if (event.key !== GMAIL_OAUTH_RESULT_KEY || !event.newValue) return;
+      try {
+        handleResult(JSON.parse(event.newValue) as GmailOAuthResult);
+      } catch {
+        // Ignore malformed cross-window notifications.
+      }
+    };
+    window.addEventListener("message", handleGmailAuthorization);
+    window.addEventListener("storage", handleStoredAuthorization);
+    return () => {
+      window.removeEventListener("message", handleGmailAuthorization);
+      window.removeEventListener("storage", handleStoredAuthorization);
+    };
+  }, [refreshGmailConnections, showError]);
+
+  useEffect(() => {
     const syncing = gmailConnections.some((connection) => connection.status === "syncing");
     if (!gmailOpen && !syncing) return;
     void refreshGmailConnections(gmailOpen);
@@ -881,14 +917,10 @@ export function App() {
     setImportBusy(true);
     setImportError("");
     setImportProgress(null);
-    const controller = !window.emailClient && file ? new AbortController() : null;
+    const controller = file ? new AbortController() : null;
     importAbortRef.current = controller;
     try {
-      const job = window.emailClient
-        ? await window.emailClient.selectAndImport({ ocrEnabled }, api?.getAccessToken() ?? "")
-        : file
-          ? await api.uploadArchive(file, ocrEnabled, setImportProgress, controller?.signal)
-          : null;
+      const job = file ? await api.uploadArchive(file, ocrEnabled, setImportProgress, controller?.signal) : null;
       if (job) {
         setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
         setImportOpen(false);
@@ -904,9 +936,6 @@ export function App() {
       const message = error instanceof Error ? error.message : "Import could not be started";
       setImportError(message);
       showError(message);
-      if (window.emailClient) {
-        void api.reportClientIssue(error, { operation: "desktop_import" });
-      }
     } finally {
       if (importAbortRef.current === controller) importAbortRef.current = null;
       setImportBusy(false);
@@ -930,9 +959,7 @@ export function App() {
   const cancelJob = async (jobId: string) => {
     if (!api) return;
     try {
-      const job = window.emailClient
-        ? await window.emailClient.cancelImport(jobId, api?.getAccessToken() ?? "")
-        : await api.cancelImport(jobId);
+      const job = await api.cancelImport(jobId);
       setJobs((current) => current.map((item) => item.id === job.id ? job : item));
     } catch (error) {
       showError(error instanceof Error ? error.message : "Import could not be cancelled");
@@ -942,9 +969,7 @@ export function App() {
   const resumeJob = async (jobId: string) => {
     if (!api) return;
     try {
-      const job = window.emailClient
-        ? await window.emailClient.resumeImport(jobId, api?.getAccessToken() ?? "")
-        : await api.resumeImport(jobId);
+      const job = await api.resumeImport(jobId);
       setJobs((current) => current.map((item) => item.id === job.id ? job : item));
     } catch (error) {
       showError(error instanceof Error ? error.message : "Import could not be resumed");
@@ -985,8 +1010,7 @@ export function App() {
         : `Remove "${archive.name}" and all of its managed local data? Any active import will be stopped. The original PST/MBOX will not be changed.`
     )) return;
     try {
-      if (window.emailClient) await window.emailClient.removeArchive(archiveId, api?.getAccessToken() ?? "");
-      else if (api) await api.removeArchive(archiveId);
+      if (api) await api.removeArchive(archiveId);
       setJobs((current) => current.filter((job) => job.archiveId !== archiveId));
       await refreshArchives();
     } catch (error) {
@@ -1804,7 +1828,7 @@ export function App() {
     if (!api || readOnly) return;
     setGmailBusy(true);
     setGmailError("");
-    const popup = !window.emailClient ? window.open("", "_blank") : null;
+    const popup = window.open("", "_blank");
     if (popup) popup.opener = null;
     try {
       const authorization = await api.startGmailAuthorization(request);
@@ -1812,8 +1836,8 @@ export function App() {
       else window.open(authorization.authorizationUrl, "_blank", "noopener,noreferrer");
       showError("Finish Gmail authorization in your browser");
     } catch (error) {
-      popup?.close();
       const message = error instanceof Error ? error.message : "Gmail authorization could not start";
+      if (popup && !popup.closed) showGmailAuthorizationError(popup, message);
       setGmailError(message);
       showError(message);
     } finally {
@@ -1823,6 +1847,7 @@ export function App() {
 
   const reauthorizeGmail = (connection: GmailConnection) => {
     void connectGmail({
+      connectionId: connection.id,
       archiveId: connection.archiveId,
       folderId: connection.folderId,
       archiveName: connection.archiveName,
@@ -1977,7 +2002,6 @@ export function App() {
 
   const openSharing = async () => {
     setShareOpen(true);
-    if (!window.emailClient) return;
     try {
       const state = api ? await api.getSharingState() : EMPTY_SHARING;
       setSharing(state);
@@ -1987,10 +2011,9 @@ export function App() {
   };
 
   const toggleSharing = async (enabled: boolean) => {
-    if (!window.emailClient) return;
     setShareBusy(true);
     try {
-      setSharing(await window.emailClient.setSharingEnabled(enabled, api?.getAccessToken() ?? ""));
+      setSharing(api ? await api.setSharingEnabled(enabled) : EMPTY_SHARING);
     } catch (error) {
       showError(error instanceof Error ? error.message : "Sharing could not be changed");
     } finally {
@@ -2032,7 +2055,7 @@ export function App() {
     : null;
   if (!session && api && invitationToken) {
     return <TenantInvitationScreen api={api} token={invitationToken} onAccepted={(result) => {
-      if (runtime?.platform === "desktop") sessionStorage.setItem(SESSION_STORAGE_KEY, result.accessToken);
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
       setSession(result.session);
       window.history.replaceState(null, "", "/properties");
       void loadAuthenticatedData(api, result.session.user.role);
@@ -2148,7 +2171,7 @@ export function App() {
               {viewMode === "properties" ? <Mail size={18} /> : <Building2 size={18} />}
             </button>
           )}
-          {electron && isAdmin && (
+          {isAdmin && (
             <button className="icon-button sharing-trigger" onClick={() => void openSharing()} title="Open iPhone viewer" aria-label="Open iPhone viewer">
               <MonitorSmartphone size={18} />
             </button>
@@ -2190,7 +2213,7 @@ export function App() {
 
       <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""} ${folderPanelVisible ? "" : "folders-collapsed"} ${viewMode === "properties" ? "property-workspace" : ""}`}>
         {viewMode === "calendar" ? (
-          api && <CalendarView api={api} connections={gmailConnections} onReauthorize={reauthorizeGmail} onError={showError} />
+          api && <CalendarView api={api} connections={gmailConnections} onAddGoogle={openGmail} onReauthorize={reauthorizeGmail} onError={showError} />
         ) : viewMode === "properties" ? (
           api && (
             <Suspense fallback={<div className="property-loading"><LoaderCircle className="spin" size={24} /> Loading property workspace…</div>}>
@@ -2376,7 +2399,7 @@ export function App() {
               {canUseMail && <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>}
               {!readOnly && canAccessScreen("import") && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
               {!readOnly && (isAdmin || isRenter || canAccessScreen("settings")) && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>{isAdmin ? "Admin" : "Account"}</span>{isAdmin && pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
-              {electron && isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
+              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
             </div>
             <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>
           </section>
@@ -2385,7 +2408,6 @@ export function App() {
 
       <ImportDialog
         open={importOpen}
-        electron={electron}
         busy={importBusy}
         progress={importProgress}
         error={importError}
@@ -2607,6 +2629,20 @@ export function App() {
       )}
     </div>
   );
+}
+
+function showGmailAuthorizationError(popup: Window, message: string) {
+  popup.document.title = "Gmail authorization could not start";
+  popup.document.body.replaceChildren();
+  const main = popup.document.createElement("main");
+  const heading = popup.document.createElement("h1");
+  heading.textContent = "Gmail authorization could not start";
+  const detail = popup.document.createElement("p");
+  detail.textContent = message;
+  const guidance = popup.document.createElement("p");
+  guidance.textContent = "Return to Archive Mail, correct the Gmail OAuth configuration in Admin settings, and try again.";
+  main.append(heading, detail, guidance);
+  popup.document.body.append(main);
 }
 
 function hitToItem(hit: SearchHit): MessageListItem {

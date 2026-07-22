@@ -1,0 +1,21 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble AS build
+WORKDIR /src
+COPY apps/api-dotnet/ArchiveMail.Migrator/ArchiveMail.Migrator.csproj apps/api-dotnet/ArchiveMail.Migrator/
+RUN dotnet restore apps/api-dotnet/ArchiveMail.Migrator/ArchiveMail.Migrator.csproj
+COPY apps/api-dotnet/ArchiveMail.Migrator apps/api-dotnet/ArchiveMail.Migrator
+RUN dotnet publish apps/api-dotnet/ArchiveMail.Migrator/ArchiveMail.Migrator.csproj --configuration Release --no-restore --output /out
+
+FROM mcr.microsoft.com/dotnet/runtime:10.0-noble
+WORKDIR /app
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg libsqlite3-dev \
+  && install -d /usr/share/postgresql-common/pgdg \
+  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    | gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg \
+  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends postgresql-client-17 \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out ./
+ENTRYPOINT ["dotnet", "ArchiveMail.Migrator.dll"]

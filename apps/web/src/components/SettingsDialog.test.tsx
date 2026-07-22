@@ -470,10 +470,10 @@ describe("SettingsDialog", () => {
     );
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
-    expect((screen.getByRole("option", { name: /PostgreSQL.*adapter not installed/ }) as HTMLOptionElement).disabled).toBe(true);
+    expect((screen.getByRole("option", { name: /Microsoft SQL Server.*adapter not installed/ }) as HTMLOptionElement).disabled).toBe(true);
     expect(screen.getByText(/content-addressed blob directory/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
     expect(screen.getByText(/Gmail authorization cannot start/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "AI" }));
@@ -662,8 +662,8 @@ describe("SettingsDialog", () => {
       />
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Gmail" })[0]).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
     const file = new File(["{}"], "desktop-oauth.json", { type: "application/json" });
     Object.defineProperty(file, "text", {
       value: vi.fn().mockResolvedValue(JSON.stringify({
@@ -698,8 +698,8 @@ describe("SettingsDialog", () => {
     } as unknown as ApiClient;
     render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Gmail" })[0]).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
     const file = new File(["{}"], "web-oauth.json", { type: "application/json" });
     Object.defineProperty(file, "text", {
       value: vi.fn().mockResolvedValue(JSON.stringify({
@@ -715,7 +715,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByDisplayValue("web-secret")).toBeTruthy();
   });
 
-  it("enables Gmail mailbox action sync and offers reauthorization for older connections", async () => {
+  it("offers Google authorization controls and enables Gmail mailbox action sync", async () => {
     const currentSettings: AdminSettings = {
       ...SETTINGS,
       gmail: {
@@ -750,6 +750,7 @@ describe("SettingsDialog", () => {
       createdAt: "2026-07-15T00:00:00.000Z",
       updatedAt: "2026-07-15T00:00:00.000Z"
     };
+    const onAddGoogle = vi.fn();
     const onReauthorize = vi.fn();
     const api = {
       adminSettings: vi.fn().mockResolvedValue(currentSettings),
@@ -764,12 +765,18 @@ describe("SettingsDialog", () => {
         session={SESSION}
         onClose={vi.fn()}
         onSignedOut={vi.fn()}
+        onAddGoogleCalendar={onAddGoogle}
         onReauthorizeGoogleCalendar={onReauthorize}
       />
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Gmail" })[0]).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
+    fireEvent.click(await screen.findByRole("button", { name: "Authorize new Google account" }));
+    expect(onAddGoogle).toHaveBeenCalledOnce();
+    const reauthorize = await screen.findByRole("button", { name: "Reauthorize" });
+    fireEvent.click(reauthorize);
+    expect(onReauthorize).toHaveBeenCalledWith(connection);
     const toggle = await screen.findByRole("checkbox", { name: /Mirror mailbox actions to Gmail/ });
     fireEvent.click(toggle);
     fireEvent.click(screen.getByRole("button", { name: /Save Gmail configuration/ }));
@@ -779,9 +786,6 @@ describe("SettingsDialog", () => {
       syncIntervalMinutes: 5,
       syncMailboxActions: true
     }));
-    const reauthorize = await screen.findByRole("button", { name: "Reauthorize" });
-    fireEvent.click(reauthorize);
-    expect(onReauthorize).toHaveBeenCalledWith(connection);
   });
 
   it("starts a full-history Gmail pull from the admin panel and shows progress", async () => {
@@ -822,8 +826,8 @@ describe("SettingsDialog", () => {
 
     render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Gmail" })[0]).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
     await waitFor(() => expect(screen.getByRole("button", { name: "Pull all email" })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Pull all email" }));
 
@@ -869,8 +873,8 @@ describe("SettingsDialog", () => {
 
     render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Gmail" })).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Gmail" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Gmail" })[0]).toBeTruthy());
+    fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
     const reconcile = await screen.findByRole("button", { name: "Reconcile Gmail" });
     fireEvent.click(reconcile);
 
@@ -1246,9 +1250,14 @@ describe("SettingsDialog", () => {
       rules: [{
         id: "rule-1",
         archiveId: archive.id,
+        matchField: "from",
+        matchAddress: "vendor@example.test",
         senderAddress: "vendor@example.test",
         senderName: "Vendor Co",
         ruleType: "folder",
+        sourceScope: "inbox",
+        sourceFolderId: null,
+        sourceFolderPath: null,
         folderId: "folder-1",
         folderPath: "Top Senders/Vendor Co",
         messageCount: 42,
@@ -1296,12 +1305,12 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Sender rules" }));
     await waitFor(() => expect(api.senderFilingStatus).toHaveBeenCalledWith(archive.id));
-    expect(screen.getByText(/Spam and every non-Inbox mailbox are untouched/)).toBeTruthy();
+    expect(screen.getByText(/do not change Gmail labels/)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Organize top 20" }));
 
     await waitFor(() => expect(api.organizeTopSenders).toHaveBeenCalledWith(archive.id));
-    expect(await screen.findByText("Vendor Co")).toBeTruthy();
+    expect(await screen.findByText(/From: Vendor Co/)).toBeTruthy();
     const folderSelect = screen.getByRole("combobox", { name: "Folder for Vendor Co" });
     expect((folderSelect as HTMLSelectElement).value).toBe("folder-1");
     expect(screen.getByText(/Moved 42 messages/)).toBeTruthy();
@@ -1311,6 +1320,103 @@ describe("SettingsDialog", () => {
     expect((screen.getByRole("combobox", { name: "Folder for Vendor Co" }) as HTMLSelectElement).value).toBe("folder-2");
     expect(await screen.findByText(/Sender rule updated/)).toBeTruthy();
     confirm.mockRestore();
+  });
+
+  it("creates consecutive scoped sender rules without reloading the panel", async () => {
+    const archive: Archive = {
+      id: "b8f3f5a5-bc88-4ac9-97e6-e1bd4c2db702",
+      name: "Primary Gmail",
+      sourceType: "gmail",
+      status: "ready",
+      sizeBytes: 0,
+      messageCount: 120,
+      unreadCount: 4,
+      folderCount: 2,
+      attachmentCount: 0,
+      errorCount: 0,
+      importedAt: "2026-07-15T00:00:00.000Z",
+      createdAt: "2026-07-15T00:00:00.000Z"
+    };
+    const inbox: Folder = {
+      id: "folder-inbox",
+      archiveId: archive.id,
+      parentId: null,
+      name: "Inbox",
+      path: "Inbox",
+      messageCount: 120,
+      unreadCount: 4
+    };
+    const initialStatus: SenderFilingStatus = {
+      archiveId: archive.id,
+      archiveName: archive.name,
+      enabled: false,
+      rules: [],
+      lastRunAt: null,
+      lastRunMovedMessages: 0,
+      lastRunCreatedFolders: 0
+    };
+    const createdStatus: SenderFilingStatus = {
+      ...initialStatus,
+      enabled: true,
+      rules: [{
+        id: "rule-to-owner",
+        archiveId: archive.id,
+        matchField: "to",
+        matchAddress: "owner@example.test",
+        senderAddress: "owner@example.test",
+        senderName: null,
+        ruleType: "folder",
+        sourceScope: "all",
+        sourceFolderId: null,
+        sourceFolderPath: null,
+        folderId: "folder-owner",
+        folderPath: "For Owner",
+        messageCount: 17,
+        createdAt: "2026-07-15T12:00:00.000Z",
+        updatedAt: "2026-07-15T12:00:00.000Z"
+      }],
+      lastRunAt: "2026-07-15T12:00:00.000Z",
+      lastRunMovedMessages: 17,
+      lastRunCreatedFolders: 1
+    };
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      listArchives: vi.fn().mockResolvedValue([archive]),
+      listFolders: vi.fn().mockResolvedValue([inbox]),
+      senderFilingStatus: vi.fn().mockResolvedValue(initialStatus),
+      createSenderFilingRule: vi.fn().mockResolvedValue({
+        statuses: [createdStatus],
+        createdRules: 1,
+        createdFolders: 1,
+        movedMessages: 17
+      })
+    } as unknown as ApiClient;
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sender rules" }));
+    await waitFor(() => expect(api.senderFilingStatus).toHaveBeenCalledWith(archive.id));
+
+    fireEvent.change(screen.getByLabelText("Archives to apply"), { target: { value: "all" } });
+    fireEvent.change(screen.getByLabelText("Match field"), { target: { value: "to" } });
+    fireEvent.change(screen.getByLabelText("Email address"), { target: { value: "OWNER@example.test" } });
+    fireEvent.change(screen.getByLabelText("Folder name"), { target: { value: "For Owner" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save and add another" }));
+
+    await waitFor(() => expect(api.createSenderFilingRule).toHaveBeenCalledWith({
+      archiveId: archive.id,
+      archiveScope: "all",
+      matchField: "to",
+      matchAddress: "owner@example.test",
+      sourceScope: "all",
+      sourceFolderId: null,
+      destinationFolderId: null,
+      destinationFolderName: "For Owner",
+      applyExisting: true
+    }));
+    expect((screen.getByLabelText("Email address") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "Save and add another" })).toBeTruthy();
+    expect(await screen.findByText(/To: owner@example.test/)).toBeTruthy();
   });
 
   it("shows mailbox insights: totals, oldest/newest mail, top contacts, and AI analysis breakdown", async () => {
@@ -1470,18 +1576,16 @@ const RENTER_SESSION: AuthSessionInfo = {
 
 const SETTINGS: AdminSettings = {
   database: {
-    activeProvider: "sqlite",
-    activeConnectionString: "sqlite:///tmp/archive-mail.sqlite",
-    configuredProvider: "sqlite",
-    configuredConnectionString: "sqlite:///tmp/archive-mail.sqlite",
+    activeProvider: "postgresql",
+    activeConnectionString: "Host=postgres;Database=archive_mail;Username=archive_mail;Password=********",
+    configuredProvider: "postgresql",
+    configuredConnectionString: "Host=postgres;Database=archive_mail;Username=archive_mail;Password=********",
     restartRequired: false,
     providers: [
-      { id: "sqlite", label: "SQLite", available: true, description: "Built-in local adapter with FTS5 search." },
-      { id: "postgresql", label: "PostgreSQL", available: false, description: "Requires a PostgreSQL data and search adapter." },
-      { id: "mysql", label: "MySQL", available: false, description: "Requires a MySQL data and full-text search adapter." },
+      { id: "postgresql", label: "PostgreSQL", available: true, description: "PostgreSQL runtime adapter." },
       { id: "mssql", label: "Microsoft SQL Server", available: false, description: "Requires a SQL Server data and full-text search adapter." }
     ],
-    structuredDataPath: "/tmp/archive-mail.sqlite",
+    structuredDataPath: "PostgreSQL",
     attachmentBlobPath: "/tmp/blobs"
   },
   security: { sessionLifetimeMinutes: 720, defaultPinWarning: true },

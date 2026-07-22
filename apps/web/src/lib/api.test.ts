@@ -179,6 +179,31 @@ describe("ApiClient request headers", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("normalizes the C# mailTracking category count", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      primary: 12,
+      promotions: 8,
+      social: 4,
+      updates: 6,
+      bills: 3,
+      medical: 2,
+      mailTracking: 5
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    const counts = await client.inboxCategoryCounts({ archiveId: "archive-1" });
+
+    expect(counts.mail_tracking).toBe(5);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://127.0.0.1:3001/api/messages/category-counts?archiveId=archive-1"
+    );
+  });
+
   it("sends Gmail authorization, outgoing email, and combine requests to local-only routes", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ authorizationUrl: "https://accounts.example/auth", expiresAt: "2026-07-13T01:00:00.000Z" }))

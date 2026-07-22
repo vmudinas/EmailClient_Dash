@@ -43,7 +43,7 @@ describe("GmailDialog", () => {
     expect(screen.getByRole("button", { name: "New mailbox" }).getAttribute("aria-pressed")).toBe("true");
 
     fireEvent.change(screen.getByLabelText("New local folder name"), { target: { value: "Second account" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add Gmail account" }));
+    fireEvent.click(screen.getByRole("button", { name: "Authorize new Google account" }));
     expect(onConnect).toHaveBeenLastCalledWith(expect.objectContaining({
       archiveId: ARCHIVES[0]!.id,
       folderId: null,
@@ -53,7 +53,7 @@ describe("GmailDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Existing mailbox" }));
     await waitFor(() => expect(screen.getByLabelText("Merge into mailbox")).toBeTruthy());
     fireEvent.change(screen.getByLabelText("Merge into mailbox"), { target: { value: FOLDERS[1]!.id } });
-    fireEvent.click(screen.getByRole("button", { name: "Add Gmail account" }));
+    fireEvent.click(screen.getByRole("button", { name: "Authorize new Google account" }));
     expect(onConnect).toHaveBeenLastCalledWith(expect.objectContaining({
       archiveId: ARCHIVES[0]!.id,
       folderId: FOLDERS[1]!.id
@@ -62,7 +62,7 @@ describe("GmailDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "New archive" }));
     fireEvent.change(screen.getByLabelText("Archive name"), { target: { value: "Personal Gmail" } });
     fireEvent.change(screen.getByLabelText("Local folder name"), { target: { value: "Inbox" } });
-    fireEvent.click(screen.getByRole("button", { name: "Add Gmail account" }));
+    fireEvent.click(screen.getByRole("button", { name: "Authorize new Google account" }));
     expect(onConnect).toHaveBeenLastCalledWith(expect.objectContaining({
       archiveId: null,
       folderId: null,

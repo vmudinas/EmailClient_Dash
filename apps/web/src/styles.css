@@ -2888,6 +2888,111 @@ textarea:focus-visible {
   overscroll-behavior: contain;
 }
 
+.shipment-highlights {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  background: #f5f8fc;
+}
+
+.shipment-highlights > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 3px 6px;
+  color: #3c4c62;
+  font-size: 12px;
+}
+
+.shipment-highlight-list {
+  display: grid;
+  gap: 3px;
+}
+
+.shipment-highlight {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 7px 9px;
+  border: 1px solid #e1e8f1;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.shipment-carrier-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: #2f536f;
+  background: #edf4fb;
+}
+
+.shipment-carrier-icon.amazon { color: #805300; background: #fff4db; }
+.shipment-carrier-icon.ups { color: #67451c; background: #f7ead5; }
+.shipment-carrier-icon.fedex { color: #5d3693; background: #f2ebfa; }
+.shipment-carrier-icon.usps { color: #245989; background: #eaf2f9; }
+.shipment-carrier-icon.dhl { color: #9b111e; background: #fff2bc; }
+
+.shipment-highlight-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.shipment-highlight-copy strong,
+.shipment-highlight-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shipment-highlight-copy strong {
+  font-size: 12px;
+}
+
+.shipment-highlight-copy small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.shipment-eta {
+  color: #4f5967;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.shipment-eta.delayed {
+  color: #a15c00;
+  font-weight: 700;
+}
+
+.shipment-highlight button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 11px;
+  border: 0;
+  border-radius: 999px;
+  color: #17466f;
+  background: #cdeaff;
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.shipment-highlight button:hover,
+.shipment-highlight button:focus-visible {
+  outline: none;
+  background: #b3ddfb;
+}
+
 .message-swipe-shell {
   position: relative;
   overflow: hidden;
@@ -4790,6 +4895,11 @@ textarea:focus-visible {
   flex-basis: 30px;
 }
 
+.gmail-actions .gmail-reauthorize-button {
+  min-height: 30px;
+  white-space: nowrap;
+}
+
 .gmail-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5203,6 +5313,48 @@ textarea:focus-visible {
 .calendar-selection-actions {
   gap: 4px;
   margin: 0 -5px 8px;
+}
+
+.calendar-google-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 8px 0 10px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.calendar-google-actions > .primary-button {
+  width: 100%;
+}
+
+.calendar-google-actions > small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.calendar-google-account {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.calendar-google-account > span {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-google-account .secondary-button {
+  width: 100%;
 }
 
 .calendar-selection-actions .text-button {
@@ -5747,6 +5899,14 @@ textarea:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.calendar-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto !important;
+  flex-direction: row !important;
 }
 
 .calendar-account-list li strong {
@@ -8953,6 +9113,19 @@ textarea:focus-visible {
   .inbox-category-tab {
     min-height: 54px;
     scroll-snap-align: start;
+  }
+
+  .shipment-highlight {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+  }
+
+  .shipment-eta {
+    grid-column: 2;
+  }
+
+  .shipment-highlight button {
+    grid-column: 3;
+    grid-row: 1 / span 2;
   }
 
   .message-swipe-shell .message-row {

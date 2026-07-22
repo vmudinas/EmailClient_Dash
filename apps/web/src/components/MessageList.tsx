@@ -33,6 +33,7 @@ import type {
   SearchHit
 } from "@email-client/shared";
 import { displayAddress, formatDate, formatTimeOfDay, initials } from "../lib/format.js";
+import { ShipmentHighlights } from "./ShipmentHighlights.js";
 
 export interface MessageListItem {
   message: MessageSummary;
@@ -269,19 +270,20 @@ export function MessageList({
         >
           {inboxCategories.tabs.filter((category) => category.enabled).sort((left, right) => left.position - right.position).map((category) => {
             const Icon = CATEGORY_ICONS[category.id];
+            const count = inboxCategories.counts[category.id] ?? 0;
             return (
               <button
                 className={`inbox-category-tab ${category.id} ${inboxCategories.active === category.id ? "active" : ""}`}
                 key={category.id}
                 onClick={() => inboxCategories.onSelect(category.id)}
                 aria-pressed={inboxCategories.active === category.id}
-                aria-label={`${category.label}, ${inboxCategories.counts[category.id].toLocaleString()} messages`}
+                aria-label={`${category.label}, ${count.toLocaleString()} messages`}
                 title={category.description}
                 style={{ "--inbox-tab-color": category.color } as CSSProperties}
               >
                 <Icon size={15} />
                 <span>{category.label}</span>
-                <small>{inboxCategories.counts[category.id].toLocaleString()}</small>
+                <small>{count.toLocaleString()}</small>
               </button>
             );
           })}
@@ -289,6 +291,9 @@ export function MessageList({
       )}
 
       <div className="message-list" role="listbox" aria-label={title}>
+        {inboxCategories?.active === "mail_tracking" && (
+          <ShipmentHighlights messages={items.map((item) => item.message)} onSelect={selectRow} />
+        )}
         {items.map(({ message, hit }) => (
           <MessageRow
             key={message.id}

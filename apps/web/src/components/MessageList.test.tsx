@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MessageSummary } from "@email-client/shared";
+import type { InboxCategoryCounts, MessageSummary } from "@email-client/shared";
 import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { MessageList } from "./MessageList.js";
 
@@ -190,9 +190,8 @@ describe("MessageList drag and drop", () => {
             social: 4,
             updates: 6,
             bills: 3,
-            medical: 2,
-            mail_tracking: 5
-          },
+            medical: 2
+          } as unknown as InboxCategoryCounts,
           onSelect: onSelectCategory
         }}
         {...BULK_SELECTION_PROPS}
@@ -203,9 +202,64 @@ describe("MessageList drag and drop", () => {
     expect(screen.queryByRole("button", { name: "Promotions, 8 messages" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Community, 4 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("social");
-    fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 5 messages" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 0 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("mail_tracking");
     expect(screen.getByText("No primary messages")).toBeTruthy();
+  });
+
+  it("shows upcoming package cards in Mail/Tracking and opens the carrier page", () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const onSelect = vi.fn();
+    const shipmentMessage: MessageSummary = {
+      ...MESSAGE,
+      id: "shipment-message",
+      subject: "Your Amazon.com order has shipped",
+      inboxCategory: "mail_tracking",
+      shipment: {
+        carrier: "fedex",
+        merchant: "Amazon",
+        trackingNumber: "123456789012",
+        orderNumber: "113-1234567-1234567",
+        status: "in_transit",
+        estimatedDeliveryDate: "2099-01-02",
+        trackingUrl: "https://www.fedex.com/fedextrack/?trknbr=123456789012"
+      }
+    };
+    render(
+      <MessageList
+        items={[{ message: shipmentMessage }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={onSelect}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        inboxCategories={{
+          active: "mail_tracking",
+          tabs: DEFAULT_INBOX_TABS.map((tab) => ({ ...tab, keywords: [], senderDomains: [] })),
+          counts: { primary: 0, promotions: 0, social: 0, updates: 0, bills: 0, medical: 0, mail_tracking: 1 },
+          onSelect: vi.fn()
+        }}
+        {...BULK_SELECTION_PROPS}
+      />
+    );
+
+    expect(screen.getByRole("region", { name: "Arriving soon" })).toBeTruthy();
+    expect(screen.getByText("Order from Amazon")).toBeTruthy();
+    expect(screen.getByText(/FedEx/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "View order" }));
+    expect(open).toHaveBeenCalledWith(
+      "https://www.fedex.com/fedextrack/?trknbr=123456789012",
+      "_blank",
+      "noopener,noreferrer"
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 
   it("reveals touch actions and archives from the message row", () => {

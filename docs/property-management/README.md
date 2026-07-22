@@ -1,6 +1,6 @@
 # Property Management
 
-Archive Mail includes a property-management workspace for a private landlord or small property manager. It shares the existing React/Fastify application shell while keeping property resources separate from every user's private mail, calendar, drafts, AI configuration, and Gmail connections.
+Archive Mail includes a property-management workspace for a private landlord or small property manager. It shares the React/ASP.NET Core application shell while keeping property resources separate from every user's private mail, calendar, drafts, AI configuration, and Gmail connections.
 
 ## Implemented Features
 
@@ -37,13 +37,13 @@ Archive Mail includes a property-management workspace for a private landlord or 
 
 ### Notifications and operations
 
-- Durable SQLite notification jobs with idempotency keys, attempt counts, retry timing, provider IDs, and delivery history.
+- Durable PostgreSQL notification jobs with idempotency keys, attempt counts, retry timing, provider IDs, and delivery history.
 - In-app reminders, Gmail-delivered email reminders, and optional Twilio Messaging Service SMS.
 - Explicit SMS opt-in records and signed Twilio STOP webhook handling. Opted-out numbers are suppressed.
 - A non-overlapping automation worker that creates due rent charges, processes provider events, and sends queued reminders.
 - A **Run now** control and visible job/delivery state in the Communications tab.
-- Online SQLite backups containing the database, property files, images, and relevant settings, with retention and an Admin backup history panel.
-- NAS-friendly SQLite WAL mode with a 30-second busy timeout on property connections.
+- Online PostgreSQL custom-format backups with an Admin backup history panel.
+- PostgreSQL transactions, row constraints, and server-side job claiming for concurrent API and background work.
 
 ## Application Areas
 
@@ -119,7 +119,7 @@ References: [Stripe fulfillment](https://docs.stripe.com/checkout/fulfillment), 
 
 ## Durable Automation
 
-The API process runs one non-overlapping property automation loop. Durable work is claimed from SQLite, so a restart does not lose queued reminders or provider events.
+The C# API process runs one non-overlapping property automation loop. Durable work is claimed from PostgreSQL, so a restart does not lose queued reminders or provider events.
 
 The loop:
 
@@ -144,7 +144,7 @@ Failed notification jobs use bounded exponential retry timing and stop after fiv
 
 ## Documents and Backups
 
-Property documents and request attachments are stored under `/data/property-files`; seeded and uploaded property photos are under `/data/property-images`. For local development, private seed photos can be placed in the ignored repository folder `data/property-images` using the filenames referenced by the seed records. Missing private photos use `apps/api/property-assets/generic-property.svg`. Backup creation uses SQLite's online backup API, then asynchronously copies property files, images, and integration settings into `/data/property-backups/<timestamp>`.
+Property documents and request attachments are stored under `/data/property-files`; uploaded property photos are stored under `/data/property-photos`. Admin-created property restore points are PostgreSQL custom-format dumps under `/data/backups`. Full deployment backups also include the complete `/data` tree so documents, photos, protected integration settings, and data-protection keys stay together.
 
 The in-app backup is useful for quick restore points, but production deployment should also run `deploy/scripts/backup.sh`, copy encrypted backups to another physical device, and test `deploy/scripts/restore.sh` periodically. Stop the application before a manual restore.
 
@@ -160,7 +160,7 @@ The in-app backup is useful for quick restore points, but production deployment 
 - Enable SMS only after documenting consent language and opt-out handling.
 - Test Stripe and PayPal in sandbox/test mode before switching to live credentials.
 - Back up before upgrades and regularly perform a restore drill.
-- Do not run two containers against the same SQLite data directory.
+- Do not run two application containers that share the same `/data` directory unless the deployment is explicitly designed for distributed job ownership.
 
 ## Current Scope and Remaining Production Work
 

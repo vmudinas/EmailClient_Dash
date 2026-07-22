@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+bin/
+obj/
 *.tsbuildinfo
 vite.config.js
 vite.config.js.map
@@ -21,6 +23,7 @@ docs/*
 !docs/property-management/
 docs/property-management/*
 !docs/property-management/README.md
+!docs/csharp-api-redesign.md
 
 # Env / secrets
 .env

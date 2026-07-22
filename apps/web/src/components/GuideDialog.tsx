@@ -84,9 +84,9 @@ function GuideContent({ section }: { section: GuideSection }) {
     return (
       <>
         <h3>Local storage</h3>
-        <p>Archive Mail stores normalized mail in one SQLite database and stores original attachment bytes in a SHA-256 blob directory.</p>
+        <p>Archive Mail stores normalized mail in PostgreSQL and stores original attachment bytes in a SHA-256 blob directory.</p>
         <dl className="guide-definitions">
-          <div><dt>SQLite</dt><dd>Folders, message fields, sanitized HTML, headers, local read state, tags, notes, search indexes, jobs, and diagnostics.</dd></div>
+          <div><dt>PostgreSQL</dt><dd>Folders, message fields, sanitized HTML, headers, local read state, tags, notes, full-text search indexes, jobs, and diagnostics.</dd></div>
           <div><dt>Blobs</dt><dd>Original attachment files. Identical attachments share one physical blob.</dd></div>
           <div><dt>Incoming</dt><dd>A managed source copy retained only while a browser upload is importing or restartable.</dd></div>
         </dl>
@@ -113,6 +113,9 @@ function GuideContent({ section }: { section: GuideSection }) {
         <p>Google requires a broad full-mail permission for POP, IMAP, and SMTP. The Gmail API provides narrower read, send, and optional mailbox-modify permissions without granting permanent deletion access.</p>
         <h4>Unread state</h4>
         <p>New Gmail messages initially use Gmail's unread label. When mailbox action sync is enabled, later read and unread changes are applied to Gmail first; otherwise they remain local.</p>
+        <h4>Package tracking</h4>
+        <p>Mail/Tracking detects Amazon, UPS, FedEx, USPS, DHL, and other shipment messages. It extracts the merchant, tracking or order number, status, and estimated delivery date locally, then groups the newest active updates under Arriving soon.</p>
+        <div className="guide-assurance"><ShieldCheck size={18} /><span>No tracking number is sent to a carrier automatically. Choosing View order opens the recognized carrier or Amazon page; messages without a safe official link open inside Archive Mail.</span></div>
         <h4>Disconnect</h4>
         <p>Disconnecting revokes the Google token. Messages and attachments already imported into local storage remain available.</p>
       </>
@@ -171,7 +174,7 @@ function GuideContent({ section }: { section: GuideSection }) {
           <li>Audit entries include user, time, action, result, IP address, route, and user agent. PINs, tokens, and email bodies are excluded.</li>
         </ul>
         <h4>Database adapters</h4>
-        <p>Admin settings stores the database connection in a bootstrap file outside the mail database. SQLite is the installed adapter. PostgreSQL, MySQL, and SQL Server require their own query, migration, and search adapters before they can be selected.</p>
+        <p>Admin settings stores the database connection in a bootstrap file outside the mail database. PostgreSQL is the required runtime adapter. SQLite remains available only to the one-time cutover migrator and automated tests; MySQL and SQL Server are not installed.</p>
       </>
     );
   }
@@ -193,7 +196,7 @@ function GuideContent({ section }: { section: GuideSection }) {
       <h3>How Archive Mail works</h3>
       <p>Archive Mail is a local-first reader and search index for PST, MBOX, and authorized Gmail accounts. Imported content stays on this computer unless you explicitly analyze a selected email with the optional OpenAI integration.</p>
       <div className="guide-flow" aria-label="Import flow">
-        <span>Source archive or Gmail</span><b>1</b><span>Parse and normalize</span><b>2</b><span>SQLite and attachment blobs</span><b>3</b><span>Browse, search, and organize</span>
+        <span>Source archive or Gmail</span><b>1</b><span>Parse and normalize</span><b>2</b><span>PostgreSQL and attachment blobs</span><b>3</b><span>Browse, search, and organize</span>
       </div>
       <h4>What remains remote?</h4>
       <p>Gmail content is stored locally. Tags, notes, archive deletion, and merging remain local. If mailbox action sync is enabled, read, star, Archive, folder, Spam, and Trash changes are also applied to connected Gmail messages.</p>

@@ -1,0 +1,28 @@
+using System.Text.Json;
+using ArchiveMail.Api.Calendar;
+using ArchiveMail.Api.Security;
+
+namespace ArchiveMail.Api.Endpoints;
+
+public static class CalendarEndpoints
+{
+    public static IEndpointRouteBuilder MapCalendarEndpoints(this IEndpointRouteBuilder app)
+    {
+        app.MapGet("/api/admin/calendar/accounts",async(HttpContext context,CalendarService calendar,CancellationToken token)=>Admin(context)?Results.Ok(await calendar.AccountsAsync(token)):Results.Forbid()).WithTags("Calendar");
+        app.MapPost("/api/admin/calendar/accounts",async(JsonElement input,HttpContext context,CalendarService calendar,CancellationToken token)=>{if(!Admin(context))return Results.Forbid();try{return Results.Ok(await calendar.AddAppleAsync(input,token));}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapDelete("/api/admin/calendar/accounts/{accountId}",async(string accountId,HttpContext context,CalendarService calendar,CancellationToken token)=>{if(!Admin(context))return Results.Forbid();await calendar.DeleteAccountAsync(accountId,token);return Results.NoContent();}).WithTags("Calendar");
+        app.MapGet("/api/calendar/sources",async(HttpContext context,CalendarService calendar,CancellationToken token)=>Results.Ok(await calendar.SourcesAsync(Session(context).User.Id,token))).WithTags("Calendar");
+        app.MapGet("/api/calendar/connections/{connectionId}/events",async(string connectionId,string? timeMin,string? timeMax,HttpContext context,CalendarService calendar,CancellationToken token)=>{if(timeMin is null||timeMax is null)return Results.BadRequest(new{error="timeMin and timeMax query parameters are required"});try{return Results.Ok(await calendar.GoogleEvents(connectionId,timeMin,timeMax,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapPost("/api/calendar/connections/{connectionId}/events",async(string connectionId,JsonElement input,HttpContext context,CalendarService calendar,CancellationToken token)=>{try{return Results.Ok(await calendar.CreateGoogle(connectionId,input,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapPatch("/api/calendar/connections/{connectionId}/events/{eventId}",async(string connectionId,string eventId,JsonElement input,HttpContext context,CalendarService calendar,CancellationToken token)=>{try{return Results.Ok(await calendar.UpdateGoogle(connectionId,eventId,input,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapDelete("/api/calendar/connections/{connectionId}/events/{eventId}",async(string connectionId,string eventId,HttpContext context,CalendarService calendar,CancellationToken token)=>{try{await calendar.DeleteGoogle(connectionId,eventId,Session(context).User.Id,token);return Results.NoContent();}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapGet("/api/calendar/sources/{sourceId}/events",async(string sourceId,string? timeMin,string? timeMax,HttpContext context,CalendarService calendar,CancellationToken token)=>{if(timeMin is null||timeMax is null)return Results.BadRequest(new{error="timeMin and timeMax query parameters are required"});try{return Results.Ok(await calendar.SourceEvents(sourceId,timeMin,timeMax,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapPost("/api/calendar/sources/{sourceId}/events",async(string sourceId,JsonElement input,HttpContext context,CalendarService calendar,CancellationToken token)=>{try{return Results.Ok(await calendar.CreateSource(sourceId,input,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapPatch("/api/calendar/sources/{sourceId}/events/{eventId}",async(string sourceId,string eventId,JsonElement input,HttpContext context,CalendarService calendar,CancellationToken token)=>{try{return Results.Ok(await calendar.UpdateSource(sourceId,eventId,input,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapDelete("/api/calendar/sources/{sourceId}/events/{eventId}",async(string sourceId,string eventId,HttpContext context,CalendarService calendar,CancellationToken token)=>{try{await calendar.DeleteSource(sourceId,eventId,Session(context).User.Id,token);return Results.NoContent();}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        app.MapPost("/api/messages/{messageId}/calendar-events",async(string messageId,JsonElement input,HttpContext context,CalendarService calendar,CancellationToken token)=>{try{var connection=input.GetProperty("connectionId").GetString()??throw new ArgumentException("connectionId is required");var value=await calendar.CreateFromMessage(messageId,connection,input.GetProperty("event"),Session(context).User.Id,token);return Results.Ok(value);}catch(Exception error){return Error(error);}}).WithTags("Calendar");
+        return app;
+    }
+    private static SessionRecord Session(HttpContext context)=>(SessionRecord)context.Items[AuthService.SessionItemKey]!;private static bool Admin(HttpContext context)=>Session(context).Role=="admin";
+    private static IResult Error(Exception error)=>error switch{KeyNotFoundException=>Results.NotFound(new{error=error.Message}),ArgumentException=>Results.BadRequest(new{error=error.Message}),InvalidOperationException=>Results.Conflict(new{error=error.Message}),_=>throw error};
+}

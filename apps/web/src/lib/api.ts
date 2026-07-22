@@ -74,6 +74,8 @@ import type {
   ReplyStylePatch,
   SearchFilters,
   SearchHit,
+  SenderFilingRuleCreate,
+  SenderFilingRuleCreateResult,
   SenderFilingStatus,
   SenderFolderRuleResult,
   SenderSpamRuleResult,
@@ -132,7 +134,8 @@ import type {
   UserCreate,
   UserSummary,
   UserUpdate,
-  DatabaseSettingsPatch
+  DatabaseSettingsPatch,
+  DatabaseConnectionTestResult
 } from "@email-client/shared";
 
 export interface UploadProgress {
@@ -624,8 +627,19 @@ export class ApiClient {
     return this.request(`/api/messages?${queryString(options)}`);
   }
 
-  inboxCategoryCounts(options: { archiveId?: string; folderId?: string; isRead?: boolean }): Promise<InboxCategoryCounts> {
-    return this.request(`/api/messages/category-counts?${queryString(options)}`);
+  async inboxCategoryCounts(options: { archiveId?: string; folderId?: string; isRead?: boolean }): Promise<InboxCategoryCounts> {
+    const counts = await this.request<InboxCategoryCounts & { mailTracking?: number }>(
+      `/api/messages/category-counts?${queryString(options)}`
+    );
+    return {
+      primary: counts.primary ?? 0,
+      promotions: counts.promotions ?? 0,
+      social: counts.social ?? 0,
+      updates: counts.updates ?? 0,
+      bills: counts.bills ?? 0,
+      medical: counts.medical ?? 0,
+      mail_tracking: counts.mail_tracking ?? counts.mailTracking ?? 0
+    };
   }
 
   inboxTabSettings(archiveId: string): Promise<InboxTabSettings> {
@@ -1097,6 +1111,10 @@ export class ApiClient {
     return this.request("/api/sharing");
   }
 
+  setSharingEnabled(enabled: boolean): Promise<SharingState> {
+    return this.request("/api/admin/sharing", { method: "POST", body: JSON.stringify({ enabled }) });
+  }
+
   adminSettings(): Promise<AdminSettings> {
     return this.request("/api/admin/settings");
   }
@@ -1120,6 +1138,13 @@ export class ApiClient {
   updateDatabaseSettings(input: DatabaseSettingsPatch): Promise<AdminSettings> {
     return this.request("/api/admin/settings/database", {
       method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  testDatabaseSettings(input: DatabaseSettingsPatch): Promise<DatabaseConnectionTestResult> {
+    return this.request("/api/admin/settings/database/test", {
+      method: "POST",
       body: JSON.stringify(input)
     });
   }
@@ -1275,6 +1300,13 @@ export class ApiClient {
     });
   }
 
+  createSenderFilingRule(input: SenderFilingRuleCreate): Promise<SenderFilingRuleCreateResult> {
+    return this.request("/api/admin/sender-filing/rules", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
   updateSenderFilingRuleFolder(ruleId: string, folderId: string): Promise<SenderFilingStatus> {
     return this.request(`/api/admin/sender-filing/rules/${encodeURIComponent(ruleId)}`, {
       method: "PATCH",
@@ -1420,8 +1452,6 @@ export class ApiClient {
 }
 
 export async function resolveRuntimeConfig(): Promise<RuntimeConfig> {
-  if (window.emailClient) return window.emailClient.getRuntimeConfig();
-
   const url = new URL(window.location.href);
   const shareFromUrl = url.searchParams.get("share");
   if (shareFromUrl) {

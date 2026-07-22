@@ -80,7 +80,7 @@ describe("CalendarView", () => {
       listCalendarSources: vi.fn().mockResolvedValue([]),
       listTodos: vi.fn().mockResolvedValue([])
     } as unknown as ApiClient;
-    render(<CalendarView api={api} connections={[{ ...CONNECTION, canManageCalendar: false }]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[{ ...CONNECTION, canManageCalendar: false }]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("No authorized calendars")).toBeTruthy());
     expect(screen.getByText("9 AM")).toBeTruthy();
@@ -93,11 +93,47 @@ describe("CalendarView", () => {
     } as unknown as ApiClient;
     const onReauthorize = vi.fn();
     const connection = { ...CONNECTION, canManageCalendar: false };
-    render(<CalendarView api={api} connections={[connection]} onReauthorize={onReauthorize} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[connection]} onAddGoogle={vi.fn()} onReauthorize={onReauthorize} onError={vi.fn()} />);
 
     const button = await waitFor(() => screen.getByRole("button", { name: "Reauthorize owner@example.test for calendar access" }));
     fireEvent.click(button);
     expect(onReauthorize).toHaveBeenCalledWith(connection);
+  });
+
+  it("offers reauthorization when a calendar-enabled account has a token error", async () => {
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([]),
+      listTodos: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+    const onReauthorize = vi.fn();
+    const connection = {
+      ...CONNECTION,
+      status: "error" as const,
+      lastError: "Google access token refresh failed"
+    };
+    render(<CalendarView api={api} connections={[connection]} onAddGoogle={vi.fn()} onReauthorize={onReauthorize} onError={vi.fn()} />);
+
+    const button = await waitFor(() => screen.getByRole("button", { name: "Reauthorize owner@example.test for calendar access" }));
+    fireEvent.click(button);
+    expect(onReauthorize).toHaveBeenCalledWith(connection);
+  });
+
+  it("always exposes add and reauthorize actions on the Calendar screen", async () => {
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([]),
+      listTodos: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+    const onAddGoogle = vi.fn();
+    const onReauthorize = vi.fn();
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={onAddGoogle} onReauthorize={onReauthorize} onError={vi.fn()} />);
+
+    const add = await waitFor(() => screen.getByRole("button", { name: "Add Google account" }));
+    fireEvent.click(add);
+    fireEvent.click(screen.getByRole("button", { name: "Reauthorize owner@example.test for Gmail and Calendar" }));
+
+    expect(onAddGoogle).toHaveBeenCalledOnce();
+    expect(onReauthorize).toHaveBeenCalledWith(CONNECTION);
   });
 
   it("loads the day's events and to-dos, and adds a new to-do", async () => {
@@ -115,7 +151,7 @@ describe("CalendarView", () => {
         updatedAt: "2026-07-13T00:00:00.000Z"
       })
     } as unknown as ApiClient;
-    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("Standup")).toBeTruthy());
     expect(screen.getByText("Write the report")).toBeTruthy();
@@ -135,7 +171,7 @@ describe("CalendarView", () => {
       listCalendarSourceEvents: vi.fn().mockResolvedValue([EVENT]),
       listTodos: vi.fn().mockResolvedValue([TODO])
     } as unknown as ApiClient;
-    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
     const highlighted = await waitFor(() => screen.getByTitle(/Standup/));
     expect(highlighted.className).toContain("has-items");
@@ -153,7 +189,7 @@ describe("CalendarView", () => {
       listCalendarSourceEvents: vi.fn().mockResolvedValue([EVENT]),
       listTodos: vi.fn().mockResolvedValue([])
     } as unknown as ApiClient;
-    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
     const card = await waitFor(() => screen.getByRole("button", { name: "View details for Standup" }));
     fireEvent.click(card);
@@ -176,7 +212,7 @@ describe("CalendarView", () => {
       listTodos: vi.fn().mockResolvedValue([TODO]),
       updateTodo: vi.fn().mockResolvedValue({ ...TODO, completed: true })
     } as unknown as ApiClient;
-    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("Write the report")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Mark done" }));
@@ -202,7 +238,7 @@ describe("CalendarView", () => {
       listTodos: vi.fn().mockResolvedValue([])
     } as unknown as ApiClient;
 
-    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
     const personal = await screen.findByRole("checkbox", { name: /Personal/ });
     const work = screen.getByRole("checkbox", { name: /Work/ });
@@ -228,7 +264,7 @@ describe("CalendarView", () => {
       listTodos: vi.fn().mockResolvedValue([TODO])
     } as unknown as ApiClient;
 
-    render(<CalendarView api={api} connections={[CONNECTION]} onReauthorize={vi.fn()} onError={vi.fn()} />);
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
 
     const agenda = await waitFor(() => screen.getByLabelText(/Agenda for/));
     expect(screen.queryByText("9 AM")).toBeNull();

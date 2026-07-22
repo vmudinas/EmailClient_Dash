@@ -41,7 +41,7 @@ export type AiJobTask = "analyze" | "draft_reply";
 export type AiPriority = "low" | "normal" | "high" | "urgent";
 export type AccountRole = "admin" | "user" | "renter";
 export type SessionRole = AccountRole | "viewer";
-export type DatabaseProvider = "sqlite" | "postgresql" | "mysql" | "mssql";
+export type DatabaseProvider = "postgresql" | "mssql";
 
 export interface Archive {
   id: string;
@@ -130,6 +130,19 @@ export interface InboxTabReclassifyResult {
   changedMessages: number;
 }
 
+export type ShipmentCarrier = "amazon" | "ups" | "fedex" | "usps" | "dhl" | "unknown";
+export type ShipmentStatus = "order_confirmed" | "shipped" | "in_transit" | "out_for_delivery" | "delivered" | "delayed" | "unknown";
+
+export interface ShipmentSummary {
+  carrier: ShipmentCarrier;
+  merchant: string;
+  trackingNumber: string | null;
+  orderNumber: string | null;
+  status: ShipmentStatus;
+  estimatedDeliveryDate: string | null;
+  trackingUrl: string | null;
+}
+
 export const DEFAULT_INBOX_TABS: ReadonlyArray<InboxTabDefinition> = [
   { id: "primary", label: "Primary", description: "Personal and important conversations.", enabled: true, position: 0, color: "#1a73e8", keywords: [], senderDomains: [], keywordOnly: false },
   { id: "promotions", label: "Promotions", description: "Deals, offers, newsletters, and marketing.", enabled: true, position: 1, color: "#188038", keywords: [], senderDomains: [], keywordOnly: false },
@@ -158,6 +171,7 @@ export interface MessageSummary {
   hasCalendarEvent?: boolean;
   hasPendingFollowUp?: boolean;
   hasReply?: boolean;
+  shipment?: ShipmentSummary;
   state: LocalMessageState;
 }
 
@@ -752,9 +766,14 @@ export interface AdminInsights {
 export interface SenderFilingRule {
   id: string;
   archiveId: string;
+  matchField: "from" | "to";
+  matchAddress: string;
   senderAddress: string;
   senderName: string | null;
   ruleType: "folder" | "spam";
+  sourceScope: "inbox" | "folder" | "all";
+  sourceFolderId: string | null;
+  sourceFolderPath: string | null;
   folderId: string;
   folderPath: string;
   messageCount: number;
@@ -770,6 +789,13 @@ export interface SenderFilingStatus {
   lastRunAt: string | null;
   lastRunMovedMessages: number;
   lastRunCreatedFolders: number;
+}
+
+export interface SenderFilingRuleCreateResult {
+  statuses: SenderFilingStatus[];
+  createdRules: number;
+  createdFolders: number;
+  movedMessages: number;
 }
 
 export interface SenderSpamRuleResult {
@@ -1125,7 +1151,16 @@ export interface DatabaseProviderOption {
   id: DatabaseProvider;
   label: string;
   available: boolean;
+  canTest?: boolean;
   description: string;
+}
+
+export interface DatabaseConnectionTestResult {
+  success: boolean;
+  provider: DatabaseProvider;
+  latencyMs: number;
+  serverVersion: string;
+  message: string;
 }
 
 export interface AdminSettings {
@@ -2006,6 +2041,37 @@ export const senderFilingArchiveSchema = z.object({
 
 export type SenderFilingArchive = z.infer<typeof senderFilingArchiveSchema>;
 
+export const senderFilingRuleCreateSchema = z.object({
+  archiveId: z.string().uuid(),
+  archiveScope: z.enum(["archive", "all"]).default("archive"),
+  matchField: z.enum(["from", "to"]),
+  matchAddress: z.string().trim().email().max(320).transform((value) => value.toLowerCase()),
+  sourceScope: z.enum(["inbox", "folder", "all"]),
+  sourceFolderId: z.string().uuid().nullable().optional(),
+  destinationFolderId: z.string().uuid().nullable().optional(),
+  destinationFolderName: z.string().trim().min(1).max(120).refine(
+    (name) => !/[\/\\\u0000-\u001f\u007f]/.test(name),
+    "Name cannot contain slashes or control characters"
+  ).optional(),
+  applyExisting: z.boolean().default(true)
+}).strict().superRefine((value, context) => {
+  if (value.sourceScope === "folder" && !value.sourceFolderId) {
+    context.addIssue({ code: "custom", path: ["sourceFolderId"], message: "Choose the folder to apply this rule to" });
+  }
+  if (value.archiveScope === "all" && value.sourceScope === "folder") {
+    context.addIssue({ code: "custom", path: ["sourceScope"], message: "A specific source folder can only be used with one archive" });
+  }
+  const destinations = Number(Boolean(value.destinationFolderId)) + Number(Boolean(value.destinationFolderName));
+  if (destinations !== 1) {
+    context.addIssue({ code: "custom", path: ["destinationFolderId"], message: "Choose an existing destination or enter a new folder name" });
+  }
+  if (value.archiveScope === "all" && value.destinationFolderId) {
+    context.addIssue({ code: "custom", path: ["destinationFolderId"], message: "Use a new folder name when applying a rule to all archives" });
+  }
+});
+
+export type SenderFilingRuleCreate = z.infer<typeof senderFilingRuleCreateSchema>;
+
 export const importOptionsSchema = z.object({
   ocrEnabled: z.boolean().default(false),
   replaceArchiveId: z.string().uuid().optional()
@@ -2050,6 +2116,7 @@ export const mailboxMoveSchema = z.object({
 export type MailboxMove = z.infer<typeof mailboxMoveSchema>;
 
 export const gmailAuthRequestSchema = z.object({
+  connectionId: z.string().uuid().nullable().optional(),
   archiveId: z.string().uuid().nullable().optional(),
   folderId: z.string().uuid().nullable().optional(),
   archiveName: displayNameSchema.default("Gmail"),
@@ -2250,7 +2317,7 @@ export const userUpdateSchema = z.object({
 export type UserUpdate = z.infer<typeof userUpdateSchema>;
 
 export const databaseSettingsPatchSchema = z.object({
-  provider: z.enum(["sqlite", "postgresql", "mysql", "mssql"]),
+  provider: z.enum(["postgresql", "mssql"]),
   connectionString: z.string().trim().min(1).max(2_000)
 }).strict();
 
