@@ -221,6 +221,20 @@ public sealed class DatabaseInitializer(
           staging_path TEXT,
           parser_name TEXT
         );
+        -- These columns belong to the C# resumable-import format and do not exist in
+        -- SQLite databases created by the retired Node API.
+        ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT;
+        ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS lease_until TEXT;
+        ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS attempt BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS checkpoint_version BIGINT NOT NULL DEFAULT 1;
+        ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS staging_path TEXT;
+        ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS parser_name TEXT;
+        UPDATE import_jobs
+        SET status = 'failed', can_resume = 0, worker_id = NULL, lease_until = NULL,
+            message = 'Legacy Node import stopped during PostgreSQL cutover. Clear it and restart with the C# importer.'
+        WHERE status IN ('queued', 'running', 'cancelled')
+          AND processed_items > 0
+          AND checkpoint_version <> 2;
         CREATE INDEX IF NOT EXISTS import_jobs_updated_idx ON import_jobs(updated_at DESC);
         CREATE INDEX IF NOT EXISTS import_jobs_claim_idx ON import_jobs(status, updated_at) WHERE status IN ('queued', 'running');
 
