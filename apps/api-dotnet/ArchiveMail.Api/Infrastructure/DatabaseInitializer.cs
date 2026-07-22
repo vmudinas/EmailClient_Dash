@@ -351,6 +351,20 @@ public sealed class DatabaseInitializer(
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        -- The one-time SQLite cutover preserves the legacy sender-rule table. Upgrade it
+        -- before creating indexes that reference the folder-scoped rule columns. Legacy
+        -- rules applied to every folder, so retain that behavior for existing rows while
+        -- keeping Inbox as the default for newly created rows.
+        ALTER TABLE sender_filing_rules
+          ADD COLUMN IF NOT EXISTS match_field TEXT NOT NULL DEFAULT 'from'
+          CHECK(match_field IN ('from', 'to'));
+        ALTER TABLE sender_filing_rules
+          ADD COLUMN IF NOT EXISTS source_scope TEXT NOT NULL DEFAULT 'all'
+          CHECK(source_scope IN ('inbox', 'folder', 'all'));
+        ALTER TABLE sender_filing_rules
+          ADD COLUMN IF NOT EXISTS source_folder_id TEXT REFERENCES folders(id) ON DELETE CASCADE;
+        ALTER TABLE sender_filing_rules ALTER COLUMN source_scope SET DEFAULT 'inbox';
+        DROP INDEX IF EXISTS sender_filing_rules_archive_id_sender_address_unique;
         CREATE INDEX IF NOT EXISTS sender_filing_rules_archive_idx ON sender_filing_rules(archive_id, created_at);
         CREATE UNIQUE INDEX IF NOT EXISTS sender_filing_rules_match_idx ON sender_filing_rules(
           archive_id, match_field, sender_address, source_scope, COALESCE(source_folder_id, '')
