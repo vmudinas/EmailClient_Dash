@@ -17,10 +17,18 @@ public static class PostgresSettings
         builder.Username = Environment.GetEnvironmentVariable("PGUSER") ?? builder.Username;
         builder.Password = Environment.GetEnvironmentVariable("PGPASSWORD") ?? builder.Password;
         builder.MaxPoolSize = ParseInt(configuration["Postgres:MaxPoolSize"], builder.MaxPoolSize);
-        var schema = ResolveSchema(configuration);
-        builder.SearchPath = $"{schema},public";
-        builder.ApplicationName = "archive-mail-csharp";
-        builder.NoResetOnClose = false;
+        return ApplyRuntimeDefaults(builder.ConnectionString, ResolveSchema(configuration));
+    }
+
+    public static string ApplyRuntimeDefaults(string connectionString, string schema)
+    {
+        ValidateSchema(schema);
+        var builder = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            SearchPath = $"{schema},public",
+            ApplicationName = "archive-mail-csharp",
+            NoResetOnClose = false
+        };
         return builder.ConnectionString;
     }
 
@@ -29,9 +37,14 @@ public static class PostgresSettings
         var schema = Environment.GetEnvironmentVariable("POSTGRES_SCHEMA")
             ?? configuration["Postgres:Schema"]
             ?? "archive_mail";
+        ValidateSchema(schema);
+        return schema;
+    }
+
+    private static void ValidateSchema(string schema)
+    {
         if (!System.Text.RegularExpressions.Regex.IsMatch(schema, "^[a-zA-Z_][a-zA-Z0-9_]*$"))
             throw new InvalidOperationException("PostgreSQL schema must be a simple identifier");
-        return schema;
     }
 
     private static int ParseInt(string? value, int fallback) =>

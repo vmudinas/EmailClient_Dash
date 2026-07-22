@@ -120,13 +120,11 @@ app.Use(async (context, next) =>
         await context.Response.WriteAsJsonAsync(new { error = "Login required" }, context.RequestAborted);
         return;
     }
-    if ((context.Request.Path.StartsWithSegments("/api/import-jobs")
-         || context.Request.Path.StartsWithSegments("/api/uploads")
-         || context.Request.Path.StartsWithSegments("/api/admin/import"))
-        && session.Role is not ("admin" or "user"))
+    var denialReason = ApiRouteAuthorization.DenialReason(session, context.Request.Method, context.Request.Path);
+    if (denialReason is not null)
     {
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
-        await context.Response.WriteAsJsonAsync(new { error = "This account cannot manage imports" }, context.RequestAborted);
+        await context.Response.WriteAsJsonAsync(new { error = denialReason }, context.RequestAborted);
         return;
     }
     context.Items[AuthService.SessionItemKey] = session;

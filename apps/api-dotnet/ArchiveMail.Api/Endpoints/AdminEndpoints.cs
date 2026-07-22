@@ -1,14 +1,73 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using ArchiveMail.Api.Security;
 using Npgsql;
 
 namespace ArchiveMail.Api.Endpoints;
 
+public sealed record SharingState(bool Enabled, string? Url, string? ExpiresAt);
+
 public sealed class SharingService
 {
-    private volatile bool enabled;
-    public object State(HttpContext context)=>new{enabled,url=enabled?$"{context.Request.Scheme}://{context.Request.Host}":null,expiresAt=(string?)null};
-    public object Set(bool value,HttpContext context){enabled=value;return State(context);}
+    private static readonly TimeSpan SharingDuration = TimeSpan.FromHours(8);
+    private readonly Lock _lock = new();
+    private readonly Func<DateTimeOffset> _utcNow;
+    private string? _token;
+    private byte[]? _tokenHash;
+    private DateTimeOffset? _expiresAt;
+
+    public SharingService() : this(() => DateTimeOffset.UtcNow) { }
+    internal SharingService(Func<DateTimeOffset> utcNow) => _utcNow = utcNow;
+
+    public SharingState State(HttpContext context)
+    {
+        lock (_lock) return Current(context);
+    }
+
+    public SharingState Set(bool enabled, HttpContext context)
+    {
+        lock (_lock)
+        {
+            Clear();
+            if (enabled)
+            {
+                _token = Base64Url(RandomNumberGenerator.GetBytes(32));
+                _tokenHash = Hash(_token);
+                _expiresAt = _utcNow().Add(SharingDuration);
+            }
+            return Current(context);
+        }
+    }
+
+    public bool TryValidate(string? token, out DateTimeOffset expiresAt)
+    {
+        lock (_lock)
+        {
+            expiresAt = default;
+            if (!IsActive() || string.IsNullOrWhiteSpace(token) || _tokenHash is null) return false;
+            var suppliedHash = Hash(token);
+            if (!CryptographicOperations.FixedTimeEquals(_tokenHash, suppliedHash)) return false;
+            expiresAt = _expiresAt!.Value;
+            return true;
+        }
+    }
+
+    private SharingState Current(HttpContext context)
+    {
+        if (!IsActive())
+        {
+            Clear();
+            return new(false, null, null);
+        }
+        var origin = $"{context.Request.Scheme}://{context.Request.Host}";
+        return new(true, $"{origin}/?share={Uri.EscapeDataString(_token!)}", _expiresAt!.Value.ToString("O"));
+    }
+
+    private bool IsActive() => _token is not null && _tokenHash is not null && _expiresAt > _utcNow();
+    private void Clear() { _token = null; _tokenHash = null; _expiresAt = null; }
+    private static byte[] Hash(string token) => SHA256.HashData(Encoding.UTF8.GetBytes(token));
+    private static string Base64Url(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 }
 
 public static class AdminEndpoints
@@ -16,7 +75,13 @@ public static class AdminEndpoints
     public static IEndpointRouteBuilder MapAdminEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/sharing",(HttpContext context,SharingService sharing)=>Admin(context)?Results.Ok(sharing.State(context)):Results.Forbid()).WithTags("Sharing");
-        app.MapPost("/api/admin/sharing",(JsonElement input,HttpContext context,SharingService sharing)=>Admin(context)?Results.Ok(sharing.Set(input.TryGetProperty("enabled",out var value)&&value.ValueKind==JsonValueKind.True,context)):Results.Forbid()).WithTags("Sharing");
+        app.MapPost("/api/admin/sharing",async(JsonElement input,HttpContext context,SharingService sharing,AuthService auth,CancellationToken token)=>
+        {
+            if(!Admin(context))return Results.Forbid();
+            var state=sharing.Set(input.TryGetProperty("enabled",out var value)&&value.ValueKind==JsonValueKind.True,context);
+            await auth.RevokeViewerSessionsAsync(token);
+            return Results.Ok(state);
+        }).WithTags("Sharing");
         app.MapGet("/api/admin/insights",async(HttpContext context,NpgsqlDataSource database,CancellationToken token)=>
         {
             if(!Admin(context))return Results.Forbid();var owner=Session(context).User.Id;

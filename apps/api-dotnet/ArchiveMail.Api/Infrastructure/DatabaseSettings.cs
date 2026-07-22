@@ -88,7 +88,9 @@ public static class DatabaseBootstrap
 
         var saved = store.TryLoad();
         if (saved is not null)
-            return new(saved.Value.Provider, saved.Value.ConnectionString, "admin", dataDirectory, store.SettingsPath, false);
+            return new(saved.Value.Provider,
+                ResolveConnectionString(saved.Value.Provider, saved.Value.ConnectionString, configuration),
+                "admin", dataDirectory, store.SettingsPath, false);
 
         var configuredProvider = DatabaseProviderIds.Normalize(configuration["Database:Provider"]);
         var configuredConnection = configuration.GetConnectionString("ArchiveMail")
@@ -109,7 +111,13 @@ public static class DatabaseBootstrap
         string? connectionString,
         IConfiguration configuration)
     {
-        if (!string.IsNullOrWhiteSpace(connectionString)) return connectionString.Trim();
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            var trimmed = connectionString.Trim();
+            return provider == DatabaseProviderIds.PostgreSql
+                ? PostgresSettings.ApplyRuntimeDefaults(trimmed, PostgresSettings.ResolveSchema(configuration))
+                : trimmed;
+        }
         if (provider == DatabaseProviderIds.PostgreSql)
             return PostgresSettings.ResolveConnectionString(configuration);
         throw new InvalidOperationException("Set ConnectionStrings__ArchiveMail before starting with Microsoft SQL Server");
@@ -189,6 +197,7 @@ public sealed class DatabaseSettingsStore
 
 public sealed class DatabaseSettingsService(
     ActiveDatabaseConfiguration active,
+    IConfiguration configuration,
     ILogger<DatabaseSettingsService> logger)
 {
     private static readonly DatabaseProviderOption[] ProviderOptions =
@@ -213,7 +222,9 @@ public sealed class DatabaseSettingsService(
     {
         var saved = active.EnvironmentManaged ? null : _store.TryLoad();
         var configuredProvider = saved?.Provider ?? active.Provider;
-        var configuredConnection = saved?.ConnectionString ?? active.ConnectionString;
+        var configuredConnection = saved is null
+            ? active.ConnectionString
+            : NormalizeForRuntime(saved.Value.Provider, saved.Value.ConnectionString);
         return new(
             active.Provider,
             MaskConnectionString(active.Provider, active.ConnectionString),
@@ -277,9 +288,14 @@ public sealed class DatabaseSettingsService(
         if (!option.Available)
             throw new DatabaseProviderNotReadyException(option.Description);
         await TestAsync(request, cancellationToken);
-        _store.Save(provider, request.ConnectionString);
+        _store.Save(provider, NormalizeForRuntime(provider, request.ConnectionString));
         return View();
     }
+
+    private string NormalizeForRuntime(string provider, string connectionString) =>
+        provider == DatabaseProviderIds.PostgreSql
+            ? PostgresSettings.ApplyRuntimeDefaults(connectionString.Trim(), PostgresSettings.ResolveSchema(configuration))
+            : connectionString.Trim();
 
     public static string MaskConnectionString(string provider, string connectionString)
     {

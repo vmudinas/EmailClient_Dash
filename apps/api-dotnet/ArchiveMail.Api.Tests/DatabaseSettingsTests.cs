@@ -1,4 +1,5 @@
 using ArchiveMail.Api.Infrastructure;
+using Npgsql;
 using Xunit;
 
 namespace ArchiveMail.Api.Tests;
@@ -61,6 +62,39 @@ public sealed class DatabaseSettingsTests : IDisposable
         Assert.DoesNotContain("sql-secret", sqlServer, StringComparison.Ordinal);
         Assert.Contains("********", postgres, StringComparison.Ordinal);
         Assert.Contains("********", sqlServer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AppliesConfiguredSchemaToExplicitPostgresConnections()
+    {
+        var normalized = PostgresSettings.ApplyRuntimeDefaults(
+            "Host=db;Database=mail;Username=archive;Password=secret",
+            "tenant_mail");
+        var builder = new NpgsqlConnectionStringBuilder(normalized);
+
+        Assert.Equal("tenant_mail,public", builder.SearchPath);
+        Assert.Equal("archive-mail-csharp", builder.ApplicationName);
+        Assert.False(builder.NoResetOnClose);
+    }
+
+    [Fact]
+    public void ReplacesConflictingExplicitSearchPathWithRuntimeSchema()
+    {
+        var normalized = PostgresSettings.ApplyRuntimeDefaults(
+            "Host=db;Database=mail;Search Path=public",
+            "archive_mail");
+
+        Assert.Equal("archive_mail,public", new NpgsqlConnectionStringBuilder(normalized).SearchPath);
+    }
+
+    [Theory]
+    [InlineData("bad-schema")]
+    [InlineData("schema,public")]
+    [InlineData("1schema")]
+    public void RejectsUnsafeRuntimeSchemas(string schema)
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            PostgresSettings.ApplyRuntimeDefaults("Host=db;Database=mail", schema));
     }
 
     public void Dispose()
