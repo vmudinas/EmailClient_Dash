@@ -627,8 +627,19 @@ export class ApiClient {
     return this.request(`/api/messages?${queryString(options)}`);
   }
 
-  inboxCategoryCounts(options: { archiveId?: string; folderId?: string; isRead?: boolean }): Promise<InboxCategoryCounts> {
-    return this.request(`/api/messages/category-counts?${queryString(options)}`);
+  async inboxCategoryCounts(options: { archiveId?: string; folderId?: string; isRead?: boolean }): Promise<InboxCategoryCounts> {
+    const counts = await this.request<InboxCategoryCounts & { mailTracking?: number }>(
+      `/api/messages/category-counts?${queryString(options)}`
+    );
+    return {
+      primary: counts.primary ?? 0,
+      promotions: counts.promotions ?? 0,
+      social: counts.social ?? 0,
+      updates: counts.updates ?? 0,
+      bills: counts.bills ?? 0,
+      medical: counts.medical ?? 0,
+      mail_tracking: counts.mail_tracking ?? counts.mailTracking ?? 0
+    };
   }
 
   inboxTabSettings(archiveId: string): Promise<InboxTabSettings> {

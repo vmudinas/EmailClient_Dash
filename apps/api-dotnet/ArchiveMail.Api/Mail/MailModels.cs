@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace ArchiveMail.Api.Mail;
 
 public sealed record ArchiveDto(
@@ -112,6 +114,7 @@ public sealed record InboxCategoryCountsDto(
     long Updates,
     long Bills,
     long Medical,
+    [property: JsonPropertyName("mail_tracking")]
     long MailTracking);
 
 public sealed record MessageFilters(

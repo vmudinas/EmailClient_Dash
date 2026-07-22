@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MessageSummary } from "@email-client/shared";
+import type { InboxCategoryCounts, MessageSummary } from "@email-client/shared";
 import { DEFAULT_INBOX_TABS } from "@email-client/shared";
 import { MessageList } from "./MessageList.js";
 
@@ -190,9 +190,8 @@ describe("MessageList drag and drop", () => {
             social: 4,
             updates: 6,
             bills: 3,
-            medical: 2,
-            mail_tracking: 5
-          },
+            medical: 2
+          } as unknown as InboxCategoryCounts,
           onSelect: onSelectCategory
         }}
         {...BULK_SELECTION_PROPS}
@@ -203,7 +202,7 @@ describe("MessageList drag and drop", () => {
     expect(screen.queryByRole("button", { name: "Promotions, 8 messages" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Community, 4 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("social");
-    fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 5 messages" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 0 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("mail_tracking");
     expect(screen.getByText("No primary messages")).toBeTruthy();
   });
