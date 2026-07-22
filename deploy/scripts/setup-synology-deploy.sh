@@ -4,6 +4,8 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-gliukaz@synology.local}
 CONTROL_PATH="$HOME/.ssh/archive-mail-setup-$$"
+# Synology exposes a virtual shared-folder root to SCP/SFTP, so /tmp there is
+# not the /tmp seen by its SSH shell. Stream the script over SSH instead.
 REMOTE_TEMP="/tmp/archive-mail-rebuild-$$.sh"
 SSH_IDENTITY=${ARCHIVE_MAIL_SSH_IDENTITY:-$HOME/.ssh/archive_mail_synology_ed25519}
 
@@ -35,8 +37,8 @@ case "$remote_user" in
   ''|*[!A-Za-z0-9_-]*) echo "The remote username is invalid." >&2; exit 1 ;;
 esac
 
-scp -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -o ControlPath="$CONTROL_PATH" \
-  "$SCRIPT_DIR/synology-rebuild.sh" "$NAS_HOST:$REMOTE_TEMP"
+ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" \
+  "umask 077; tee '$REMOTE_TEMP' >/dev/null" < "$SCRIPT_DIR/synology-rebuild.sh"
 
 echo "Synology may ask for the sudo password once. Future deployments will not need it."
 ssh -tt -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" "sudo /bin/sh -c '
