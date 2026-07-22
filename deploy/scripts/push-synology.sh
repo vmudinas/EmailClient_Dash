@@ -148,6 +148,10 @@ fi
 
 if [ "$direct_rebuild" = true ]; then
   echo "Passwordless rebuild is configured. Rebuilding directly..."
+  # A previous scheduled-task fallback may have timed out while leaving its
+  # request marker behind. Remove it before the direct rebuild so a DSM task
+  # cannot start a second, overlapping deployment later.
+  remote "rm -f '$NAS_BACKUP_DIR/rebuild.request' '$NAS_BACKUP_DIR/rebuild.status'"
   if remote "sudo -n $REBUILD_BIN"; then
     echo "Deployment and PostgreSQL migration completed successfully."
     exit 0
@@ -185,5 +189,6 @@ while [ "$attempt" -lt 180 ]; do
 done
 
 remote "tail -100 '$NAS_BACKUP_DIR/rebuild.log' 2>/dev/null || true" >&2
+remote "rm -f '$NAS_BACKUP_DIR/rebuild.request'" || true
 echo "Timed out waiting for the Synology deployment task." >&2
 exit 1

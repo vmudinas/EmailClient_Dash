@@ -48,7 +48,11 @@ ssh -tt -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" 
   chmod 755 /usr/local/bin/archive-mail-rebuild.sh
   printf \"%s ALL=(root) NOPASSWD: /usr/local/bin/archive-mail-rebuild.sh\\n\" $remote_user > /etc/sudoers.d/archive-mail
   chmod 440 /etc/sudoers.d/archive-mail
-  visudo -c
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -c
+  else
+    echo "visudo is not installed; the caller will validate the rule with sudo -n -l."
+  fi
 '"
 
 if ! ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" \
