@@ -753,6 +753,16 @@ export function App() {
   }, [api, readOnly, refreshGmailConnections]);
 
   useEffect(() => {
+    const handleGmailAuthorization = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin
+        || event.data?.type !== "archive-mail-gmail-oauth") return;
+      void refreshGmailConnections(false);
+    };
+    window.addEventListener("message", handleGmailAuthorization);
+    return () => window.removeEventListener("message", handleGmailAuthorization);
+  }, [refreshGmailConnections]);
+
+  useEffect(() => {
     const syncing = gmailConnections.some((connection) => connection.status === "syncing");
     if (!gmailOpen && !syncing) return;
     void refreshGmailConnections(gmailOpen);
@@ -1806,6 +1816,7 @@ export function App() {
 
   const reauthorizeGmail = (connection: GmailConnection) => {
     void connectGmail({
+      connectionId: connection.id,
       archiveId: connection.archiveId,
       folderId: connection.folderId,
       archiveName: connection.archiveName,

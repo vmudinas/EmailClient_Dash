@@ -286,8 +286,12 @@ export function CalendarView({ api, connections, onReauthorize, onError }: Calen
   });
   const positionedEvents = positionTimedEvents(events.filter((event) => !event.allDay), date);
   const currentMinute = date === todayIso() ? minutesIntoDay(new Date()) : null;
-  const missingCalendarConnections = connections.filter((connection) => !connection.canManageCalendar);
-  const hasAuthorizedGoogleCalendar = connections.some((connection) => connection.canManageCalendar);
+  const missingCalendarConnections = connections.filter(
+    (connection) => !connection.canManageCalendar || connection.status === "error"
+  );
+  const hasAuthorizedGoogleCalendar = connections.some(
+    (connection) => connection.canManageCalendar && connection.status !== "error"
+  );
   const needsAuthorization = !hasAuthorizedGoogleCalendar && missingCalendarConnections.length > 0;
 
   return (

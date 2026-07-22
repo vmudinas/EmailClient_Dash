@@ -100,6 +100,24 @@ describe("CalendarView", () => {
     expect(onReauthorize).toHaveBeenCalledWith(connection);
   });
 
+  it("offers reauthorization when a calendar-enabled account has a token error", async () => {
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([]),
+      listTodos: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+    const onReauthorize = vi.fn();
+    const connection = {
+      ...CONNECTION,
+      status: "error" as const,
+      lastError: "Google access token refresh failed"
+    };
+    render(<CalendarView api={api} connections={[connection]} onReauthorize={onReauthorize} onError={vi.fn()} />);
+
+    const button = await waitFor(() => screen.getByRole("button", { name: "Reauthorize owner@example.test for calendar access" }));
+    fireEvent.click(button);
+    expect(onReauthorize).toHaveBeenCalledWith(connection);
+  });
+
   it("loads the day's events and to-dos, and adds a new to-do", async () => {
     const api = {
       listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),

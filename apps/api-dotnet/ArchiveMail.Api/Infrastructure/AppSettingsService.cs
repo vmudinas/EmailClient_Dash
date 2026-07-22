@@ -67,6 +67,7 @@ public sealed class AppSettingsService
             options => options.SetApplicationName("ArchiveMail.AppSettings.v1"));
         _protector = provider.CreateProtector("application-settings");
         _settings = Load();
+        if (ImportLegacyGmailSettings(database.DataDirectory)) Save();
     }
 
     public string SettingsPath { get; }
@@ -228,6 +229,39 @@ public sealed class AppSettingsService
         }
     }
 
+    private bool ImportLegacyGmailSettings(string dataDirectory)
+    {
+        if (!string.IsNullOrWhiteSpace(_settings.GmailValue.ClientId)) return false;
+        var legacyPath = Path.Combine(dataDirectory, "gmail-oauth-settings.json");
+        if (!File.Exists(legacyPath)) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(legacyPath));
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            var installed = Object(root, "installed");
+            var web = Object(root, "web");
+            var clientId = String(root, "clientId") ?? String(root, "client_id")
+                ?? String(installed, "client_id") ?? String(web, "client_id");
+            if (string.IsNullOrWhiteSpace(clientId)) return false;
+            var clientSecret = String(root, "clientSecret") ?? String(root, "client_secret")
+                ?? String(installed, "client_secret") ?? String(web, "client_secret") ?? "";
+            var current = _settings.GmailValue;
+            _settings = _settings with { Gmail = current with
+            {
+                ClientId = clientId,
+                ClientSecret = clientSecret,
+                SyncIntervalMinutes = Integer(root, "syncIntervalMinutes") ?? current.SyncIntervalMinutes,
+                SyncMailboxActions = Boolean(root, "syncMailboxActions") ?? current.SyncMailboxActions
+            }};
+            return true;
+        }
+        catch (Exception error) when (error is IOException or JsonException)
+        {
+            return false;
+        }
+    }
+
     private void Save()
     {
         var temporary = $"{SettingsPath}.{Guid.NewGuid():N}.tmp";
@@ -278,6 +312,9 @@ public sealed class AppSettingsService
     private static string? String(JsonElement value, string name) =>
         value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.String
             ? item.GetString()?.Trim() : null;
+    private static JsonElement Object(JsonElement value, string name) =>
+        value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var item)
+            && item.ValueKind == JsonValueKind.Object ? item : default;
     private static int? Integer(JsonElement value, string name) =>
         value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var item) && item.TryGetInt32(out var result) ? result : null;
     private static bool? Boolean(JsonElement value, string name) =>

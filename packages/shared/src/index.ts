@@ -2116,6 +2116,7 @@ export const mailboxMoveSchema = z.object({
 export type MailboxMove = z.infer<typeof mailboxMoveSchema>;
 
 export const gmailAuthRequestSchema = z.object({
+  connectionId: z.string().uuid().nullable().optional(),
   archiveId: z.string().uuid().nullable().optional(),
   folderId: z.string().uuid().nullable().optional(),
   archiveName: displayNameSchema.default("Gmail"),

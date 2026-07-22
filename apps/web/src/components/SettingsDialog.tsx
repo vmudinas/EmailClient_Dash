@@ -1835,7 +1835,7 @@ function GmailPanel({
                     )}
                   </div>
                   <div className="settings-button-row">
-                    {syncMailboxActions && !connection.canModifyMailbox && onReauthorize && (
+                    {onReauthorize && (connection.status === "error" || (syncMailboxActions && !connection.canModifyMailbox)) && (
                       <button type="button" className="secondary-button compact" disabled={acting || busy} onClick={() => onReauthorize(connection)}>
                         <KeyRound size={15} /> Reauthorize
                       </button>
@@ -1969,8 +1969,8 @@ function CalendarAccountsPanel({
           <ul className="calendar-account-list">
             {connections.map((connection) => (
               <li key={connection.id}>
-                <div><strong>{connection.email}</strong><small>{connection.canManageCalendar ? "Calendar authorized" : "Calendar permission missing"}</small></div>
-                {connection.canManageCalendar ? <span className="status-badge success">Connected</span> : (
+                <div><strong>{connection.email}</strong><small>{connection.status === "error" ? (connection.lastError ?? "Google authorization failed") : connection.canManageCalendar ? "Calendar authorized" : "Calendar permission missing"}</small></div>
+                {connection.canManageCalendar && connection.status !== "error" ? <span className="status-badge success">Connected</span> : (
                   <button className="secondary-button compact" onClick={() => onReauthorizeGoogle?.(connection)} disabled={busy || !onReauthorizeGoogle}><KeyRound size={14} /> Reauthorize</button>
                 )}
               </li>
