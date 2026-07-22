@@ -18,16 +18,12 @@ services:
     ports:
       - "${ARCHIVE_MAIL_BIND_ADDRESS:-127.0.0.1}:${ARCHIVE_MAIL_PORT:-3001}:3001"
     environment:
-      NODE_ENV: production
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: "${EMAIL_CLIENT_TRUST_PROXY:-false}"
       TZ: "${TZ:-UTC}"
-      EMAIL_CLIENT_HOST: 0.0.0.0
-      EMAIL_CLIENT_PORT: 3001
       EMAIL_CLIENT_DATA_DIR: /data
-      EMAIL_CLIENT_DEV_AUTH_BYPASS: 0
-      EMAIL_CLIENT_ALLOW_REMOTE_LOGIN: "${EMAIL_CLIENT_ALLOW_REMOTE_LOGIN:-false}"
-      EMAIL_CLIENT_SESSION_MINUTES: "${EMAIL_CLIENT_SESSION_MINUTES:-720}"
+      EMAIL_CLIENT_DATABASE_PROVIDER: postgresql
       EMAIL_CLIENT_PUBLIC_URL: "${EMAIL_CLIENT_PUBLIC_URL:-}"
-      EMAIL_CLIENT_TRUST_PROXY: "${EMAIL_CLIENT_TRUST_PROXY:-false}"
       GMAIL_CLIENT_ID: "${GMAIL_CLIENT_ID:-}"
       GMAIL_CLIENT_SECRET: "${GMAIL_CLIENT_SECRET:-}"
       GMAIL_SYNC_INTERVAL_MINUTES: "${GMAIL_SYNC_INTERVAL_MINUTES:-}"
@@ -48,28 +44,27 @@ services:
       PROPERTY_GMAIL_CONNECTION_ID: "${PROPERTY_GMAIL_CONNECTION_ID:-}"
       PROPERTY_AUTOMATION_INTERVAL_MINUTES: "${PROPERTY_AUTOMATION_INTERVAL_MINUTES:-5}"
       PROPERTY_BACKUP_RETENTION: "${PROPERTY_BACKUP_RETENTION:-7}"
-      EMAIL_IMPORT_CONCURRENCY: "${EMAIL_IMPORT_CONCURRENCY:-1}"
-      EMAIL_IMPORT_BATCH_SIZE: "${EMAIL_IMPORT_BATCH_SIZE:-50}"
-      EMAIL_IMPORT_THROTTLE_MS: "${EMAIL_IMPORT_THROTTLE_MS:-5}"
-      EMAIL_IMPORT_LATENCY_THRESHOLD_MS: "${EMAIL_IMPORT_LATENCY_THRESHOLD_MS:-250}"
+      Import__Enabled: "${ARCHIVE_MAIL_IMPORT_ENABLED:-true}"
+      Import__DataDirectory: /data
+      Import__BatchSize: "${ARCHIVE_MAIL_IMPORT_BATCH_SIZE:-1000}"
+      Import__ParserConcurrency: "${ARCHIVE_MAIL_IMPORT_PARSER_CONCURRENCY:-4}"
+      Import__ReadPstJobs: "${ARCHIVE_MAIL_IMPORT_READPST_JOBS:-4}"
+      Import__LeaseSeconds: "${ARCHIVE_MAIL_IMPORT_LEASE_SECONDS:-120}"
       PGHOST: postgres
       PGPORT: 5432
       PGDATABASE: "${POSTGRES_DB:-archive_mail}"
       PGUSER: "${POSTGRES_USER:-archive_mail}"
       PGPASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/.env}"
+      POSTGRES_SCHEMA: "${POSTGRES_SCHEMA:-archive_mail}"
     volumes:
       - type: bind
         source: "${ARCHIVE_MAIL_DATA_DIR:?ARCHIVE_MAIL_DATA_DIR must be set in deploy/.env}"
         target: /data
     security_opt:
       - no-new-privileges:true
-    stop_grace_period: 2m
+    stop_grace_period: 5m
     healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:3001/api/health').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1));"
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3001/api/health"]
       interval: 30s
       timeout: 5s
       start_period: 30s
@@ -81,7 +76,10 @@ services:
         max-file: "3"
 
   postgres-migrate:
-    image: archive-mail:${ARCHIVE_MAIL_IMAGE_TAG:-local}
+    image: archive-mail-migrator:${ARCHIVE_MAIL_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.migrator
     container_name: archive-mail-postgres-migrate
     restart: "no"
     user: "${ARCHIVE_MAIL_UID:-1000}:${ARCHIVE_MAIL_GID:-1000}"
@@ -95,28 +93,33 @@ services:
       PGDATABASE: "${POSTGRES_DB:-archive_mail}"
       PGUSER: "${POSTGRES_USER:-archive_mail}"
       PGPASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/.env}"
+      POSTGRES_SCHEMA: "${POSTGRES_SCHEMA:-archive_mail}"
     volumes:
       - type: bind
         source: "${ARCHIVE_MAIL_DATA_DIR:?ARCHIVE_MAIL_DATA_DIR must be set in deploy/.env}"
         target: /data
+    entrypoint: ["/bin/sh", "-lc"]
     command:
-      - sh
-      - -lc
       - |
-        if [ "$${ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY}" != "true" ]; then
+        set -eu
+        if [ -f /data/postgres-cutover.complete ]; then
+          echo "PostgreSQL cutover is already complete; preserving the live database."
+        elif [ "$${ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY}" != "true" ]; then
           echo "Automatic PostgreSQL migration is disabled."
         elif [ ! -f /data/archive-mail.sqlite ]; then
-          echo "No SQLite database exists yet; skipping the initial PostgreSQL migration."
+          echo "No legacy SQLite database exists; the C# service will create an empty PostgreSQL schema."
+          touch /data/postgres-cutover.complete
         else
-          npm run db:migrate:postgres -- --sqlite /data/archive-mail.sqlite --reset
+          if [ "$(psql -Atqc "SELECT to_regnamespace('$${POSTGRES_SCHEMA:-archive_mail}') IS NOT NULL")" = "t" ]; then
+            backup="/data/postgres-before-cutover-$$(date -u +%Y%m%dT%H%M%SZ).dump"
+            echo "Saving the existing PostgreSQL database to $$backup before cutover..."
+            pg_dump --format=custom --file="$$backup"
+          fi
+          dotnet /app/ArchiveMail.Migrator.dll --sqlite /data/archive-mail.sqlite --reset --confirm-reset
+          touch /data/postgres-cutover.complete
         fi
     security_opt:
       - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
 
   postgres:
     image: postgres:17-alpine

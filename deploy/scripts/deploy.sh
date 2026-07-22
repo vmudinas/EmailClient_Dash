@@ -43,7 +43,11 @@ fi
 
 docker info >/dev/null
 
-compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build --pull archive-mail
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build --pull archive-mail postgres-migrate
+if [ ! -f "$ARCHIVE_MAIL_DATA_DIR/postgres-cutover.complete" ]; then
+  echo "Stopping Archive Mail for the one-time PostgreSQL cutover snapshot..."
+  compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop -t 120 archive-mail >/dev/null 2>&1 || true
+fi
 compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --remove-orphans postgres archive-mail
 
 container_id=$(compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -q archive-mail)
@@ -57,6 +61,14 @@ while [ "$attempt" -lt 90 ]; do
   status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id")
   case "$status" in
     healthy)
+      health_payload=$(docker exec "$container_id" curl --fail --silent http://127.0.0.1:3001/api/health)
+      case "$health_payload" in
+        *'"api":"csharp"'*'"database":"postgresql"'*) ;;
+        *)
+        echo "Archive Mail is healthy but is not the C# PostgreSQL service: ${health_payload:-unknown}" >&2
+        exit 1
+        ;;
+      esac
       if [ -n "${EMAIL_CLIENT_PUBLIC_URL:-}" ]; then
         echo "Archive Mail is healthy at $EMAIL_CLIENT_PUBLIC_URL"
       else

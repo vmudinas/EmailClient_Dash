@@ -1,15 +1,15 @@
 # Archive Mail server deployment
 
-This deployment runs the API, scheduler, Gmail sync, import workers, and static web UI in one production container, plus a private PostgreSQL container used as the migration target. The Electron desktop application is not included. SQLite and uploaded content remain under `/data`; PostgreSQL uses its own host directory.
+This deployment runs the API, scheduler, Gmail sync, import workers, Swagger, and static React UI in one C# production container, plus a private PostgreSQL runtime database. Node is used only while building the React assets. Uploaded content and protected settings remain under `/data`; PostgreSQL uses its own host directory.
 
 ## Requirements
 
 - Docker Engine with Docker Compose, or Synology DSM 7 Container Manager.
-- A writable local-disk directory for SQLite, blobs, uploads, OAuth tokens, saved API keys, and settings.
+- A writable local-disk directory for blobs, uploads, saved API keys, and settings.
 - A second writable local-disk directory for PostgreSQL and a long random `POSTGRES_PASSWORD`.
 - A reverse proxy with HTTPS when the app is accessed outside a trusted LAN or when Gmail is authorized from another computer.
 
-Do not place the data directory on NFS, SMB, Synology Drive, Cloud Sync, or another synchronized/network filesystem. SQLite and its WAL files need local filesystem semantics.
+Do not place the data or PostgreSQL directory on NFS, SMB, Synology Drive, Cloud Sync, or another synchronized/network filesystem. Keep both on local server or NAS volumes.
 
 ## Linux quick start
 
@@ -28,13 +28,7 @@ id -g
 
 The secure default binds port `3001` only to `127.0.0.1` for a same-host reverse proxy. Set `ARCHIVE_MAIL_BIND_ADDRESS=0.0.0.0` only for direct LAN access protected by the server firewall.
 
-Normal username/PIN login from another device is disabled by default because the desktop QR flow is read-only. For a server deployment on a trusted LAN or behind HTTPS, set:
-
-```dotenv
-EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true
-```
-
-Paired QR sessions remain read-only. A normal remote login receives the configured user's full role.
+Use HTTPS for access beyond a trusted LAN. Authentication is cookie-based and role checks are enforced by the C# API.
 
 Useful commands:
 
@@ -46,26 +40,26 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml restart archive-mai
 
 Run `./deploy/scripts/deploy.sh` again after pulling source changes. It rebuilds the production image, recreates the service, and waits for `/api/health` to report healthy.
 
-SQLite schema migrations run automatically when the recreated container starts. On the first build containing private user workspaces, existing mail and account configuration are assigned to the first active administrator; newly created users begin with empty private mail and calendar workspaces.
+The one-time cutover migrator creates the PostgreSQL schema before the application starts. Existing mail and account configuration are retained; newly created users begin with empty private mail and calendar workspaces.
 
 ## Large imports
 
-Imports parse and extract attachments in Node worker threads with a separate SQLite connection. SQLite permits one writer, so the production defaults run one database-writing import at a time and commit messages in short batches. This prevents multiple imports from fighting over the same write lock while preserving resumable checkpoints.
+Imports use native parallel PST extraction, bounded asynchronous MIME parsing, and PostgreSQL binary `COPY` batches. Each committed batch includes its version-2 checkpoint, so a replacement C# process can resume after its worker lease expires.
 
 ```dotenv
-EMAIL_IMPORT_CONCURRENCY=1
-EMAIL_IMPORT_BATCH_SIZE=50
-EMAIL_IMPORT_THROTTLE_MS=5
-EMAIL_IMPORT_LATENCY_THRESHOLD_MS=250
+ARCHIVE_MAIL_IMPORT_BATCH_SIZE=1000
+ARCHIVE_MAIL_IMPORT_PARSER_CONCURRENCY=4
+ARCHIVE_MAIL_IMPORT_READPST_JOBS=4
+ARCHIVE_MAIL_IMPORT_LEASE_SECONDS=120
 ```
 
-When an API request exceeds the latency threshold, the import worker temporarily increases the pause between batches. Current active/queued workers, batch size, and throttle state are shown under **Admin settings > Database** and returned by `GET /api/import-jobs-runtime`.
+Current active/queued workers and import configuration are returned by `GET /api/import-jobs-runtime`.
 
-## PostgreSQL container and data migration
+## PostgreSQL runtime and one-time cutover
 
 Compose starts a private `postgres:17-alpine` service without publishing port `5432`. Set `ARCHIVE_MAIL_POSTGRES_DIR`, `POSTGRES_DB`, `POSTGRES_USER`, and a long random `POSTGRES_PASSWORD` in `deploy/.env`.
 
-The project also runs a one-shot `postgres-migrate` service before Archive Mail starts. With `ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY=true`, every deployment replaces the PostgreSQL migration schema with a row-count-validated copy of the current SQLite database. Set it to `false` to start PostgreSQL without repeating the copy. A fresh installation without a SQLite database skips the migration and starts normally.
+The project runs a one-shot `postgres-migrate` service before the first PostgreSQL-backed start. With `ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY=true`, it first saves any existing PostgreSQL database to `/data/postgres-before-cutover-<timestamp>.dump`, replaces the PostgreSQL schema with a row-count-validated copy of the legacy SQLite database, and then writes `/data/postgres-cutover.complete`. The C# service creates its PostgreSQL-native tables, full-text indexes, and triggers when it starts. The marker makes every later deployment preserve the live database instead of replaying stale SQLite data.
 
 To stop Archive Mail, copy all non-FTS SQLite tables into PostgreSQL, recreate compatible indexes and foreign keys, add PostgreSQL full-text indexes, validate every table's row count, and restart the application:
 
@@ -73,11 +67,26 @@ To stop Archive Mail, copy all non-FTS SQLite tables into PostgreSQL, recreate c
 ./deploy/scripts/migrate-to-postgres.sh
 ```
 
-The migration is repeatable and replaces the PostgreSQL `archive_mail` schema when `--reset` is used by the wrapper. Attachment bytes remain under `/data/blobs`; database rows retain their content-addressed blob references.
+The wrapper stops Archive Mail before taking the final SQLite snapshot. The migration replaces the PostgreSQL `archive_mail` schema once; attachment bytes remain under `/data/blobs` and database rows retain their content-addressed blob references.
 
-**Runtime status:** the PostgreSQL container and validated data migration are implemented, but the existing `EmailStore` contract is synchronous and backed by `better-sqlite3`. Archive Mail therefore continues serving SQLite after the copy. Selecting PostgreSQL in Admin settings remains disabled until the API storage contract and all service/database calls are converted to the asynchronous PostgreSQL adapter. The migration target is a safe cutover rehearsal and backup, not yet the active runtime database.
+**Runtime status:** PostgreSQL is the only production runtime database for mail, users, sessions, rules, jobs, property records, and search. The production application has no SQLite dependency. `Microsoft.Data.Sqlite` exists only in the separate one-time C# migrator and its tests. Keep the legacy SQLite file briefly as a rollback artifact, then archive or remove it only after the PostgreSQL-backed application and backups have been verified.
 
 ## Synology NAS
+
+### One-click deployment from this Mac
+
+Run the launchers on the Mac that contains this repository. Do not copy them into an SSH session and do not run Docker locally. The launcher uploads the current repository snapshot; the Synology NAS performs the image build, one-time database migration, container replacement, and health check.
+
+1. In DSM, enable **Control Panel > Terminal & SNMP > Enable SSH service** and install **Container Manager**.
+2. Double-click `deploy-to-synology.command` in the repository root. On its first run, enter the Synology SSH password and then the Synology sudo password when asked. The launcher installs a dedicated SSH key and grants only the root-owned Archive Mail rebuild command passwordless sudo access before continuing with the deployment.
+3. Keep the Terminal window open while Synology builds the images and performs the health check. Future double-click deployments should require no command entry or password.
+4. Open `http://synology.local:3001`. The deployment succeeds only after `/api/health` identifies the C# API and PostgreSQL database.
+
+Use `setup-synology-deploy.command` separately only to repair or refresh passwordless deployment access after a DSM upgrade or a privileged rebuild-script change.
+
+For this existing installation, the personal launcher also requires either the legacy `archive-mail.sqlite` file or the completed PostgreSQL cutover marker in the configured NAS data directory. This prevents a wrong `ARCHIVE_MAIL_DATA_DIR` from silently creating an empty database.
+
+The uploader preserves the NAS copy of `deploy/.env`, generates missing PostgreSQL settings, creates the PostgreSQL and backup directories, uploads uncommitted local changes, rebuilds both images, performs the SQLite cutover once, and waits for a healthy application. A GitHub push is not required for deployment, although the completed source should still be committed and pushed separately for version history and recovery.
 
 ### SSH/script method
 
@@ -94,7 +103,6 @@ POSTGRES_PASSWORD=replace-with-a-long-random-password
 ARCHIVE_MAIL_UID=1026
 ARCHIVE_MAIL_GID=100
 ARCHIVE_MAIL_BIND_ADDRESS=0.0.0.0
-EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=true
 ```
 
 Use `id -u your-dsm-user` and `id -g your-dsm-user` over SSH instead of assuming the example IDs. Then run:
@@ -114,7 +122,7 @@ If Container Manager reuses a stale image or container, create a DSM **Task Sche
 /volume1/docker/archive-mail/app/deploy/scripts/synology-deploy-task.sh
 ```
 
-Name the task `Archive Mail deployment`. The task exits immediately unless the upload script has created a deployment request marker, so the one-minute schedule does not rebuild continuously. To verify the one-time setup, create `/volume1/docker/archive-mail/backups/rebuild.request` and run the task manually once. The script builds without cache, recreates the service, verifies remote-login configuration, and waits for a healthy container. It never removes the bind-mounted data directory.
+Name the task `Archive Mail deployment`. The task exits immediately unless the upload script has created a deployment request marker, so the one-minute schedule does not rebuild continuously. To verify the one-time setup, create `/volume1/docker/archive-mail/backups/rebuild.request` and run the task manually once. The script builds without cache, recreates the services, verifies the C# and PostgreSQL health response, and never removes the bind-mounted data directory.
 
 After that one-time root-task setup, every deployment is one command from the repository on the Mac:
 
@@ -122,7 +130,7 @@ After that one-time root-task setup, every deployment is one command from the re
 ./deploy/scripts/push-synology.sh
 ```
 
-The command asks for the Synology SSH password once, uploads a clean snapshot without local dependencies, build output, Git metadata, or `deploy/.env`, preserves the existing NAS environment file, backfills missing PostgreSQL settings with a generated password, writes a deployment request for the scheduled root task, waits for the migration and health check, and prints the build result. Override `ARCHIVE_MAIL_NAS_HOST`, `ARCHIVE_MAIL_NAS_APP_DIR`, `ARCHIVE_MAIL_NAS_BACKUP_DIR`, or `ARCHIVE_MAIL_NAS_POSTGRES_DIR` when deploying to a different NAS or path. SSH keys can remove the password prompt, but the script never stores a password.
+The command uploads a clean snapshot without local dependencies, build output, Git metadata, or `deploy/.env`, preserves the existing NAS environment file, backfills missing PostgreSQL settings with a generated password, runs the root-owned rebuild command (or requests the scheduled task fallback), waits for migration and the C# PostgreSQL health check, and prints the build result. Override `ARCHIVE_MAIL_NAS_HOST`, `ARCHIVE_MAIL_NAS_APP_DIR`, `ARCHIVE_MAIL_NAS_BACKUP_DIR`, or `ARCHIVE_MAIL_NAS_POSTGRES_DIR` when deploying to a different NAS or path. `setup-synology-deploy.command` installs a dedicated SSH key, but the scripts never store a password.
 
 To avoid typing the override every time, keep a personal launcher next to the scripts — any `*.local.sh` file is git-ignored and excluded from the uploaded snapshot:
 
@@ -132,12 +140,13 @@ To avoid typing the override every time, keep a personal launcher next to the sc
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export ARCHIVE_MAIL_NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-user@192.168.1.2}
+export ARCHIVE_MAIL_REQUIRE_EXISTING_DATA=${ARCHIVE_MAIL_REQUIRE_EXISTING_DATA:-true}
 exec "$SCRIPT_DIR/push-synology.sh" "$@"
 ```
 
 ### Passwordless-sudo rebuild (alternative to the scheduled task)
 
-Instead of the every-minute scheduled task, the SSH account can be allowed to run exactly one root-owned rebuild script without a password. `push-synology.sh` detects this automatically: when the sudo rule exists it rebuilds directly over the same SSH connection and streams the build output live; otherwise it falls back to the deployment-request marker and the scheduled task.
+Instead of the every-minute scheduled task, the SSH account can be allowed to run exactly one root-owned rebuild script without a password. Double-click `setup-synology-deploy.command` to configure it. `push-synology.sh` detects this automatically: when the sudo rule exists and the installed script matches the repository, it rebuilds directly over the same SSH connection and streams the build output live; otherwise it falls back to the deployment-request marker and the scheduled task.
 
 The sudo rule must point at a **root-owned copy outside the app tree**. The copy under `/volume1/docker/archive-mail/app` is replaced by every upload, so a rule targeting it would let the SSH account run arbitrary code as root. One-time setup, as root on the NAS (`sudo -i`):
 
@@ -156,7 +165,7 @@ Replace `gliukaz` with the SSH account name. `visudo -c` must report the files p
 
 Notes:
 
-- The root-owned copy is a deliberate snapshot. When `deploy/scripts/synology-rebuild.sh` changes in the repository, refresh it with the same `cp`/`chown`/`chmod` as root; `push-synology.sh` prints a warning when the two copies differ but continues with the installed one. Requiring root to approve script changes is the security property, not an inconvenience.
+- The root-owned copy is a deliberate snapshot. When `deploy/scripts/synology-rebuild.sh` changes, run `setup-synology-deploy.command` again. The uploader never executes an outdated privileged copy; it uses the DSM scheduled-task fallback when one is configured.
 - A DSM major update can reset `/etc/sudoers.d`. If a later push falls back to the scheduled-task flow unexpectedly, re-run the one-time setup.
 - With the sudo rule in place, the `Archive Mail deployment` scheduled task is redundant and can be disabled or deleted; leaving it enabled is harmless since it exits immediately unless a request marker exists.
 
@@ -227,13 +236,7 @@ Create a consistent backup:
 ./deploy/scripts/backup.sh
 ```
 
-The backup script gracefully stops the application so SQLite checkpoints and closes its WAL, archives the complete `/data` directory, restarts the service, and removes backups older than `ARCHIVE_MAIL_BACKUP_RETENTION_DAYS`. Until PostgreSQL becomes the active runtime adapter, create an additional PostgreSQL dump after each migration rehearsal:
-
-```bash
-docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T postgres \
-  pg_dump -U archive_mail -d archive_mail --clean --if-exists --no-owner \
-  | gzip > /srv/archive-mail/backups/archive-mail-postgres.sql.gz
-```
+The backup script gracefully stops the application, creates a custom-format PostgreSQL dump, archives that dump with the complete `/data` directory, restarts the service, and removes backups older than `ARCHIVE_MAIL_BACKUP_RETENTION_DAYS`.
 
 Restore a backup:
 
@@ -241,14 +244,13 @@ Restore a backup:
 ./deploy/scripts/restore.sh /srv/archive-mail/backups/archive-mail-YYYYMMDDTHHMMSSZ.tar.gz
 ```
 
-Restore creates a separate safety backup of the current data first. Test restores periodically and copy backups to another physical device.
+Restore creates a separate PostgreSQL-plus-files safety backup of the current installation first, restores the dump with `pg_restore`, and then starts Archive Mail. Test restores periodically and copy backups to another physical device.
 
-Administrators can also create an online property restore point under **Properties > Communications > Backups**. These snapshots are kept under `/data/property-backups` and include SQLite, property documents, request attachments, photos, and relevant integration settings. `PROPERTY_BACKUP_RETENTION` controls the number retained. They complement rather than replace the full stopped-container backup above.
+Administrators can also create an online property restore point under **Properties > Communications > Backups**. These snapshots are kept under `/data/property-backups` and include a PostgreSQL custom-format dump, property documents, request attachments, photos, and relevant integration settings. `PROPERTY_BACKUP_RETENTION` controls the number retained. They complement rather than replace the full stopped-container backup above.
 
 ## Security checklist
 
 - Change the bootstrap `admin` PIN `2332` immediately.
-- Keep `EMAIL_CLIENT_ALLOW_REMOTE_LOGIN=false` unless the service is limited to a trusted LAN or protected by HTTPS.
 - Prefer HTTPS and a dedicated hostname.
 - Keep host port `3001` bound to loopback when using a same-host reverse proxy.
 - Do not expose the Docker socket to this container.

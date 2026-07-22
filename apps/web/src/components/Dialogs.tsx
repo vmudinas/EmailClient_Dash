@@ -58,7 +58,6 @@ export const ALL_MAIL_SEARCH_SCOPE = "__all_mail__";
 
 interface ImportDialogProps {
   open: boolean;
-  electron: boolean;
   busy: boolean;
   progress: UploadProgress | null;
   error: string;
@@ -70,7 +69,6 @@ interface ImportDialogProps {
 
 export function ImportDialog({
   open,
-  electron,
   busy,
   progress,
   error,
@@ -100,8 +98,7 @@ export function ImportDialog({
           <button className="icon-button" disabled={busy} onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
         </header>
         <div className="dialog-body">
-          {!electron && (
-            <>
+          <>
               <input
                 ref={inputRef}
                 className="visually-hidden"
@@ -115,14 +112,7 @@ export function ImportDialog({
                   <small>{file ? formatFileSize(file.size) : "The source stays read-only."}</small>
                 </span>
               </button>
-            </>
-          )}
-          {electron && (
-            <div className="native-file-note">
-              <Upload size={22} />
-              <span><strong>Choose a PST or MBOX</strong><small>A system file picker opens next.</small></span>
-            </div>
-          )}
+          </>
 
           <label className="setting-row">
             <span className="setting-icon"><ScanText size={19} /></span>
@@ -161,7 +151,7 @@ export function ImportDialog({
           </button>
           <button
             className="primary-button"
-            disabled={busy || (!electron && !file)}
+            disabled={busy || !file}
             onClick={() => onImport(file, ocrEnabled)}
           >
             {busy ? <LoaderCircle className="spin" size={17} /> : <Upload size={17} />}

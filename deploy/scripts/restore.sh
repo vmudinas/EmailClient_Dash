@@ -28,6 +28,7 @@ set -a
 . "$ENV_FILE"
 set +a
 : "${ARCHIVE_MAIL_DATA_DIR:?Set ARCHIVE_MAIL_DATA_DIR in $ENV_FILE}"
+: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in $ENV_FILE}"
 ARCHIVE_MAIL_BACKUP_DIR=${ARCHIVE_MAIL_BACKUP_DIR:-"$(dirname "$ARCHIVE_MAIL_DATA_DIR")/backups"}
 
 case "$ARCHIVE_MAIL_DATA_DIR" in
@@ -53,12 +54,30 @@ mkdir -p "$ARCHIVE_MAIL_DATA_DIR" "$ARCHIVE_MAIL_BACKUP_DIR"
 staging=$(mktemp -d "$(dirname "$ARCHIVE_MAIL_DATA_DIR")/.archive-mail-restore.XXXXXX")
 trap 'rm -rf "$staging"' EXIT HUP INT TERM
 tar -xzf "$backup" -C "$staging"
+if [ ! -f "$staging/archive-mail-postgres.dump" ]; then
+  echo "This backup does not contain archive-mail-postgres.dump and cannot restore the PostgreSQL runtime." >&2
+  exit 1
+fi
 
 compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop -t 120 archive-mail >/dev/null 2>&1 || true
 safety="$ARCHIVE_MAIL_BACKUP_DIR/archive-mail-before-restore-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
-tar -C "$ARCHIVE_MAIL_DATA_DIR" -czf "$safety" .
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres >/dev/null
+safety_staging=$(mktemp -d "$ARCHIVE_MAIL_BACKUP_DIR/.archive-mail-safety.XXXXXX")
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+  pg_dump --format=custom --no-owner --no-privileges \
+    --schema="${POSTGRES_SCHEMA:-archive_mail}" -U "${POSTGRES_USER:-archive_mail}" -d "${POSTGRES_DB:-archive_mail}" \
+  > "$safety_staging/archive-mail-postgres.dump"
+tar -C "$ARCHIVE_MAIL_DATA_DIR" -czf "$safety" . \
+  -C "$safety_staging" archive-mail-postgres.dump
+rm -rf "$safety_staging"
+restore_dump="$staging/archive-mail-postgres.dump"
 find "$ARCHIVE_MAIL_DATA_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -a "$staging"/. "$ARCHIVE_MAIL_DATA_DIR"/
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+  pg_restore --clean --if-exists --no-owner --no-privileges \
+    -U "${POSTGRES_USER:-archive_mail}" -d "${POSTGRES_DB:-archive_mail}" \
+  < "$restore_dump"
+rm -f "$ARCHIVE_MAIL_DATA_DIR/archive-mail-postgres.dump"
 compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d archive-mail >/dev/null
 
 echo "Restore started from: $backup"

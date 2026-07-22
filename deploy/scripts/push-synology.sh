@@ -8,11 +8,24 @@ NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-gliukaz@synology.local}
 NAS_APP_DIR=${ARCHIVE_MAIL_NAS_APP_DIR:-/volume1/docker/archive-mail/app}
 NAS_BACKUP_DIR=${ARCHIVE_MAIL_NAS_BACKUP_DIR:-/volume1/docker/archive-mail/backups}
 NAS_POSTGRES_DIR=${ARCHIVE_MAIL_NAS_POSTGRES_DIR:-/volume1/docker/archive-mail/postgres}
+REQUIRE_EXISTING_DATA=${ARCHIVE_MAIL_REQUIRE_EXISTING_DATA:-false}
 CONTROL_PATH="$HOME/.ssh/archive-mail-deploy-$$"
+SSH_IDENTITY=${ARCHIVE_MAIL_SSH_IDENTITY:-$HOME/.ssh/archive_mail_synology_ed25519}
+SSH_IDENTITY_ARGS=
+if [ -f "$SSH_IDENTITY" ]; then
+  SSH_IDENTITY_ARGS="-i $SSH_IDENTITY -o IdentitiesOnly=yes"
+fi
 
 case "$NAS_APP_DIR$NAS_BACKUP_DIR$NAS_POSTGRES_DIR" in
   *[!A-Za-z0-9_./-]*)
     echo "NAS paths may contain only letters, numbers, underscores, periods, slashes, and hyphens." >&2
+    exit 1
+    ;;
+esac
+case "$REQUIRE_EXISTING_DATA" in
+  true|false) ;;
+  *)
+    echo "ARCHIVE_MAIL_REQUIRE_EXISTING_DATA must be true or false." >&2
     exit 1
     ;;
 esac
@@ -23,7 +36,7 @@ if ! POSTGRES_PASSWORD_DEFAULT=$(openssl rand -hex 32 2>/dev/null); then
 fi
 
 cleanup() {
-  ssh -S "$CONTROL_PATH" -O exit "$NAS_HOST" >/dev/null 2>&1 || true
+  ssh $SSH_IDENTITY_ARGS -S "$CONTROL_PATH" -O exit "$NAS_HOST" >/dev/null 2>&1 || true
   rm -f "$CONTROL_PATH"
 }
 trap cleanup EXIT HUP INT TERM
@@ -33,16 +46,16 @@ rm -f "$CONTROL_PATH"
 
 echo "Connecting to $NAS_HOST..."
 ssh \
+  $SSH_IDENTITY_ARGS \
   -M \
   -S "$CONTROL_PATH" \
   -o ControlPersist=10m \
-  -o PubkeyAuthentication=no \
-  -o PreferredAuthentications=keyboard-interactive,password \
+  -o PreferredAuthentications=publickey,keyboard-interactive,password \
   -fnNT \
   "$NAS_HOST"
 
 remote() {
-  ssh -S "$CONTROL_PATH" "$NAS_HOST" "$@"
+  ssh $SSH_IDENTITY_ARGS -S "$CONTROL_PATH" "$NAS_HOST" "$@"
 }
 
 echo "Uploading the current repository snapshot..."
@@ -78,6 +91,22 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
       exit 1
     fi
     env_file=\"\$app_dir/deploy/.env\"
+    set -a
+    . \"\$env_file\"
+    set +a
+    if [ '${REQUIRE_EXISTING_DATA}' = true ]; then
+      data_dir=\${ARCHIVE_MAIL_DATA_DIR:-}
+      if [ -z \"\$data_dir\" ]; then
+        echo 'ARCHIVE_MAIL_DATA_DIR is missing from deploy/.env.' >&2
+        exit 1
+      fi
+      if [ ! -f \"\$data_dir/postgres-cutover.complete\" ] &&
+         [ ! -f \"\$data_dir/archive-mail.sqlite\" ]; then
+        echo \"Refusing the first PostgreSQL cutover: neither postgres-cutover.complete nor archive-mail.sqlite exists in \$data_dir.\" >&2
+        echo 'Correct ARCHIVE_MAIL_DATA_DIR in deploy/.env before deploying.' >&2
+        exit 1
+      fi
+    fi
     ensure_env_value() {
       key=\"\$1\"
       value=\"\$2\"
@@ -89,6 +118,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
       esac
     }
     ensure_env_value ARCHIVE_MAIL_POSTGRES_DIR '${NAS_POSTGRES_DIR}'
+    ensure_env_value ARCHIVE_MAIL_BACKUP_DIR '${NAS_BACKUP_DIR}'
     ensure_env_value POSTGRES_DB archive_mail
     ensure_env_value POSTGRES_USER archive_mail
     ensure_env_value POSTGRES_PASSWORD '${POSTGRES_PASSWORD_DEFAULT}'
@@ -104,14 +134,20 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
   "
 
 REBUILD_BIN=/usr/local/bin/archive-mail-rebuild.sh
+direct_rebuild=false
 if remote "sudo -n -l $REBUILD_BIN" >/dev/null 2>&1; then
-  echo "Passwordless rebuild is configured. Rebuilding directly..."
   local_hash=$(shasum -a 256 "$REPOSITORY_DIR/deploy/scripts/synology-rebuild.sh" | cut -d' ' -f1)
   remote_hash=$(remote "sha256sum $REBUILD_BIN 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
-  if [ -n "$remote_hash" ] && [ "$remote_hash" != "$local_hash" ]; then
-    echo "Warning: $REBUILD_BIN on the NAS differs from deploy/scripts/synology-rebuild.sh." >&2
-    echo "Refresh the root-owned copy when convenient (see deploy/README.md)." >&2
+  if [ "$remote_hash" = "$local_hash" ]; then
+    direct_rebuild=true
+  else
+    echo "The root-owned NAS rebuild script is outdated; using the DSM scheduled task instead." >&2
+    echo "Run setup-synology-deploy.command once to refresh passwordless deployment." >&2
   fi
+fi
+
+if [ "$direct_rebuild" = true ]; then
+  echo "Passwordless rebuild is configured. Rebuilding directly..."
   if remote "sudo -n $REBUILD_BIN"; then
     echo "Deployment and PostgreSQL migration completed successfully."
     exit 0

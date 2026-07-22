@@ -33,6 +33,7 @@ import type {
   SearchHit
 } from "@email-client/shared";
 import { displayAddress, formatDate, formatTimeOfDay, initials } from "../lib/format.js";
+import { ShipmentHighlights } from "./ShipmentHighlights.js";
 
 export interface MessageListItem {
   message: MessageSummary;
@@ -289,6 +290,9 @@ export function MessageList({
       )}
 
       <div className="message-list" role="listbox" aria-label={title}>
+        {inboxCategories?.active === "mail_tracking" && (
+          <ShipmentHighlights messages={items.map((item) => item.message)} onSelect={selectRow} />
+        )}
         {items.map(({ message, hit }) => (
           <MessageRow
             key={message.id}

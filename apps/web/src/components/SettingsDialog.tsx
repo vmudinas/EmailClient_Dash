@@ -1108,6 +1108,16 @@ function SenderFilingPanel({
   const [status, setStatus] = useState<SenderFilingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [ruleBusyId, setRuleBusyId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [matchField, setMatchField] = useState<"from" | "to">("from");
+  const [matchAddress, setMatchAddress] = useState("");
+  const [archiveScope, setArchiveScope] = useState<"archive" | "all">("archive");
+  const [sourceScope, setSourceScope] = useState<"inbox" | "folder" | "all">("all");
+  const [sourceFolderId, setSourceFolderId] = useState("");
+  const [destinationMode, setDestinationMode] = useState<"existing" | "new">("new");
+  const [destinationFolderId, setDestinationFolderId] = useState("");
+  const [destinationFolderName, setDestinationFolderName] = useState("");
+  const [applyExisting, setApplyExisting] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -1148,6 +1158,69 @@ function SenderFilingPanel({
   }, [api, onError]);
 
   useEffect(() => { void loadStatus(archiveId); }, [archiveId, loadStatus]);
+
+  useEffect(() => {
+    if (archiveScope === "all" && sourceScope === "folder") setSourceScope("all");
+    if (archiveScope === "all" && destinationMode === "existing") setDestinationMode("new");
+  }, [archiveScope, destinationMode, sourceScope]);
+
+  useEffect(() => {
+    if (!sourceFolderId || !folders.some((folder) => folder.id === sourceFolderId)) {
+      setSourceFolderId(folders[0]?.id ?? "");
+    }
+    if (!destinationFolderId || !folders.some((folder) => folder.id === destinationFolderId)) {
+      setDestinationFolderId(folders[0]?.id ?? "");
+    }
+  }, [destinationFolderId, folders, sourceFolderId]);
+
+  const createRule = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!archiveId || !matchAddress.trim()) return;
+    setCreating(true);
+    onError("");
+    try {
+      const result = await api.createSenderFilingRule({
+        archiveId,
+        archiveScope,
+        matchField,
+        matchAddress: matchAddress.trim().toLowerCase(),
+        sourceScope,
+        sourceFolderId: sourceScope === "folder" ? sourceFolderId : null,
+        destinationFolderId: destinationMode === "existing" ? destinationFolderId : null,
+        destinationFolderName: destinationMode === "new" ? destinationFolderName.trim() : undefined,
+        applyExisting
+      });
+      const selectedStatus = result.statuses.find((entry) => entry.archiveId === archiveId);
+      if (selectedStatus) {
+        setStatus(selectedStatus);
+        setFolders((current) => {
+          const known = new Set(current.map((folder) => folder.id));
+          const additions = selectedStatus.rules
+            .filter((rule) => !known.has(rule.folderId))
+            .map((rule): Folder => ({
+              id: rule.folderId,
+              archiveId: rule.archiveId,
+              parentId: null,
+              name: rule.folderPath.split("/").at(-1) ?? rule.folderPath,
+              path: rule.folderPath,
+              messageCount: rule.messageCount,
+              unreadCount: 0
+            }));
+          return [...current, ...additions].sort((left, right) => left.path.localeCompare(right.path));
+        });
+      }
+      setMatchAddress("");
+      if (destinationMode === "new") setDestinationFolderName("");
+      onNotice(
+        `Saved ${result.createdRules.toLocaleString()} sender rule${result.createdRules === 1 ? "" : "s"}`
+        + ` and moved ${result.movedMessages.toLocaleString()} matching email${result.movedMessages === 1 ? "" : "s"}. Add another rule below.`
+      );
+    } catch (error) {
+      onError(errorText(error));
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const organize = async () => {
     if (!archiveId) return;
@@ -1206,15 +1279,91 @@ function SenderFilingPanel({
   return (
     <>
       <h3>Sender rules</h3>
-      <p>Create up to 20 local folders for the most frequent senders currently in an archive's Inbox. Matching messages are moved immediately, and future imported Inbox mail from those addresses is filed automatically.</p>
-      <div className="settings-warning neutral"><ShieldCheck size={17} /><span>All other Inbox mail stays in Inbox. Spam and every non-Inbox mailbox are untouched. These local rules do not change Gmail labels.</span></div>
-      <div className="settings-form">
-        <label>Archive
-          <select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={busy || loading || archives.length === 0}>
-            {archives.length === 0 && <option value="">No ready archives</option>}
-            {archives.map((archive) => <option key={archive.id} value={archive.id}>{archive.name} · {archive.messageCount.toLocaleString()} messages</option>)}
-          </select>
+      <p>File mail by an exact From or To address. Choose where the rule looks, create or select a local folder, and optionally move matching email that is already imported.</p>
+      <div className="settings-warning neutral"><ShieldCheck size={17} /><span>Rules move messages between local Archive Mail folders; they do not change Gmail labels. “All archives” creates the same local destination folder and a separate rule in every ready archive.</span></div>
+      <form className="settings-form sender-rule-create" onSubmit={(event) => void createRule(event)}>
+        <h4>Create a rule</h4>
+        <div className="settings-form-grid">
+          <label>Archive
+            <select value={archiveId} onChange={(event) => setArchiveId(event.target.value)} disabled={creating || loading || archives.length === 0}>
+              {archives.length === 0 && <option value="">No ready archives</option>}
+              {archives.map((archive) => <option key={archive.id} value={archive.id}>{archive.name} · {archive.messageCount.toLocaleString()} messages</option>)}
+            </select>
+          </label>
+          <label>Archives to apply
+            <select value={archiveScope} onChange={(event) => setArchiveScope(event.target.value as "archive" | "all")} disabled={creating}>
+              <option value="archive">Selected archive only</option>
+              <option value="all">All ready archives</option>
+            </select>
+          </label>
+          <label>Match field
+            <select value={matchField} onChange={(event) => setMatchField(event.target.value as "from" | "to")} disabled={creating}>
+              <option value="from">From sender</option>
+              <option value="to">To recipient</option>
+            </select>
+          </label>
+          <label>Email address
+            <input
+              type="email"
+              value={matchAddress}
+              onChange={(event) => setMatchAddress(event.target.value)}
+              placeholder={matchField === "from" ? "sender@example.com" : "recipient@example.com"}
+              autoComplete="off"
+              required
+              disabled={creating}
+            />
+          </label>
+          <label>Look in
+            <select value={sourceScope} onChange={(event) => setSourceScope(event.target.value as "inbox" | "folder" | "all")} disabled={creating}>
+              <option value="all">All folders</option>
+              <option value="inbox">Inbox only</option>
+              <option value="folder" disabled={archiveScope === "all"}>One specific folder</option>
+            </select>
+          </label>
+          {sourceScope === "folder" && (
+            <label>Source folder
+              <select value={sourceFolderId} onChange={(event) => setSourceFolderId(event.target.value)} required disabled={creating || folders.length === 0}>
+                {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}
+              </select>
+            </label>
+          )}
+          <label>Destination
+            <select value={destinationMode} onChange={(event) => setDestinationMode(event.target.value as "existing" | "new")} disabled={creating}>
+              <option value="new">Create/use folder by name</option>
+              <option value="existing" disabled={archiveScope === "all"}>Choose existing folder</option>
+            </select>
+          </label>
+          {destinationMode === "new" ? (
+            <label>Folder name
+              <input
+                value={destinationFolderName}
+                onChange={(event) => setDestinationFolderName(event.target.value)}
+                placeholder="Vendors"
+                required
+                disabled={creating}
+              />
+            </label>
+          ) : (
+            <label>Destination folder
+              <select value={destinationFolderId} onChange={(event) => setDestinationFolderId(event.target.value)} required disabled={creating || folders.length === 0}>
+                {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}
+              </select>
+            </label>
+          )}
+        </div>
+        <label className="settings-checkbox">
+          <input type="checkbox" checked={applyExisting} onChange={(event) => setApplyExisting(event.target.checked)} disabled={creating} />
+          <span><strong>Apply now</strong><small>Move matching email that is already available. Future imported mail follows the saved rule automatically.</small></span>
         </label>
+        <div className="settings-button-row">
+          <button type="submit" className="primary-button compact" disabled={creating || loading || !archiveId || !matchAddress.trim() || (destinationMode === "new" ? !destinationFolderName.trim() : !destinationFolderId)}>
+            {creating ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />} Save and add another
+          </button>
+        </div>
+      </form>
+      <div className="settings-form">
+        <h4>Automatic suggestions</h4>
+        <small>Create local folders for up to 20 of the most frequent senders in the selected archive's Inbox.</small>
         <div className="settings-button-row">
           <button type="button" className="primary-button compact" disabled={busy || loading || !archiveId} onClick={() => void organize()}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <ListFilter size={16} />} Organize top 20
@@ -1235,11 +1384,12 @@ function SenderFilingPanel({
       ) : status?.rules.length ? (
         <div className="settings-table-wrap">
           <table className="settings-table">
-            <thead><tr><th>Sender</th><th>Filed messages</th><th>Folder</th></tr></thead>
+            <thead><tr><th>Match</th><th>Look in</th><th>Filed</th><th>Destination</th></tr></thead>
             <tbody>
               {status.rules.map((rule) => (
                 <tr key={rule.id}>
-                  <td><strong>{rule.senderName || rule.senderAddress}</strong>{rule.senderName && <small>{rule.senderAddress}</small>}</td>
+                  <td><strong>{rule.matchField === "to" ? "To" : "From"}: {rule.senderName || rule.matchAddress}</strong>{rule.senderName && <small>{rule.matchAddress}</small>}</td>
+                  <td>{rule.sourceScope === "all" ? "All folders" : rule.sourceScope === "folder" ? rule.sourceFolderPath : "Inbox"}</td>
                   <td>{rule.messageCount.toLocaleString()}</td>
                   <td>
                     <select
@@ -1247,7 +1397,7 @@ function SenderFilingPanel({
                       value={rule.folderId}
                       onChange={(event) => void changeRuleFolder(rule, event.target.value)}
                       disabled={busy || ruleBusyId === rule.id}
-                      aria-label={`Folder for ${rule.senderName || rule.senderAddress}`}
+                      aria-label={`Folder for ${rule.senderName || rule.matchAddress}`}
                     >
                       {folders.map((folder) => (
                         <option key={folder.id} value={folder.id}>{folder.path}</option>
@@ -1285,13 +1435,29 @@ function DatabasePanel({
   onNotice(value: string): void;
 }) {
   const [provider, setProvider] = useState<DatabaseProvider>(settings.database.configuredProvider);
-  const [connectionString, setConnectionString] = useState(settings.database.configuredConnectionString);
+  const [connectionString, setConnectionString] = useState("");
+  const [testResult, setTestResult] = useState<string>("");
   const option = settings.database.providers.find((item) => item.id === provider);
 
   useEffect(() => {
     setProvider(settings.database.configuredProvider);
-    setConnectionString(settings.database.configuredConnectionString);
+    setConnectionString("");
+    setTestResult("");
   }, [settings]);
+
+  const testConnection = async () => {
+    onBusy(true);
+    onError("");
+    setTestResult("");
+    try {
+      const result = await api.testDatabaseSettings({ provider, connectionString });
+      setTestResult(`${result.message} in ${result.latencyMs} ms · ${result.serverVersion}`);
+    } catch (testError) {
+      onError(errorText(testError));
+    } finally {
+      onBusy(false);
+    }
+  };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -1299,7 +1465,7 @@ function DatabasePanel({
     onError("");
     try {
       onSettings(await api.updateDatabaseSettings({ provider, connectionString }));
-      onNotice("Database configuration saved. Restart Archive Mail to activate a changed connection.");
+      onNotice("Database configuration saved. Restart Archive Mail to activate the changed connection.");
     } catch (saveError) {
       onError(errorText(saveError));
     } finally {
@@ -1317,7 +1483,7 @@ function DatabasePanel({
       <form className="settings-form" onSubmit={save}>
         <label>
           Provider
-          <select value={provider} onChange={(event) => setProvider(event.target.value as DatabaseProvider)} disabled={busy}>
+          <select value={provider} onChange={(event) => { setProvider(event.target.value as DatabaseProvider); setTestResult(""); }} disabled={busy}>
             {settings.database.providers.map((item) => (
               <option key={item.id} value={item.id} disabled={!item.available}>{item.label}{item.available ? "" : " (adapter not installed)"}</option>
             ))}
@@ -1325,9 +1491,13 @@ function DatabasePanel({
         </label>
         <label>
           Connection string
-          <input value={connectionString} onChange={(event) => setConnectionString(event.target.value)} spellCheck={false} disabled={busy} />
+          <input value={connectionString} onChange={(event) => { setConnectionString(event.target.value); setTestResult(""); }} placeholder="Paste a new connection string" autoComplete="off" spellCheck={false} disabled={busy} />
         </label>
         {option && <small>{option.description}</small>}
+        {testResult && <small className="settings-success">{testResult}</small>}
+        <button type="button" className="secondary-button" onClick={() => void testConnection()} disabled={busy || !connectionString.trim() || option?.canTest === false}>
+          {busy ? <LoaderCircle className="spin" size={16} /> : <Database size={16} />} Test connection
+        </button>
         <button className="primary-button" disabled={busy || !option?.available || !connectionString.trim()}>
           {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save database setting
         </button>
@@ -1335,13 +1505,14 @@ function DatabasePanel({
       <dl className="settings-definitions">
         <div><dt>Active adapter</dt><dd>{settings.database.activeProvider}</dd></div>
         <div><dt>Active connection</dt><dd><code>{settings.database.activeConnectionString}</code></dd></div>
+        <div><dt>Configured after restart</dt><dd><code>{settings.database.configuredConnectionString}</code></dd></div>
         <div><dt>Structured data</dt><dd><code>{settings.database.structuredDataPath}</code></dd></div>
         <div><dt>Attachment bytes</dt><dd><code>{settings.database.attachmentBlobPath}</code></dd></div>
         {settings.database.importRuntime && <div><dt>Import workers</dt><dd>{settings.database.importRuntime.activeJobs} active · {settings.database.importRuntime.queuedJobs} queued · limit {settings.database.importRuntime.concurrency}</dd></div>}
         {settings.database.importRuntime && <div><dt>Import batches</dt><dd>{settings.database.importRuntime.batchSize} messages · {settings.database.importRuntime.throttledForApiLatency ? "API-protection throttle active" : `${settings.database.importRuntime.throttleMs} ms pause`}</dd></div>}
-        {settings.database.postgresMigrationTargetConfigured !== undefined && <div><dt>PostgreSQL target</dt><dd>{settings.database.postgresMigrationTargetConfigured ? "Configured" : "Not configured"}</dd></div>}
+        {settings.database.postgresMigrationTargetConfigured !== undefined && <div><dt>PostgreSQL runtime</dt><dd>{settings.database.postgresMigrationTargetConfigured ? "Active" : "Not configured"}</dd></div>}
       </dl>
-      <div className="settings-warning neutral"><Database size={17} /><span>The migration command copies and validates SQLite data in PostgreSQL. Runtime cutover remains disabled until the asynchronous PostgreSQL adapter is installed; attachment bytes stay in the content-addressed blob directory.</span></div>
+      <div className="settings-warning neutral"><Database size={17} /><span>The selected production database stores structured mail, rules, jobs, users, property records, and search indexes. Attachment bytes remain in the content-addressed blob directory, so backups must include both the database and blob directory.</span></div>
     </>
   );
 }

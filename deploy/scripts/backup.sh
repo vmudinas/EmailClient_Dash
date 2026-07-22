@@ -16,6 +16,7 @@ set -a
 set +a
 
 : "${ARCHIVE_MAIL_DATA_DIR:?Set ARCHIVE_MAIL_DATA_DIR in $ENV_FILE}"
+: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in $ENV_FILE}"
 ARCHIVE_MAIL_BACKUP_DIR=${ARCHIVE_MAIL_BACKUP_DIR:-"$(dirname "$ARCHIVE_MAIL_DATA_DIR")/backups"}
 ARCHIVE_MAIL_BACKUP_RETENTION_DAYS=${ARCHIVE_MAIL_BACKUP_RETENTION_DAYS:-14}
 
@@ -39,6 +40,7 @@ mkdir -p "$ARCHIVE_MAIL_BACKUP_DIR"
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup="$ARCHIVE_MAIL_BACKUP_DIR/archive-mail-$timestamp.tar.gz"
 temporary="$backup.partial"
+staging=$(mktemp -d "$ARCHIVE_MAIL_BACKUP_DIR/.archive-mail-backup.XXXXXX")
 container_id=$(compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -q archive-mail)
 was_running=false
 if [ -n "$container_id" ] && [ "$(docker inspect --format '{{.State.Running}}' "$container_id")" = "true" ]; then
@@ -48,17 +50,24 @@ fi
 
 restart_if_needed() {
   rm -f "$temporary"
+  rm -rf "$staging"
   if [ "$was_running" = "true" ]; then
     compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d archive-mail >/dev/null
   fi
 }
 trap restart_if_needed EXIT HUP INT TERM
 
-tar -C "$ARCHIVE_MAIL_DATA_DIR" -czf "$temporary" .
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+  pg_dump --format=custom --no-owner --no-privileges \
+    --schema="${POSTGRES_SCHEMA:-archive_mail}" -U "${POSTGRES_USER:-archive_mail}" -d "${POSTGRES_DB:-archive_mail}" \
+  > "$staging/archive-mail-postgres.dump"
+tar -C "$ARCHIVE_MAIL_DATA_DIR" -czf "$temporary" . \
+  -C "$staging" archive-mail-postgres.dump
 mv "$temporary" "$backup"
 find "$ARCHIVE_MAIL_BACKUP_DIR" -type f -name 'archive-mail-*.tar.gz' -mtime "+$ARCHIVE_MAIL_BACKUP_RETENTION_DAYS" -delete
 
 trap - EXIT HUP INT TERM
+rm -rf "$staging"
 if [ "$was_running" = "true" ]; then
   compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d archive-mail >/dev/null
 fi

@@ -60,11 +60,21 @@ restart_if_needed() {
 }
 trap restart_if_needed EXIT HUP INT TERM
 
-compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" run --rm --no-deps --build archive-mail \
-  npm run db:migrate:postgres -- --sqlite /data/archive-mail.sqlite --reset
+pre_cutover_backup="$ARCHIVE_MAIL_DATA_DIR/postgres-before-cutover-$(date -u +%Y%m%dT%H%M%SZ).dump"
+echo "Saving the current PostgreSQL database to $pre_cutover_backup..."
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+  pg_dump --format=custom --username "${POSTGRES_USER:-archive_mail}" "${POSTGRES_DB:-archive_mail}" \
+  > "$pre_cutover_backup"
+
+compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" run --rm --no-deps --build \
+  --entrypoint dotnet postgres-migrate \
+  /app/ArchiveMail.Migrator.dll --sqlite /data/archive-mail.sqlite --reset --confirm-reset
+
+touch "$ARCHIVE_MAIL_DATA_DIR/postgres-cutover.complete"
 
 trap - EXIT HUP INT TERM
 restart_if_needed
 
 echo "SQLite data was copied and row-count validated in PostgreSQL."
-echo "Archive Mail continues using SQLite until the asynchronous PostgreSQL EmailStore adapter is enabled."
+echo "PostgreSQL is now the only application runtime database."
+echo "Keep the SQLite file temporarily as a rollback artifact; archive or remove it after PostgreSQL verification."

@@ -74,6 +74,8 @@ import type {
   ReplyStylePatch,
   SearchFilters,
   SearchHit,
+  SenderFilingRuleCreate,
+  SenderFilingRuleCreateResult,
   SenderFilingStatus,
   SenderFolderRuleResult,
   SenderSpamRuleResult,
@@ -132,7 +134,8 @@ import type {
   UserCreate,
   UserSummary,
   UserUpdate,
-  DatabaseSettingsPatch
+  DatabaseSettingsPatch,
+  DatabaseConnectionTestResult
 } from "@email-client/shared";
 
 export interface UploadProgress {
@@ -1097,6 +1100,10 @@ export class ApiClient {
     return this.request("/api/sharing");
   }
 
+  setSharingEnabled(enabled: boolean): Promise<SharingState> {
+    return this.request("/api/admin/sharing", { method: "POST", body: JSON.stringify({ enabled }) });
+  }
+
   adminSettings(): Promise<AdminSettings> {
     return this.request("/api/admin/settings");
   }
@@ -1120,6 +1127,13 @@ export class ApiClient {
   updateDatabaseSettings(input: DatabaseSettingsPatch): Promise<AdminSettings> {
     return this.request("/api/admin/settings/database", {
       method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
+  testDatabaseSettings(input: DatabaseSettingsPatch): Promise<DatabaseConnectionTestResult> {
+    return this.request("/api/admin/settings/database/test", {
+      method: "POST",
       body: JSON.stringify(input)
     });
   }
@@ -1275,6 +1289,13 @@ export class ApiClient {
     });
   }
 
+  createSenderFilingRule(input: SenderFilingRuleCreate): Promise<SenderFilingRuleCreateResult> {
+    return this.request("/api/admin/sender-filing/rules", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
   updateSenderFilingRuleFolder(ruleId: string, folderId: string): Promise<SenderFilingStatus> {
     return this.request(`/api/admin/sender-filing/rules/${encodeURIComponent(ruleId)}`, {
       method: "PATCH",
@@ -1420,8 +1441,6 @@ export class ApiClient {
 }
 
 export async function resolveRuntimeConfig(): Promise<RuntimeConfig> {
-  if (window.emailClient) return window.emailClient.getRuntimeConfig();
-
   const url = new URL(window.location.href);
   const shareFromUrl = url.searchParams.get("share");
   if (shareFromUrl) {
