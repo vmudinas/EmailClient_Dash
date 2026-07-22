@@ -68,7 +68,7 @@ public sealed class AdminSettingsViewService(
             security = new { sessionLifetimeMinutes = 720, defaultPinWarning = users.Any(user => user.Role == "admin" && user.IsActive && user.MustChangePin) },
             gmail = new
             {
-                configured = gmail.ClientId.Length > 0 && gmail.ClientSecret.Length > 0,
+                configured = gmail.ClientId.Length > 0,
                 clientId = gmail.ClientId,
                 clientSecretConfigured = gmail.ClientSecret.Length > 0,
                 source = gmail.ClientId.Length == 0 ? "none" : !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GMAIL_CLIENT_ID")) ? "environment" : "admin",

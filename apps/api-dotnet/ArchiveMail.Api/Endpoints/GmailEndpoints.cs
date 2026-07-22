@@ -15,7 +15,19 @@ public static class GmailEndpoints
         app.MapPost("/api/gmail/oauth/start", (JsonElement request,HttpContext context,GmailService gmail)=>
         {try{var publicUrl=Environment.GetEnvironmentVariable("EMAIL_CLIENT_PUBLIC_URL")?.TrimEnd('/');var redirect=$"{(string.IsNullOrWhiteSpace(publicUrl)?$"{context.Request.Scheme}://{context.Request.Host}":publicUrl)}/api/gmail/oauth/callback";return Results.Ok(gmail.StartAuthorization(request,Session(context).User.Id,redirect));}catch(Exception error){return Results.Problem(error.Message,statusCode:503);}}).WithName("StartGmailOAuth").WithTags("Gmail");
         app.MapGet("/api/gmail/oauth/callback",async(string? code,string? state,string? error,string? error_description,GmailService gmail,CancellationToken token)=>
-        {if(!string.IsNullOrWhiteSpace(error))return Results.Content(Page("Gmail was not connected",error_description??error),"text/html",Encoding.UTF8,400);if(string.IsNullOrWhiteSpace(code)||string.IsNullOrWhiteSpace(state))return Results.Content(Page("Gmail was not connected","The authorization response was incomplete."),"text/html",Encoding.UTF8,400);try{var connection=await gmail.FinishAuthorizationAsync(state,code,token);return Results.Content(Page("Gmail connected",$"{connection.Email} is syncing into {connection.ArchiveName} / {connection.FolderPath}. You can return to Archive Mail."),"text/html");}catch(Exception exception){return Results.Content(Page("Gmail was not connected",exception.Message),"text/html",Encoding.UTF8,400);}}).WithName("FinishGmailOAuth").WithTags("Gmail");
+        {
+            if(!string.IsNullOrWhiteSpace(error))return Results.Content(Page("Gmail was not connected",error_description??error,false),"text/html",Encoding.UTF8,400);
+            if(string.IsNullOrWhiteSpace(code)||string.IsNullOrWhiteSpace(state))return Results.Content(Page("Gmail was not connected","The authorization response was incomplete.",false),"text/html",Encoding.UTF8,400);
+            try
+            {
+                var connection=await gmail.FinishAuthorizationAsync(state,code,token);
+                return Results.Content(Page("Gmail connected",$"{connection.Email} is syncing into {connection.ArchiveName} / {connection.FolderPath}.",true),"text/html");
+            }
+            catch(Exception exception)
+            {
+                return Results.Content(Page("Gmail was not connected",exception.Message,false),"text/html",Encoding.UTF8,400);
+            }
+        }).WithName("FinishGmailOAuth").WithTags("Gmail");
         app.MapPost("/api/gmail/connections/{connectionId}/sync",async(string connectionId,JsonElement request,HttpContext context,GmailService gmail,CancellationToken token)=>{try{return Results.Ok(await gmail.StartSyncAsync(connectionId,Session(context).User.Id,request.ValueKind==JsonValueKind.Object&&request.TryGetProperty("full",out var full)&&full.ValueKind==JsonValueKind.True,token));}catch(Exception error){return Failure(error);}}).WithName("SyncGmail").WithTags("Gmail");
         app.MapPost("/api/gmail/connections/{connectionId}/cancel",async(string connectionId,HttpContext context,GmailService gmail,CancellationToken token)=>{try{return Results.Ok(await gmail.CancelAsync(connectionId,Session(context).User.Id,token));}catch(Exception error){return Failure(error);}}).WithName("CancelGmailSync").WithTags("Gmail");
         app.MapPost("/api/gmail/connections/{connectionId}/reconcile",async(string connectionId,HttpContext context,GmailService gmail,CancellationToken token)=>{try{return Results.Ok(await gmail.StartSyncAsync(connectionId,Session(context).User.Id,false,token));}catch(Exception error){return Failure(error);}}).WithName("ReconcileGmail").WithTags("Gmail");
@@ -28,5 +40,10 @@ public static class GmailEndpoints
 
     private static SessionRecord Session(HttpContext context)=>(SessionRecord)context.Items[AuthService.SessionItemKey]!;
     private static IResult Failure(Exception error)=>error is KeyNotFoundException?Results.NotFound(new{error=error.Message}):error is ArgumentException?Results.BadRequest(new{error=error.Message}):Results.Conflict(new{error=error.Message});
-    private static string Page(string title,string message){var encoder=HtmlEncoder.Default;return $"<!doctype html><html><head><meta charset=\"utf-8\"><title>{encoder.Encode(title)}</title></head><body><main><h1>{encoder.Encode(title)}</h1><p>{encoder.Encode(message)}</p><script>if(window.opener)window.opener.postMessage({{type:'archive-mail-gmail-oauth'}},window.location.origin);</script></main></body></html>";}
+    internal static string Page(string title,string message,bool success)
+    {
+        var encoder=HtmlEncoder.Default;
+        var payload=JsonSerializer.Serialize(new{type="archive-mail-gmail-oauth",success,message});
+        return $"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{encoder.Encode(title)}</title></head><body><main><h1>{encoder.Encode(title)}</h1><p>{encoder.Encode(message)}</p><p>{(success?"This window will close automatically.":"Return to Archive Mail and try again after correcting the error.")}</p><script>(()=>{{const result={payload};try{{localStorage.setItem('archive-mail-gmail-oauth-result',JSON.stringify({{...result,completedAt:Date.now()}}));}}catch{{}}if(window.opener)window.opener.postMessage(result,window.location.origin);if(result.success)setTimeout(()=>window.close(),500);}})();</script></main></body></html>";
+    }
 }

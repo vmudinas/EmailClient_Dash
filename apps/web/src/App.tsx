@@ -98,6 +98,14 @@ import { StockTickerBar } from "./components/StockTickerBar.js";
 import { NewsTickerBar } from "./components/NewsTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
+const GMAIL_OAUTH_RESULT_KEY = "archive-mail-gmail-oauth-result";
+
+interface GmailOAuthResult {
+  type: "archive-mail-gmail-oauth";
+  success?: boolean;
+  message?: string;
+}
+
 type MobileView = "folders" | "messages" | "reader";
 type AppView = "mail" | "calendar" | "properties";
 type SmartMailbox = "starred";
@@ -753,14 +761,37 @@ export function App() {
   }, [api, readOnly, refreshGmailConnections]);
 
   useEffect(() => {
-    const handleGmailAuthorization = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin
-        || event.data?.type !== "archive-mail-gmail-oauth") return;
-      void refreshGmailConnections(false);
+    const handleResult = (result: GmailOAuthResult | null | undefined) => {
+      if (!result || result.type !== "archive-mail-gmail-oauth") return;
+      const message = result.message ?? (result.success === false
+        ? "Google authorization failed"
+        : "Google account connected");
+      if (result.success === false) setGmailError(message);
+      else {
+        setGmailError("");
+        void refreshGmailConnections(false);
+      }
+      showError(message);
+    };
+    const handleGmailAuthorization = (event: MessageEvent<GmailOAuthResult>) => {
+      if (event.origin !== window.location.origin) return;
+      handleResult(event.data);
+    };
+    const handleStoredAuthorization = (event: StorageEvent) => {
+      if (event.key !== GMAIL_OAUTH_RESULT_KEY || !event.newValue) return;
+      try {
+        handleResult(JSON.parse(event.newValue) as GmailOAuthResult);
+      } catch {
+        // Ignore malformed cross-window notifications.
+      }
     };
     window.addEventListener("message", handleGmailAuthorization);
-    return () => window.removeEventListener("message", handleGmailAuthorization);
-  }, [refreshGmailConnections]);
+    window.addEventListener("storage", handleStoredAuthorization);
+    return () => {
+      window.removeEventListener("message", handleGmailAuthorization);
+      window.removeEventListener("storage", handleStoredAuthorization);
+    };
+  }, [refreshGmailConnections, showError]);
 
   useEffect(() => {
     const syncing = gmailConnections.some((connection) => connection.status === "syncing");
@@ -1805,8 +1836,8 @@ export function App() {
       else window.open(authorization.authorizationUrl, "_blank", "noopener,noreferrer");
       showError("Finish Gmail authorization in your browser");
     } catch (error) {
-      popup?.close();
       const message = error instanceof Error ? error.message : "Gmail authorization could not start";
+      if (popup && !popup.closed) showGmailAuthorizationError(popup, message);
       setGmailError(message);
       showError(message);
     } finally {
@@ -2598,6 +2629,20 @@ export function App() {
       )}
     </div>
   );
+}
+
+function showGmailAuthorizationError(popup: Window, message: string) {
+  popup.document.title = "Gmail authorization could not start";
+  popup.document.body.replaceChildren();
+  const main = popup.document.createElement("main");
+  const heading = popup.document.createElement("h1");
+  heading.textContent = "Gmail authorization could not start";
+  const detail = popup.document.createElement("p");
+  detail.textContent = message;
+  const guidance = popup.document.createElement("p");
+  guidance.textContent = "Return to Archive Mail, correct the Gmail OAuth configuration in Admin settings, and try again.";
+  main.append(heading, detail, guidance);
+  popup.document.body.append(main);
 }
 
 function hitToItem(hit: SearchHit): MessageListItem {
