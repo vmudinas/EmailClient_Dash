@@ -48,6 +48,42 @@ public sealed class ObservabilityRepository(NpgsqlDataSource database, ILogger<O
         return new(id, level, "client", request.Message.Trim(), request.Stack, null, null, null, context, now);
     }
 
+    public async Task RecordServerDiagnosticAsync(
+        string ownerUserId,
+        string category,
+        string message,
+        Exception exception,
+        string? jobId,
+        string? archiveId,
+        string? sourceName,
+        object? context,
+        CancellationToken cancellationToken)
+    {
+        var normalizedMessage = string.IsNullOrWhiteSpace(message) ? exception.Message : message.Trim();
+        if (normalizedMessage.Length > 4_000) normalizedMessage = normalizedMessage[..4_000];
+        var stack = exception.ToString();
+        if (stack.Length > 20_000) stack = stack[..20_000];
+        var id = Guid.NewGuid().ToString();
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        const string sql = """
+            INSERT INTO diagnostic_events(
+              id,level,category,message,stack,job_id,archive_id,source_name,context_json,created_at,owner_user_id
+            ) VALUES(@id,'error',@category,@message,@stack,@job,@archive,@source,@context,@now,@owner)
+            """;
+        await using var command = database.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("category", category.Trim().ToLowerInvariant());
+        command.Parameters.AddWithValue("message", normalizedMessage);
+        command.Parameters.AddWithValue("stack", stack);
+        AddNullable(command, "job", jobId);
+        AddNullable(command, "archive", archiveId);
+        AddNullable(command, "source", sourceName);
+        command.Parameters.AddWithValue("context", JsonSerializer.Serialize(context ?? new { }, JsonOptions));
+        command.Parameters.AddWithValue("now", now);
+        command.Parameters.AddWithValue("owner", ownerUserId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<IReadOnlyList<DiagnosticEventDto>> ListDiagnosticsAsync(
         string ownerUserId, string? level, string? category, string? jobId, int? limit, CancellationToken cancellationToken)
     {

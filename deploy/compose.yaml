@@ -5,7 +5,7 @@ services:
     image: archive-mail:${ARCHIVE_MAIL_IMAGE_TAG:-local}
     build:
       context: ..
-      dockerfile: deploy/Dockerfile
+      dockerfile: "${ARCHIVE_MAIL_DOCKERFILE:-deploy/Dockerfile}"
     container_name: archive-mail
     init: true
     restart: unless-stopped

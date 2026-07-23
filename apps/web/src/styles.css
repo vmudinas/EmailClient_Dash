@@ -2092,32 +2092,40 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
+.workspace-view {
+  display: none;
+}
+
+.workspace-view.active {
+  display: contents;
+}
+
 @media (min-width: 801px) {
   .workspace.folders-collapsed {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .workspace.folders-collapsed > .sidebar {
+  .workspace.folders-collapsed > .workspace-view > .sidebar {
     display: none;
   }
 
-  .workspace > .message-list-pane,
-  .workspace > .reader-pane {
+  .workspace > .workspace-view > .message-list-pane,
+  .workspace > .workspace-view > .reader-pane {
     grid-row: 1;
     grid-column: 2;
   }
 
-  .workspace.folders-collapsed > .message-list-pane,
-  .workspace.folders-collapsed > .reader-pane {
+  .workspace.folders-collapsed > .workspace-view > .message-list-pane,
+  .workspace.folders-collapsed > .workspace-view > .reader-pane {
     grid-column: 1;
   }
 
-  .workspace > .reader-pane,
-  .workspace.reader-open > .message-list-pane {
+  .workspace > .workspace-view > .reader-pane,
+  .workspace.reader-open > .workspace-view > .message-list-pane {
     display: none;
   }
 
-  .workspace.reader-open > .reader-pane {
+  .workspace.reader-open > .workspace-view > .reader-pane {
     display: flex;
   }
 }

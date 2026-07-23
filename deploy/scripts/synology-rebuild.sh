@@ -48,8 +48,10 @@ compose() {
   "$DOCKER_BIN" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-echo "Building a fresh Archive Mail image without cache..."
-compose build --no-cache archive-mail postgres-migrate
+echo "Building the Archive Mail images..."
+# Reuse the expensive OS/package layers. Source COPY layers and the test/publish
+# gates are invalidated whenever the uploaded repository changes.
+compose build archive-mail postgres-migrate
 
 echo "Removing the stale container and project network..."
 compose down --remove-orphans
@@ -79,6 +81,12 @@ while [ "$attempt" -lt 90 ]; do
         exit 1
         ;;
       esac
+      if [ ! -x /usr/bin/python3 ]; then
+        echo "Python 3 is required for the post-deployment API and React smoke checks." >&2
+        exit 1
+      fi
+      echo "Running post-deployment API, authentication, and React asset checks..."
+      /usr/bin/python3 "$DEPLOY_DIR/scripts/smoke-api.py" http://127.0.0.1:3001
       if [ -n "${EMAIL_CLIENT_PUBLIC_URL:-}" ]; then
         echo "Archive Mail is healthy at $EMAIL_CLIENT_PUBLIC_URL"
       else

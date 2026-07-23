@@ -38,6 +38,7 @@ const CALENDAR_SELECTION_KEY = "archive-mail.calendar.sources.v1";
 interface CalendarViewProps {
   api: ApiClient;
   connections: GmailConnection[];
+  active?: boolean;
   onAddGoogle(): void;
   onReauthorize(connection: GmailConnection): void;
   onError(message: string): void;
@@ -71,7 +72,7 @@ interface DaySummary {
   todoTexts: string[];
 }
 
-export function CalendarView({ api, connections, onAddGoogle, onReauthorize, onError }: CalendarViewProps) {
+export function CalendarView({ api, connections, active = true, onAddGoogle, onReauthorize, onError }: CalendarViewProps) {
   const mobile = useMediaQuery("(max-width: 800px)");
   const [date, setDate] = useState(todayIso());
   const [month, setMonth] = useState(todayIso().slice(0, 7));
@@ -185,7 +186,9 @@ export function CalendarView({ api, connections, onAddGoogle, onReauthorize, onE
     setMonthSummary(summary);
   }, [api, month, selectedSources]);
 
-  useEffect(() => { void loadSources(); }, [loadSources]);
+  useEffect(() => {
+    if (active) void loadSources();
+  }, [active, loadSources]);
   useEffect(() => { void loadEvents(); }, [loadEvents]);
   useEffect(() => { void loadTodos(); }, [loadTodos]);
   useEffect(() => { void loadMonthSummary(); }, [loadMonthSummary]);
@@ -302,7 +305,7 @@ export function CalendarView({ api, connections, onAddGoogle, onReauthorize, onE
         <div className="calendar-sidebar-heading">
           <div><CalendarDays size={17} /><strong>Calendars</strong></div>
           <div className="calendar-sidebar-actions">
-            <button className="icon-button" onClick={() => void loadSources()} disabled={sourcesLoading} title="Refresh calendars" aria-label="Refresh calendars">
+            <button className="icon-button" onClick={() => { api.invalidateCache("/api/calendar"); void loadSources(); }} disabled={sourcesLoading} title="Refresh calendars" aria-label="Refresh calendars">
               <RefreshCw className={sourcesLoading ? "spin" : ""} size={15} />
             </button>
             <button className="icon-button mobile-only" onClick={() => setMobilePanel(null)} aria-label="Close calendar filters"><X size={17} /></button>
@@ -315,13 +318,17 @@ export function CalendarView({ api, connections, onAddGoogle, onReauthorize, onE
           {connections.map((connection) => (
             <div className="calendar-google-account" key={connection.id}>
               <span title={connection.email}>{connection.email}</span>
-              <button
-                className="secondary-button compact"
-                onClick={() => onReauthorize(connection)}
-                aria-label={`Reauthorize ${connection.email} for Gmail and Calendar`}
-              >
-                <KeyRound size={13} /> Reauthorize
-              </button>
+              {connection.canManageCalendar && connection.status !== "error" ? (
+                <small>Connected</small>
+              ) : (
+                <button
+                  className="secondary-button compact"
+                  onClick={() => onReauthorize(connection)}
+                  aria-label={`Reauthorize ${connection.email} for Gmail and Calendar`}
+                >
+                  <KeyRound size={13} /> Reauthorize
+                </button>
+              )}
             </div>
           ))}
           <small>Authorizes Gmail read/send/settings plus Google Calendar lists and events.</small>

@@ -1925,6 +1925,7 @@ function CalendarAccountsPanel({
   const [label, setLabel] = useState("iCloud");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [reconnectingAppleId, setReconnectingAppleId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1949,15 +1950,20 @@ function CalendarAccountsPanel({
     onBusy(true);
     onError("");
     try {
-      await api.connectAppleCalendar({
+      const input = {
         label: label.trim(),
         username: username.trim(),
         appSpecificPassword: password.trim(),
         serverUrl: "https://caldav.icloud.com"
-      });
+      };
+      if (reconnectingAppleId) await api.reconnectAppleCalendar(reconnectingAppleId, input);
+      else await api.connectAppleCalendar(input);
       setPassword("");
+      setReconnectingAppleId(null);
       await load();
-      onNotice("Apple Calendar account authorized. Its calendars are now available in Calendar.");
+      onNotice(reconnectingAppleId
+        ? "Apple Calendar account reconnected. Its calendars are available again."
+        : "Apple Calendar account authorized. Its calendars are now available in Calendar.");
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -1978,6 +1984,14 @@ function CalendarAccountsPanel({
     } finally {
       onBusy(false);
     }
+  };
+
+  const prepareAppleReconnect = (account: CalendarAccount) => {
+    setReconnectingAppleId(account.id);
+    setLabel(account.label);
+    setUsername(account.username);
+    setPassword("");
+    onNotice(`Enter a new app-specific password to reconnect ${account.label}.`);
   };
 
   return (
@@ -2014,8 +2028,9 @@ function CalendarAccountsPanel({
           <label>App-specific password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy} autoComplete="new-password" placeholder="xxxx-xxxx-xxxx-xxxx" /></label>
           <small className="settings-hint">Create an app-specific password in your Apple Account. It is stored only in this app's local database and is never returned to the UI.</small>
           <button className="primary-button" disabled={busy || !label.trim() || !username.trim() || !password.trim()}>
-            {busy ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />} Authorize Apple Calendar
+            {busy ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />} {reconnectingAppleId ? "Reconnect Apple Calendar" : "Authorize Apple Calendar"}
           </button>
+          {reconnectingAppleId && <button type="button" className="text-button" onClick={() => { setReconnectingAppleId(null); setPassword(""); }} disabled={busy}>Cancel reconnect</button>}
         </form>
         {appleAccounts.length > 0 && (
           <ul className="calendar-account-list apple-calendar-accounts">
@@ -2023,6 +2038,7 @@ function CalendarAccountsPanel({
               <li key={account.id}>
                 <div><strong>{account.label}</strong><small>{account.username}{account.lastError ? ` · ${account.lastError}` : ""}</small></div>
                 <span className={`status-badge ${account.status === "connected" ? "success" : "error"}`}>{account.status}</span>
+                <button className="secondary-button compact" onClick={() => prepareAppleReconnect(account)} disabled={busy}><KeyRound size={14} /> Reconnect</button>
                 <button className="icon-button" onClick={() => void disconnectApple(account)} disabled={busy} title={`Disconnect ${account.label}`} aria-label={`Disconnect ${account.label}`}><Trash2 size={15} /></button>
               </li>
             ))}

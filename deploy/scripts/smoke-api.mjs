@@ -2,7 +2,9 @@
 
 const baseUrl = (process.env.ARCHIVE_MAIL_BASE_URL ?? "http://127.0.0.1:3001").replace(/\/$/, "");
 const username = process.env.ARCHIVE_MAIL_SMOKE_USERNAME ?? "admin";
-const pin = process.env.ARCHIVE_MAIL_SMOKE_PIN ?? "2332";
+const pin = process.env.ARCHIVE_MAIL_SMOKE_PIN ?? "";
+const suppliedToken = process.env.ARCHIVE_MAIL_SMOKE_TOKEN ?? "";
+const allowMutations = process.env.ARCHIVE_MAIL_SMOKE_ALLOW_MUTATIONS === "true";
 const requestTimeoutMs = Number(process.env.ARCHIVE_MAIL_SMOKE_TIMEOUT_MS ?? 10_000);
 const methods = new Set(["get", "post", "put", "patch", "delete"]);
 const publicPrefixes = [
@@ -20,15 +22,7 @@ const operations = Object.entries(swagger.paths).flatMap(([path, definition]) =>
     .map(([method, operation]) => ({ method: method.toUpperCase(), path, operation }))
 );
 
-const login = await fetch(`${baseUrl}/api/auth/login`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ username, pin }),
-  signal: AbortSignal.timeout(requestTimeoutMs)
-});
-if (!login.ok) throw new Error(`Smoke login failed with HTTP ${login.status}: ${await login.text()}`);
-const { accessToken } = await login.json();
-if (!accessToken) throw new Error("Smoke login did not return an access token");
+const accessToken = suppliedToken || (pin ? await loginForToken() : null);
 
 const routeFailures = [];
 for (const entry of operations) {
@@ -38,15 +32,19 @@ for (const entry of operations) {
 }
 
 const handlerResults = [];
-const ordered = operations.toSorted((left, right) => operationPriority(left) - operationPriority(right));
+const exercisedOperations = accessToken
+  ? operations.filter((entry) =>
+      allowMutations || entry.method === "GET" || entry.path === "/api/health"
+    )
+  : operations.filter((entry) => entry.path === "/api/health" && entry.method === "GET");
+const ordered = exercisedOperations.toSorted((left, right) => operationPriority(left) - operationPriority(right));
 for (const entry of ordered) {
   if (entry.path === "/api/auth/login") continue;
   if (entry.path === "/api/auth/logout") continue;
-  if (entry.path === "/api/gmail/oauth/start") await configureSmokeGoogleClient(accessToken);
   handlerResults.push({ ...entry, ...await invoke(entry, accessToken, true) });
 }
 
-const authorizationFailures = await verifyRoleAuthorization(accessToken);
+const authorizationFailures = allowMutations ? await verifyRoleAuthorization(accessToken) : [];
 
 const configurationLimited = handlerResults.filter((result) =>
   result.status === 503
@@ -68,8 +66,13 @@ const statusCounts = handlerResults.reduce((counts, result) => {
 console.log(`Swagger paths: ${Object.keys(swagger.paths).length}`);
 console.log(`Swagger operations: ${operations.length}`);
 console.log(`Protected route checks: ${operations.length - operations.filter((entry) => isPublic(entry.path)).length - routeFailures.length} passed`);
-console.log(`Role and screen authorization checks: ${10 - authorizationFailures.length} passed`);
-console.log(`Authenticated/public handler checks: ${handlerResults.length - serverFailures.length} passed`);
+console.log(allowMutations
+  ? `Role and screen authorization checks: ${10 - authorizationFailures.length} passed`
+  : "Role and screen authorization checks: skipped in read-only mode");
+console.log(accessToken
+  ? `Authenticated/public handler checks: ${handlerResults.length - serverFailures.length} passed`
+  : `Public handler checks: ${handlerResults.length - serverFailures.length} passed; authenticated handlers skipped because no smoke token or pin was supplied`);
+console.log(`Mutation handler checks: ${allowMutations ? "enabled for isolated test data" : "skipped; set ARCHIVE_MAIL_SMOKE_ALLOW_MUTATIONS=true only against an isolated test database"}`);
 console.log(`Status families: ${Object.entries(statusCounts).map(([key, value]) => `${key}=${value}`).join(", ")}`);
 if (configurationLimited.length > 0)
   console.log(`Configuration-limited AI operations: ${configurationLimited.length} returned the expected 503`);
@@ -87,6 +90,19 @@ if (authorizationFailures.length > 0) {
   for (const failure of authorizationFailures) console.error(`  ${failure.label}: expected ${failure.expected}, received ${failure.actual}`);
 }
 if (routeFailures.length > 0 || authorizationFailures.length > 0 || serverFailures.length > 0) process.exitCode = 1;
+
+async function loginForToken() {
+  const login = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, pin }),
+    signal: AbortSignal.timeout(requestTimeoutMs)
+  });
+  if (!login.ok) throw new Error(`Smoke login failed with HTTP ${login.status}: ${await login.text()}`);
+  const { accessToken: token } = await login.json();
+  if (!token) throw new Error("Smoke login did not return an access token");
+  return token;
+}
 
 async function verifyRoleAuthorization(adminToken) {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -163,19 +179,6 @@ async function expectStatus(token, method, path, expected, label, failures) {
     signal: AbortSignal.timeout(requestTimeoutMs)
   });
   if (response.status !== expected) failures.push({ label, expected, actual: response.status });
-}
-
-async function configureSmokeGoogleClient(token) {
-  const response = await fetch(`${baseUrl}/api/admin/settings/gmail`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ clientId: "smoke-test.apps.googleusercontent.com" }),
-    signal: AbortSignal.timeout(requestTimeoutMs)
-  });
-  if (!response.ok) throw new Error(`Could not configure the disposable Google OAuth client: HTTP ${response.status}`);
 }
 
 async function invoke(entry, token, exerciseHandler) {

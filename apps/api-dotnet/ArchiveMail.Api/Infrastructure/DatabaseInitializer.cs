@@ -27,7 +27,17 @@ public sealed class DatabaseInitializer(
         await using (var command = new NpgsqlCommand(PropertySchemaSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
 
+        var schemaContract = DatabaseSchemaContract.FromSql(
+            CoreSchemaSql,
+            ConnectedServicesSchemaSql,
+            PropertySchemaSql);
+        await using (var command = new NpgsqlCommand(schemaContract.DefaultRepairSql, connection))
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
         await EnsureDefaultAdministratorAsync(connection, cancellationToken);
+        await using (var command = new NpgsqlCommand(LegacyOwnershipRepairSql, connection))
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        await schemaContract.ValidateAsync(connection, schema, cancellationToken);
         logger.LogInformation("C# PostgreSQL schema is ready in {Schema}", schema);
     }
 
@@ -58,7 +68,19 @@ public sealed class DatabaseInitializer(
         await insert.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private const string CoreSchemaSql = """
+    internal const string LegacyOwnershipRepairSql = """
+        UPDATE todos
+        SET owner_user_id = (
+          SELECT id
+          FROM users
+          ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, created_at
+          LIMIT 1
+        )
+        WHERE owner_user_id IS NULL;
+        ALTER TABLE todos ALTER COLUMN owner_user_id SET NOT NULL;
+        """;
+
+    internal const string CoreSchemaSql = """
         CREATE TABLE IF NOT EXISTS users (
           id TEXT PRIMARY KEY,
           username TEXT NOT NULL,
@@ -127,6 +149,15 @@ public sealed class DatabaseInitializer(
           UNIQUE(archive_id, path)
         );
         CREATE INDEX IF NOT EXISTS folders_archive_idx ON folders(archive_id, parent_id);
+        DO $archive_mail$
+        BEGIN
+          IF to_regclass('folders_archive_id_path_key') IS NULL
+             AND to_regclass('folders_archive_id_path_unique') IS NULL
+             AND to_regclass('folders_archive_path_conflict_idx') IS NULL THEN
+            CREATE UNIQUE INDEX folders_archive_path_conflict_idx ON folders(archive_id, path);
+          END IF;
+        END
+        $archive_mail$;
 
         CREATE TABLE IF NOT EXISTS messages (
           id TEXT PRIMARY KEY,
@@ -160,6 +191,15 @@ public sealed class DatabaseInitializer(
         CREATE INDEX IF NOT EXISTS messages_folder_date_idx ON messages(folder_id, received_at DESC, sent_at DESC);
         CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_address);
         CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(archive_id, conversation_key);
+        DO $archive_mail$
+        BEGIN
+          IF to_regclass('messages_archive_id_source_key_key') IS NULL
+             AND to_regclass('messages_archive_id_source_key_unique') IS NULL
+             AND to_regclass('messages_archive_source_key_conflict_idx') IS NULL THEN
+            CREATE UNIQUE INDEX messages_archive_source_key_conflict_idx ON messages(archive_id, source_key);
+          END IF;
+        END
+        $archive_mail$;
         CREATE INDEX IF NOT EXISTS messages_postgres_search_idx ON messages USING GIN (to_tsvector('simple',
           COALESCE(subject, '') || ' ' || COALESCE(sender_name, '') || ' ' || COALESCE(sender_address, '') || ' ' ||
           COALESCE(recipients_text, '') || ' ' || COALESCE(body_text, '')
@@ -239,6 +279,11 @@ public sealed class DatabaseInitializer(
         WHERE status IN ('queued', 'running', 'cancelled')
           AND processed_items > 0
           AND checkpoint_version <> 2;
+        UPDATE import_jobs
+        SET status = 'failed', can_resume = 0, worker_id = NULL, lease_until = NULL,
+            message = 'Gmail sync was interrupted. Start Gmail sync again.',
+            updated_at = CURRENT_TIMESTAMP::text
+        WHERE source_type = 'gmail' AND status IN ('queued', 'running');
         CREATE INDEX IF NOT EXISTS import_jobs_updated_idx ON import_jobs(updated_at DESC);
         CREATE INDEX IF NOT EXISTS import_jobs_claim_idx ON import_jobs(status, updated_at) WHERE status IN ('queued', 'running');
 
@@ -287,6 +332,15 @@ public sealed class DatabaseInitializer(
         );
         CREATE INDEX IF NOT EXISTS deferred_attachment_jobs_claim_idx ON deferred_attachment_jobs(status, updated_at)
           WHERE status = 'queued';
+        DO $archive_mail$
+        BEGIN
+          IF to_regclass('deferred_attachment_jobs_message_id_key') IS NULL
+             AND to_regclass('deferred_attachment_jobs_message_id_unique') IS NULL
+             AND to_regclass('deferred_attachment_jobs_message_conflict_idx') IS NULL THEN
+            CREATE UNIQUE INDEX deferred_attachment_jobs_message_conflict_idx ON deferred_attachment_jobs(message_id);
+          END IF;
+        END
+        $archive_mail$;
 
         CREATE TABLE IF NOT EXISTS diagnostic_events (
           id TEXT PRIMARY KEY,
@@ -455,7 +509,7 @@ public sealed class DatabaseInitializer(
           EXECUTE FUNCTION archive_mail_state_insert_batch();
         """;
 
-    private const string ConnectedServicesSchemaSql = """
+    internal const string ConnectedServicesSchemaSql = """
         CREATE TABLE IF NOT EXISTS gmail_connections (
           id TEXT PRIMARY KEY,
           email TEXT NOT NULL,
@@ -483,6 +537,11 @@ public sealed class DatabaseInitializer(
         ALTER TABLE gmail_connections ADD COLUMN IF NOT EXISTS can_send BIGINT NOT NULL DEFAULT 0;
         ALTER TABLE gmail_connections ADD COLUMN IF NOT EXISTS can_manage_calendar BIGINT NOT NULL DEFAULT 0;
         ALTER TABLE gmail_connections ADD COLUMN IF NOT EXISTS can_modify_mailbox BIGINT NOT NULL DEFAULT 0;
+        ALTER TABLE gmail_connections ALTER COLUMN query SET DEFAULT '';
+        ALTER TABLE gmail_connections ALTER COLUMN ocr_enabled SET DEFAULT 0;
+        ALTER TABLE gmail_connections ALTER COLUMN status SET DEFAULT 'connected';
+        ALTER TABLE gmail_connections ALTER COLUMN processed_items SET DEFAULT 0;
+        ALTER TABLE gmail_connections ALTER COLUMN imported_items SET DEFAULT 0;
 
         CREATE TABLE IF NOT EXISTS resume_assets (
           id TEXT PRIMARY KEY,
@@ -541,9 +600,19 @@ public sealed class DatabaseInitializer(
           started_at TEXT,
           completed_at TEXT
         );
+        ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS task TEXT NOT NULL DEFAULT 'analyze';
+        ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS schedule_id TEXT;
+        ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS gmail_connection_id TEXT;
+        ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS resume_id TEXT;
+        ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'openai';
+        ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS skills_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS prompt TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ai_jobs ALTER COLUMN attempts SET DEFAULT 0;
+        ALTER TABLE ai_jobs ALTER COLUMN max_attempts SET DEFAULT 2;
         CREATE INDEX IF NOT EXISTS ai_jobs_message_idx ON ai_jobs(message_id, task, created_at DESC);
         CREATE INDEX IF NOT EXISTS ai_jobs_status_idx ON ai_jobs(status, created_at);
-        CREATE UNIQUE INDEX IF NOT EXISTS ai_jobs_active_message_idx ON ai_jobs(message_id, task)
+        DROP INDEX IF EXISTS ai_jobs_active_message_idx;
+        CREATE UNIQUE INDEX ai_jobs_active_message_idx ON ai_jobs(message_id, task)
           WHERE status IN ('queued', 'running');
 
         CREATE TABLE IF NOT EXISTS ai_message_analysis (
@@ -568,6 +637,11 @@ public sealed class DatabaseInitializer(
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        ALTER TABLE ai_message_analysis ADD COLUMN IF NOT EXISTS context_hash TEXT NOT NULL DEFAULT '';
+        ALTER TABLE ai_message_analysis ADD COLUMN IF NOT EXISTS related_context_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE ai_message_analysis ADD COLUMN IF NOT EXISTS thread_message_count BIGINT NOT NULL DEFAULT 1;
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_message_analysis_message_conflict_idx
+          ON ai_message_analysis(message_id);
         CREATE INDEX IF NOT EXISTS ai_message_analysis_updated_idx ON ai_message_analysis(updated_at DESC);
 
         CREATE TABLE IF NOT EXISTS ai_usage_daily (
@@ -663,6 +737,8 @@ public sealed class DatabaseInitializer(
           message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
           reviewed_at TEXT NOT NULL
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_analysis_reviews_message_conflict_idx
+          ON ai_analysis_reviews(message_id);
 
         CREATE TABLE IF NOT EXISTS calendar_accounts (
           id TEXT PRIMARY KEY,
@@ -685,7 +761,7 @@ public sealed class DatabaseInitializer(
         WHERE NOT EXISTS (SELECT 1 FROM reply_styles);
         """;
 
-    private const string PropertySchemaSql = """
+    internal const string PropertySchemaSql = """
         CREATE TABLE IF NOT EXISTS managed_properties(id TEXT PRIMARY KEY,owner_user_id TEXT NOT NULL,name TEXT NOT NULL,address_line1 TEXT NOT NULL,address_line2 TEXT NOT NULL DEFAULT '',city TEXT NOT NULL,state TEXT NOT NULL,postal_code TEXT NOT NULL,property_type TEXT NOT NULL,status TEXT NOT NULL,image_filename TEXT,bedrooms DOUBLE PRECISION,bathrooms DOUBLE PRECISION,monthly_rent_cents BIGINT,notes TEXT NOT NULL DEFAULT '',organization_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS managed_properties_owner_idx ON managed_properties(owner_user_id,updated_at DESC);
         CREATE TABLE IF NOT EXISTS property_tenants(id TEXT PRIMARY KEY,owner_user_id TEXT NOT NULL,linked_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,first_name TEXT NOT NULL,last_name TEXT NOT NULL,email TEXT NOT NULL,phone TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);

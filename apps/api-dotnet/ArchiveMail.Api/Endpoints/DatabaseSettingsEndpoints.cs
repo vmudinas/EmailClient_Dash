@@ -132,8 +132,7 @@ public static class DatabaseSettingsEndpoints
             AppSettingsService application, IHttpClientFactory clients, CancellationToken token) =>
         {
             if (!IsAdmin(context)) return Results.Forbid();
-            var result = await AiModels(application, clients, provider, token);
-            return result;
+            return await TestAiProvider(application, clients, provider, token);
         }).WithName("TestAiProvider").WithTags("Admin settings");
 
         return app;
@@ -166,6 +165,73 @@ public static class DatabaseSettingsEndpoints
         {
             return Results.BadRequest(new { error = $"Could not reach {id}: {error.Message}" });
         }
+    }
+
+    private static async Task<IResult> TestAiProvider(AppSettingsService application, IHttpClientFactory clients,
+        string? provider, CancellationToken token)
+    {
+        var settings = application.Current().AiValue;
+        var id = provider is "deepseek" ? "deepseek" : "openai";
+        var configured = id == "deepseek" ? settings.DeepSeek : settings.OpenAi;
+        if (string.IsNullOrWhiteSpace(configured?.ApiKey))
+            return Results.BadRequest(new { error = $"Configure the {id} API key first" });
+        if (string.IsNullOrWhiteSpace(configured.Model))
+            return Results.BadRequest(new { error = $"Choose a {id} model first" });
+
+        var endpoint = id == "deepseek"
+            ? "https://api.deepseek.com/chat/completions"
+            : "https://api.openai.com/v1/chat/completions";
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", configured.ApiKey);
+        request.Content = JsonContent.Create(new
+        {
+            model = configured.Model,
+            messages = new[] { new { role = "user", content = "Reply with OK." } }
+        });
+
+        try
+        {
+            using var response = await clients.CreateClient("ai").SendAsync(request, token);
+            var body = await response.Content.ReadAsStringAsync(token);
+            if (!response.IsSuccessStatusCode)
+                return Results.BadRequest(new
+                {
+                    error = $"{id} rejected model {configured.Model} ({(int)response.StatusCode}): {ProviderError(body)}"
+                });
+
+            using var json = JsonDocument.Parse(body);
+            if (!json.RootElement.TryGetProperty("choices", out var choices)
+                || choices.ValueKind != JsonValueKind.Array
+                || choices.GetArrayLength() == 0)
+                return Results.BadRequest(new { error = $"{id} returned an invalid chat-completion response" });
+            return Results.Ok(new { ok = true, provider = id, model = configured.Model });
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            return Results.BadRequest(new { error = $"Could not complete a test request with {id}: {error.Message}" });
+        }
+    }
+
+    internal static string ProviderError(string body)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            if (json.RootElement.TryGetProperty("error", out var error))
+            {
+                if (error.ValueKind == JsonValueKind.Object
+                    && error.TryGetProperty("message", out var message)
+                    && message.ValueKind == JsonValueKind.String)
+                    return message.GetString() ?? "Provider rejected the request";
+                if (error.ValueKind == JsonValueKind.String) return error.GetString() ?? "Provider rejected the request";
+            }
+        }
+        catch (JsonException)
+        {
+            // Fall back to the provider's bounded plain-text response.
+        }
+        var normalized = string.Join(' ', body.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length == 0 ? "Provider rejected the request" : normalized[..Math.Min(normalized.Length, 300)];
     }
 
     private static bool IsAdmin(HttpContext context) =>

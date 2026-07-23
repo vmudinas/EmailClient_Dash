@@ -6,6 +6,33 @@ namespace ArchiveMail.Api.Imports;
 
 public sealed class ImportJobRepository(NpgsqlDataSource database)
 {
+    internal const string ClaimNextSql = """
+        WITH candidate AS (
+          SELECT id
+          FROM import_jobs
+          WHERE source_type <> 'gmail'
+            AND (
+              status = 'queued'
+              OR (status = 'running' AND (lease_until IS NULL OR lease_until < $1))
+            )
+          ORDER BY updated_at
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        UPDATE import_jobs AS job
+        SET status = 'running',
+            phase = CASE WHEN job.phase = 'queued' THEN 'fingerprinting' ELSE job.phase END,
+            can_resume = 1,
+            worker_id = $2,
+            lease_until = $3,
+            attempt = attempt + 1,
+            message = CASE WHEN attempt > 0 THEN 'Resumed by C# importer' ELSE 'Import started' END,
+            updated_at = $1
+        FROM candidate
+        WHERE job.id = candidate.id
+        RETURNING job.id
+        """;
+
     public async Task<ImportJobDto> CreateAsync(
         string sourcePath,
         bool ocrEnabled,
@@ -150,33 +177,9 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
     {
         var now = DateTimeOffset.UtcNow;
         var leaseUntil = now.Add(lease).ToString("O");
-        const string sql = """
-            WITH candidate AS (
-              SELECT id
-              FROM import_jobs
-              WHERE status = 'queued'
-                 OR (status = 'running' AND (lease_until IS NULL OR lease_until < $1))
-              ORDER BY updated_at
-              FOR UPDATE SKIP LOCKED
-              LIMIT 1
-            )
-            UPDATE import_jobs AS job
-            SET status = 'running',
-                phase = CASE WHEN job.phase = 'queued' THEN 'fingerprinting' ELSE job.phase END,
-                can_resume = 1,
-                worker_id = $2,
-                lease_until = $3,
-                attempt = attempt + 1,
-                message = CASE WHEN attempt > 0 THEN 'Resumed by C# importer' ELSE 'Import started' END,
-                updated_at = $1
-            FROM candidate
-            WHERE job.id = candidate.id
-            RETURNING job.id
-            """;
-
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        await using var command = new NpgsqlCommand(ClaimNextSql, connection, transaction);
         command.Parameters.AddWithValue(now.ToString("O"));
         command.Parameters.AddWithValue(workerId);
         command.Parameters.AddWithValue(leaseUntil);
@@ -219,6 +222,9 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
 
     public async Task MarkFailedAsync(string id, string message, CancellationToken cancellationToken) =>
         await UpdateStateAsync(id, "failed", message, canResume: true, cancellationToken);
+
+    public async Task MarkNonResumableFailedAsync(string id, string message, CancellationToken cancellationToken) =>
+        await UpdateStateAsync(id, "failed", message, canResume: false, cancellationToken);
 
     public async Task MarkCompletedAsync(string id, CancellationToken cancellationToken)
     {
@@ -282,7 +288,8 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
             SELECT COUNT(*) FILTER (WHERE job.status = 'running'),
                    COUNT(*) FILTER (WHERE job.status = 'queued')
             FROM import_jobs job JOIN archives archive ON archive.id=job.archive_id
-            WHERE (@owner IS NULL OR archive.owner_user_id=@owner)
+            WHERE job.source_type <> 'gmail'
+              AND (@owner IS NULL OR archive.owner_user_id=@owner)
             """;
         await using var command = database.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter { ParameterName = "owner", NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)ownerUserId ?? DBNull.Value });

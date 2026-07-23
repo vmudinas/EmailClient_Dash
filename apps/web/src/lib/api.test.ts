@@ -6,6 +6,59 @@ afterEach(() => {
 });
 
 describe("ApiClient request headers", () => {
+  it("deduplicates repeated GET requests within the client cache window", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    const [first, second] = await Promise.all([client.listArchives(), client.listArchives()]);
+    const third = await client.listArchives();
+
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    expect(third).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates cached GET responses when data is mutated", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(jsonResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.listArchives();
+    await client.listArchives();
+    await client.removeArchive("archive-1");
+    await client.listArchives();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not cache active import status polling", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse([])));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.listImportJobs();
+    await client.listImportJobs();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("logs in and uses the returned session token", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({
@@ -111,6 +164,27 @@ describe("ApiClient request headers", () => {
     expect(init.body).toBeUndefined();
   });
 
+  it("reconnects an existing Apple Calendar account in place", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "apple-1", status: "connected" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.reconnectAppleCalendar("apple-1", {
+      label: "iCloud",
+      username: "owner@example.test",
+      appSpecificPassword: "xxxx-xxxx-xxxx-xxxx",
+      serverUrl: "https://caldav.icloud.com"
+    });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://127.0.0.1:3001/api/admin/calendar/accounts/apple-1");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("PUT");
+  });
+
   it("starts and monitors a background smart-rule task", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({
       id: "task-1",
@@ -200,6 +274,92 @@ describe("ApiClient request headers", () => {
     expect(fetchMock.mock.calls[0]![0]).toBe(
       "http://127.0.0.1:3001/api/messages/category-counts?archiveId=archive-1"
     );
+  });
+
+  it("fills required archive and folder counters omitted by a legacy response", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([{ id: "archive-1", name: "Legacy" }]))
+      .mockResolvedValueOnce(jsonResponse([{ id: "folder-1", archiveId: "archive-1", name: "Inbox" }]));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    const [archive] = await client.listArchives();
+    const [folder] = await client.listFolders("archive-1");
+
+    expect(archive).toMatchObject({
+      messageCount: 0,
+      unreadCount: 0,
+      folderCount: 0,
+      attachmentCount: 0,
+      errorCount: 0,
+      sizeBytes: 0
+    });
+    expect(folder).toMatchObject({ path: "Inbox", messageCount: 0, unreadCount: 0 });
+  });
+
+  it("fills required Gmail and import progress fields omitted by a legacy response", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([{ id: "gmail-1", email: "person@example.test" }]))
+      .mockResolvedValueOnce(jsonResponse([{ id: "job-1", sourceName: "mail.pst" }]));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    const [gmail] = await client.listGmailConnections();
+    const [job] = await client.listImportJobs();
+
+    expect(gmail).toMatchObject({
+      processedItems: 0,
+      importedItems: 0,
+      totalItems: null,
+      status: "error"
+    });
+    expect(job).toMatchObject({
+      processedItems: 0,
+      processedBytes: 0,
+      totalBytes: 0,
+      errorCount: 0,
+      totalItems: null
+    });
+  });
+
+  it("creates safe nested admin settings when counters are absent", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      database: {},
+      security: {},
+      gmail: {},
+      drafts: {},
+      stocks: {},
+      news: {},
+      ai: { usage: {} }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    const settings = await client.adminSettings();
+
+    expect(settings.database.providers).toEqual([]);
+    expect(settings.stocks.symbols).toEqual([]);
+    expect(settings.news.enabledSources).toEqual([]);
+    expect(settings.ai.usage).toEqual({
+      todayRequests: 0,
+      monthRequests: 0,
+      todayInputTokens: 0,
+      todayOutputTokens: 0,
+      monthInputTokens: 0,
+      monthOutputTokens: 0
+    });
   });
 
   it("sends Gmail authorization, outgoing email, and combine requests to local-only routes", async () => {
