@@ -81,6 +81,12 @@ while [ "$attempt" -lt 90 ]; do
         exit 1
         ;;
       esac
+      if [ ! -x /usr/bin/python3 ]; then
+        echo "Python 3 is required for the post-deployment API and React smoke checks." >&2
+        exit 1
+      fi
+      echo "Running post-deployment API, authentication, and React asset checks..."
+      /usr/bin/python3 "$DEPLOY_DIR/scripts/smoke-api.py" http://127.0.0.1:3001
       if [ -n "${EMAIL_CLIENT_PUBLIC_URL:-}" ]; then
         echo "Archive Mail is healthy at $EMAIL_CLIENT_PUBLIC_URL"
       else

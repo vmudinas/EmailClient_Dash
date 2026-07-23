@@ -47,8 +47,12 @@ The one-time cutover migrator creates the PostgreSQL schema before the applicati
 Every production image build runs the React and C# test suites before publishing
 the image. The API startup then verifies the live PostgreSQL schema against all
 declared tables, columns, required defaults, nullability rules, and named unique
-indexes. A mismatch stops the container instead of allowing partially migrated
-data to fail later in an unrelated screen.
+indexes. After the container becomes healthy, every deployment entry point runs
+`smoke-api.py` against the live service. It loads the React entry page and every
+referenced production asset, inventories live Swagger, and verifies that every
+protected operation rejects an unauthenticated request. Any build-test, schema,
+UI-asset, Swagger, or route-authentication failure makes the deployment fail
+instead of reporting success.
 
 Run the read-only OpenAPI smoke test against a reachable service:
 
