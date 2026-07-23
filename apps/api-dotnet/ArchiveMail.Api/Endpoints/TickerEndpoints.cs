@@ -47,7 +47,7 @@ public static class TickerEndpoints
         return app;
     }
 
-    private static async Task<object> QuoteAsync(string symbol, HttpClient client, CancellationToken token)
+    internal static async Task<object> QuoteAsync(string symbol, HttpClient client, CancellationToken token)
     {
         var quotedAt = DateTimeOffset.UtcNow.ToString("O");
         try
@@ -84,7 +84,7 @@ public static class TickerEndpoints
         }
     }
 
-    private static async Task<IReadOnlyList<Headline>> HeadlinesAsync(
+    internal static async Task<IReadOnlyList<Headline>> HeadlinesAsync(
         string id, (string Name, string Url) source, HttpClient client, CancellationToken token)
     {
         try
@@ -115,5 +115,5 @@ public static class TickerEndpoints
         value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.String ? item.GetString() : null;
     private static double? Number(JsonElement value, string name) =>
         value.TryGetProperty(name, out var item) && item.TryGetDouble(out var result) ? result : null;
-    private sealed record Headline(string Id, string SourceId, string SourceName, string Title, string Link, string? PublishedAt);
+    internal sealed record Headline(string Id, string SourceId, string SourceName, string Title, string Link, string? PublishedAt);
 }

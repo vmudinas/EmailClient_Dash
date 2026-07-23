@@ -35,6 +35,24 @@ if ! POSTGRES_PASSWORD_DEFAULT=$(openssl rand -hex 32 2>/dev/null); then
   exit 1
 fi
 
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Node.js/npm is required locally to test and build the React application." >&2
+  exit 1
+fi
+if [ ! -d "$REPOSITORY_DIR/node_modules" ]; then
+  echo "Installing local React build dependencies..."
+  (cd "$REPOSITORY_DIR" && npm ci --no-audit --no-fund)
+fi
+echo "Testing and building the React application locally..."
+(cd "$REPOSITORY_DIR" \
+  && npm run build -w @email-client/shared \
+  && npm run test:run -w @email-client/web \
+  && npm run build -w @email-client/web)
+if [ ! -f "$REPOSITORY_DIR/apps/web/dist/index.html" ]; then
+  echo "The React production build did not produce apps/web/dist/index.html." >&2
+  exit 1
+fi
+
 cleanup() {
   ssh $SSH_IDENTITY_ARGS -S "$CONTROL_PATH" -O exit "$NAS_HOST" >/dev/null 2>&1 || true
   rm -f "$CONTROL_PATH"
@@ -63,8 +81,10 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
   -C "$REPOSITORY_DIR" \
   --exclude='./node_modules' \
   --exclude='*/node_modules' \
-  --exclude='./dist' \
-  --exclude='*/dist' \
+  --exclude='./bin' \
+  --exclude='*/bin' \
+  --exclude='./obj' \
+  --exclude='*/obj' \
   --exclude='./.git' \
   --exclude='./deploy/.env' \
   --exclude='*.local.sh' \
@@ -123,6 +143,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
     ensure_env_value POSTGRES_USER archive_mail
     ensure_env_value POSTGRES_PASSWORD '${POSTGRES_PASSWORD_DEFAULT}'
     ensure_env_value ARCHIVE_MAIL_POSTGRES_MIGRATE_ON_DEPLOY true
+    ensure_env_value ARCHIVE_MAIL_DOCKERFILE deploy/Dockerfile.synology
     mkdir -p '${NAS_POSTGRES_DIR}' '${NAS_BACKUP_DIR}'
     chmod 600 \"\$env_file\"
     cp \"\$env_file\" \"\$staging/deploy/.env\"

@@ -42,6 +42,35 @@ Run `./deploy/scripts/deploy.sh` again after pulling source changes. It rebuilds
 
 The one-time cutover migrator creates the PostgreSQL schema before the application starts. Existing mail and account configuration are retained; newly created users begin with empty private mail and calendar workspaces.
 
+## API and schema verification
+
+Every production image build runs the React and C# test suites before publishing
+the image. The API startup then verifies the live PostgreSQL schema against all
+declared tables, columns, required defaults, nullability rules, and named unique
+indexes. A mismatch stops the container instead of allowing partially migrated
+data to fail later in an unrelated screen.
+
+Run the read-only OpenAPI smoke test against a reachable service:
+
+```bash
+ARCHIVE_MAIL_BASE_URL=http://127.0.0.1:3001 \
+  node deploy/scripts/smoke-api.mjs
+```
+
+Without credentials it checks Swagger, the health handler, and authentication
+enforcement for every protected operation. To exercise authenticated GET
+handlers, supply a temporary token or explicitly supply a test account PIN:
+
+```bash
+ARCHIVE_MAIL_BASE_URL=http://127.0.0.1:3001 \
+ARCHIVE_MAIL_SMOKE_TOKEN=replace-with-temporary-token \
+  node deploy/scripts/smoke-api.mjs
+```
+
+Mutation checks are disabled by default because they create and delete test
+data. Enable `ARCHIVE_MAIL_SMOKE_ALLOW_MUTATIONS=true` only against an isolated
+test database.
+
 ## Large imports
 
 Imports use native parallel PST extraction, bounded asynchronous MIME parsing, and PostgreSQL binary `COPY` batches. Each committed batch includes its version-2 checkpoint, so a replacement C# process can resume after its worker lease expires.
@@ -122,7 +151,7 @@ If Container Manager reuses a stale image or container, create a DSM **Task Sche
 /volume1/docker/archive-mail/app/deploy/scripts/synology-deploy-task.sh
 ```
 
-Name the task `Archive Mail deployment`. The task exits immediately unless the upload script has created a deployment request marker, so the one-minute schedule does not rebuild continuously. To verify the one-time setup, create `/volume1/docker/archive-mail/backups/rebuild.request` and run the task manually once. The script builds without cache, recreates the services, verifies the C# and PostgreSQL health response, and never removes the bind-mounted data directory.
+Name the task `Archive Mail deployment`. The task exits immediately unless the upload script has created a deployment request marker, so the one-minute schedule does not rebuild continuously. To verify the one-time setup, create `/volume1/docker/archive-mail/backups/rebuild.request` and run the task manually once. The script rebuilds changed source and test layers while reusing expensive package layers, recreates the services, verifies the C# and PostgreSQL health response, and never removes the bind-mounted data directory.
 
 After that one-time root-task setup, every deployment is one command from the repository on the Mac:
 
@@ -191,6 +220,18 @@ EMAIL_CLIENT_TRUST_PROXY=true
 Archive Mail serves both the UI and API from the same origin. A subpath such as `https://example.com/archive-mail` is not supported; use a dedicated hostname.
 
 `EMAIL_CLIENT_TRUST_PROXY=true` lets authentication throttling and audit history use the forwarded client address. Enable it only when untrusted clients cannot bypass the reverse proxy and connect directly to port `3001`.
+
+For the standard Synology deployment, update these settings on the NAS and
+recreate the container with one command from the repository root:
+
+```sh
+./configure-synology-public-url.command https://mail.example.com
+```
+
+The command backs up the NAS environment file, sets the public URL and trusted
+proxy mode, binds the application port to `127.0.0.1`, and runs the existing
+deployment health check. The default URL is `https://vts.i234.me` when the
+argument is omitted.
 
 ## Gmail OAuth on a server
 

@@ -158,16 +158,27 @@ interface PendingClientDiagnostic {
 
 const CHUNK_BYTES = 4 * 1024 * 1024;
 const CLIENT_DIAGNOSTICS_KEY = "archive-mail-client-diagnostics";
+const DEFAULT_QUERY_CACHE_MS = 15_000;
+
+interface ClientCacheEntry {
+  value: unknown;
+  expiresAt: number;
+  generation: number;
+}
 
 export class ApiClient {
   private accessToken: string;
   private authorizationRequiredHandler: (() => void) | null = null;
+  private readonly queryCache = new Map<string, ClientCacheEntry>();
+  private readonly pendingQueries = new Map<string, Promise<unknown>>();
+  private cacheGeneration = 0;
 
   constructor(readonly config: RuntimeConfig) {
     this.accessToken = config.accessToken;
   }
 
   setAccessToken(accessToken: string): void {
+    if (accessToken !== this.accessToken) this.invalidateCache();
     this.accessToken = accessToken;
   }
 
@@ -177,6 +188,21 @@ export class ApiClient {
 
   setAuthorizationRequiredHandler(handler: (() => void) | null): void {
     this.authorizationRequiredHandler = handler;
+  }
+
+  invalidateCache(pathPrefix?: string): void {
+    this.cacheGeneration += 1;
+    if (!pathPrefix) {
+      this.queryCache.clear();
+      this.pendingQueries.clear();
+      return;
+    }
+    for (const key of this.queryCache.keys()) {
+      if (key.startsWith(pathPrefix)) this.queryCache.delete(key);
+    }
+    for (const key of this.pendingQueries.keys()) {
+      if (key.startsWith(pathPrefix)) this.pendingQueries.delete(key);
+    }
   }
 
   async login(username: string, pin: string): Promise<AuthLoginResult> {
@@ -399,12 +425,13 @@ export class ApiClient {
     });
   }
 
-  listArchives(): Promise<Archive[]> {
-    return this.request("/api/archives");
+  async listArchives(): Promise<Archive[]> {
+    return list(await this.request("/api/archives")).map(normalizeArchive);
   }
 
-  listFolders(archiveId: string): Promise<Folder[]> {
-    return this.request(`/api/archives/${encodeURIComponent(archiveId)}/folders`);
+  async listFolders(archiveId: string): Promise<Folder[]> {
+    return list(await this.request(`/api/archives/${encodeURIComponent(archiveId)}/folders`))
+      .map(normalizeFolder);
   }
 
   createFolder(archiveId: string, name: string, parentId?: string | null): Promise<Folder> {
@@ -455,8 +482,8 @@ export class ApiClient {
     });
   }
 
-  listGmailConnections(): Promise<GmailConnection[]> {
-    return this.request("/api/gmail/connections");
+  async listGmailConnections(): Promise<GmailConnection[]> {
+    return list(await this.request("/api/gmail/connections")).map(normalizeGmailConnection);
   }
 
   startGmailAuthorization(request: GmailAuthRequest): Promise<GmailAuthStart> {
@@ -466,23 +493,23 @@ export class ApiClient {
     });
   }
 
-  syncGmail(connectionId: string, options: { full?: boolean } = {}): Promise<GmailConnection> {
-    return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/sync`, {
+  async syncGmail(connectionId: string, options: { full?: boolean } = {}): Promise<GmailConnection> {
+    return normalizeGmailConnection(await this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/sync`, {
       method: "POST",
       body: JSON.stringify(options)
-    });
+    }));
   }
 
-  cancelGmailSync(connectionId: string): Promise<GmailConnection> {
-    return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/cancel`, {
+  async cancelGmailSync(connectionId: string): Promise<GmailConnection> {
+    return normalizeGmailConnection(await this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/cancel`, {
       method: "POST"
-    });
+    }));
   }
 
-  reconcileGmailMailbox(connectionId: string): Promise<GmailConnection> {
-    return this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/reconcile`, {
+  async reconcileGmailMailbox(connectionId: string): Promise<GmailConnection> {
+    return normalizeGmailConnection(await this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/reconcile`, {
       method: "POST"
-    });
+    }));
   }
 
   reorganizeGmailFolders(connectionId: string): Promise<GmailConnection> {
@@ -875,24 +902,24 @@ export class ApiClient {
     });
   }
 
-  listImportJobs(): Promise<ImportJob[]> {
-    return this.request("/api/import-jobs");
+  async listImportJobs(): Promise<ImportJob[]> {
+    return list(await this.request("/api/import-jobs")).map(normalizeImportJob);
   }
 
-  getImportJob(jobId: string): Promise<ImportJob> {
-    return this.request(`/api/import-jobs/${encodeURIComponent(jobId)}`);
+  async getImportJob(jobId: string): Promise<ImportJob> {
+    return normalizeImportJob(await this.request(`/api/import-jobs/${encodeURIComponent(jobId)}`));
   }
 
-  cancelImport(jobId: string): Promise<ImportJob> {
-    return this.request(`/api/import-jobs/${encodeURIComponent(jobId)}/cancel`, {
+  async cancelImport(jobId: string): Promise<ImportJob> {
+    return normalizeImportJob(await this.request(`/api/import-jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: "POST"
-    });
+    }));
   }
 
-  resumeImport(jobId: string): Promise<ImportJob> {
-    return this.request(`/api/import-jobs/${encodeURIComponent(jobId)}/resume`, {
+  async resumeImport(jobId: string): Promise<ImportJob> {
+    return normalizeImportJob(await this.request(`/api/import-jobs/${encodeURIComponent(jobId)}/resume`, {
       method: "POST"
-    });
+    }));
   }
 
   clearImport(jobId: string): Promise<void> {
@@ -1105,8 +1132,8 @@ export class ApiClient {
     queuePendingDiagnostic(diagnostic);
   }
 
-  adminSettings(): Promise<AdminSettings> {
-    return this.request("/api/admin/settings");
+  async adminSettings(): Promise<AdminSettings> {
+    return normalizeAdminSettings(await this.request("/api/admin/settings"));
   }
 
   stockQuotes(): Promise<StockQuote[]> {
@@ -1157,6 +1184,13 @@ export class ApiClient {
   connectAppleCalendar(input: AppleCalendarAccountCreate): Promise<CalendarAccount> {
     return this.request("/api/admin/calendar/accounts", {
       method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  reconnectAppleCalendar(accountId: string, input: AppleCalendarAccountCreate): Promise<CalendarAccount> {
+    return this.request(`/api/admin/calendar/accounts/${encodeURIComponent(accountId)}`, {
+      method: "PUT",
       body: JSON.stringify(input)
     });
   }
@@ -1395,6 +1429,43 @@ export class ApiClient {
     init: RequestInit = {},
     diagnosticContext: Record<string, unknown> = {}
   ): Promise<T> {
+    const method = (init.method ?? "GET").toUpperCase();
+    const cacheTtl = method === "GET" && !init.signal ? queryCacheDuration(path) : 0;
+    if (cacheTtl > 0) {
+      const cached = this.queryCache.get(path);
+      if (cached && cached.expiresAt > Date.now()) return cached.value as T;
+      const pending = this.pendingQueries.get(path);
+      if (pending) return pending as Promise<T>;
+    } else if (method !== "GET") {
+      // A mutation can affect archives, folders, counts, messages, settings, and
+      // provider state. Clear before dispatch so an older in-flight GET cannot
+      // repopulate the cache after the mutation starts.
+      this.invalidateCache();
+    }
+    const generation = this.cacheGeneration;
+    const request = this.fetchJson<T>(path, init, diagnosticContext);
+    if (cacheTtl <= 0) return request;
+    this.pendingQueries.set(path, request);
+    try {
+      const value = await request;
+      if (generation === this.cacheGeneration) {
+        this.queryCache.set(path, {
+          value,
+          expiresAt: Date.now() + cacheTtl,
+          generation
+        });
+      }
+      return value;
+    } finally {
+      if (this.pendingQueries.get(path) === request) this.pendingQueries.delete(path);
+    }
+  }
+
+  private async fetchJson<T>(
+    path: string,
+    init: RequestInit,
+    diagnosticContext: Record<string, unknown>
+  ): Promise<T> {
     try {
       const response = await fetch(`${this.config.apiBaseUrl}${path}`, {
         ...init,
@@ -1441,6 +1512,205 @@ export class ApiClient {
   }
 }
 
+function normalizeArchive(value: unknown): Archive {
+  const item = record(value);
+  return {
+    id: text(item.id),
+    name: text(item.name, "Archive"),
+    sourceType: text(item.sourceType, "mbox") as Archive["sourceType"],
+    status: text(item.status, "ready") as Archive["status"],
+    sizeBytes: finiteNumber(item.sizeBytes),
+    messageCount: finiteNumber(item.messageCount),
+    unreadCount: finiteNumber(item.unreadCount),
+    starredCount: finiteNumber(item.starredCount),
+    starredUnreadCount: finiteNumber(item.starredUnreadCount),
+    folderCount: finiteNumber(item.folderCount),
+    attachmentCount: finiteNumber(item.attachmentCount),
+    errorCount: finiteNumber(item.errorCount),
+    importedAt: nullableText(item.importedAt),
+    createdAt: text(item.createdAt)
+  };
+}
+
+function normalizeFolder(value: unknown): Folder {
+  const item = record(value);
+  return {
+    id: text(item.id),
+    archiveId: text(item.archiveId),
+    parentId: nullableText(item.parentId),
+    name: text(item.name, "Folder"),
+    path: text(item.path, text(item.name, "Folder")),
+    messageCount: finiteNumber(item.messageCount),
+    unreadCount: finiteNumber(item.unreadCount)
+  };
+}
+
+function normalizeGmailConnection(value: unknown): GmailConnection {
+  const item = record(value);
+  return {
+    id: text(item.id),
+    email: text(item.email),
+    archiveId: text(item.archiveId),
+    archiveName: text(item.archiveName, "Gmail"),
+    folderId: text(item.folderId),
+    folderPath: text(item.folderPath, "Gmail"),
+    query: text(item.query),
+    ocrEnabled: Boolean(item.ocrEnabled),
+    canSend: Boolean(item.canSend),
+    canModifyMailbox: Boolean(item.canModifyMailbox),
+    canManageCalendar: Boolean(item.canManageCalendar),
+    status: text(item.status, "error") as GmailConnection["status"],
+    processedItems: finiteNumber(item.processedItems),
+    totalItems: item.totalItems === null || item.totalItems === undefined
+      ? null
+      : finiteNumber(item.totalItems),
+    importedItems: finiteNumber(item.importedItems),
+    lastSyncedAt: nullableText(item.lastSyncedAt),
+    lastError: nullableText(item.lastError),
+    createdAt: text(item.createdAt),
+    updatedAt: text(item.updatedAt)
+  };
+}
+
+function normalizeImportJob(value: unknown): ImportJob {
+  const item = record(value);
+  return {
+    id: text(item.id),
+    archiveId: nullableText(item.archiveId),
+    sourceName: text(item.sourceName, "Import"),
+    sourceType: text(item.sourceType, "mbox") as ImportJob["sourceType"],
+    status: text(item.status, "failed") as ImportJob["status"],
+    phase: text(item.phase, "parsing") as ImportJob["phase"],
+    processedItems: finiteNumber(item.processedItems),
+    totalItems: item.totalItems === null || item.totalItems === undefined
+      ? null
+      : finiteNumber(item.totalItems),
+    processedBytes: finiteNumber(item.processedBytes),
+    totalBytes: finiteNumber(item.totalBytes),
+    errorCount: finiteNumber(item.errorCount),
+    ocrEnabled: Boolean(item.ocrEnabled),
+    canResume: Boolean(item.canResume),
+    message: nullableText(item.message),
+    createdAt: text(item.createdAt),
+    updatedAt: text(item.updatedAt)
+  };
+}
+
+function normalizeAdminSettings(value: unknown): AdminSettings {
+  const root = record(value);
+  const database = record(root.database);
+  const importRuntime = record(database.importRuntime);
+  const security = record(root.security);
+  const gmail = record(root.gmail);
+  const drafts = record(root.drafts);
+  const stocks = record(root.stocks);
+  const news = record(root.news);
+  const ai = record(root.ai);
+  const usage = record(ai.usage);
+
+  return {
+    database: {
+      ...database,
+      activeProvider: text(database.activeProvider, "postgresql") as AdminSettings["database"]["activeProvider"],
+      activeConnectionString: text(database.activeConnectionString),
+      configuredProvider: text(database.configuredProvider, "postgresql") as AdminSettings["database"]["configuredProvider"],
+      configuredConnectionString: text(database.configuredConnectionString),
+      restartRequired: Boolean(database.restartRequired),
+      providers: Array.isArray(database.providers) ? database.providers as AdminSettings["database"]["providers"] : [],
+      structuredDataPath: text(database.structuredDataPath),
+      attachmentBlobPath: text(database.attachmentBlobPath),
+      importRuntime: database.importRuntime === null || database.importRuntime === undefined ? undefined : {
+        activeJobs: finiteNumber(importRuntime.activeJobs),
+        queuedJobs: finiteNumber(importRuntime.queuedJobs),
+        concurrency: finiteNumber(importRuntime.concurrency),
+        batchSize: finiteNumber(importRuntime.batchSize),
+        throttleMs: finiteNumber(importRuntime.throttleMs),
+        latencyThresholdMs: finiteNumber(importRuntime.latencyThresholdMs),
+        throttledForApiLatency: Boolean(importRuntime.throttledForApiLatency)
+      }
+    },
+    security: {
+      sessionLifetimeMinutes: finiteNumber(security.sessionLifetimeMinutes),
+      defaultPinWarning: Boolean(security.defaultPinWarning)
+    },
+    gmail: {
+      ...gmail,
+      configured: Boolean(gmail.configured),
+      clientId: text(gmail.clientId),
+      clientSecretConfigured: Boolean(gmail.clientSecretConfigured),
+      source: text(gmail.source, "none") as AdminSettings["gmail"]["source"],
+      settingsPath: text(gmail.settingsPath),
+      configurationError: nullableText(gmail.configurationError),
+      oauthCallbackUrl: nullableText(gmail.oauthCallbackUrl),
+      syncIntervalMinutes: finiteNumber(gmail.syncIntervalMinutes),
+      syncIntervalEnvManaged: Boolean(gmail.syncIntervalEnvManaged),
+      syncMailboxActions: Boolean(gmail.syncMailboxActions),
+      syncMailboxActionsEnvManaged: Boolean(gmail.syncMailboxActionsEnvManaged)
+    },
+    drafts: {
+      defaultFromAddress: text(drafts.defaultFromAddress),
+      senderName: text(drafts.senderName),
+      settingsPath: text(drafts.settingsPath),
+      configurationError: nullableText(drafts.configurationError)
+    },
+    stocks: {
+      symbols: Array.isArray(stocks.symbols) ? stocks.symbols.filter((item): item is string => typeof item === "string") : [],
+      secondsPerSymbol: finiteNumber(stocks.secondsPerSymbol, 8),
+      settingsPath: text(stocks.settingsPath),
+      configurationError: nullableText(stocks.configurationError)
+    },
+    news: {
+      enabledSources: Array.isArray(news.enabledSources)
+        ? news.enabledSources as AdminSettings["news"]["enabledSources"]
+        : [],
+      secondsPerHeadline: finiteNumber(news.secondsPerHeadline, 10),
+      settingsPath: text(news.settingsPath),
+      configurationError: nullableText(news.configurationError)
+    },
+    ai: {
+      ...ai,
+      activeProvider: text(ai.activeProvider, "openai") as AdminSettings["ai"]["activeProvider"],
+      enabled: Boolean(ai.enabled),
+      concurrency: finiteNumber(ai.concurrency, 1),
+      dailyRequestLimit: finiteNumber(ai.dailyRequestLimit),
+      monthlyRequestLimit: finiteNumber(ai.monthlyRequestLimit),
+      settingsPath: text(ai.settingsPath),
+      configurationError: nullableText(ai.configurationError),
+      usage: {
+        todayRequests: finiteNumber(usage.todayRequests),
+        monthRequests: finiteNumber(usage.monthRequests),
+        todayInputTokens: finiteNumber(usage.todayInputTokens),
+        todayOutputTokens: finiteNumber(usage.todayOutputTokens),
+        monthInputTokens: finiteNumber(usage.monthInputTokens),
+        monthOutputTokens: finiteNumber(usage.monthOutputTokens)
+      },
+      providers: record(ai.providers) as AdminSettings["ai"]["providers"]
+    }
+  };
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function list(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function text(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function nullableText(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
 export async function resolveRuntimeConfig(): Promise<RuntimeConfig> {
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL
     ?? (window.location.port === "5173" ? "" : window.location.origin);
@@ -1450,6 +1720,29 @@ export async function resolveRuntimeConfig(): Promise<RuntimeConfig> {
     accessToken: "",
     platform: mobile ? "mobile" : "browser"
   };
+}
+
+function queryCacheDuration(path: string): number {
+  // These endpoints are active-status feeds. Their existing polling cadence is
+  // the source of truth and must never be hidden behind a response cache.
+  if (
+    path.startsWith("/api/auth/")
+    || path.startsWith("/api/import-jobs")
+    || path.startsWith("/api/uploads")
+    || path === "/api/gmail/connections"
+    || path.startsWith("/api/diagnostics")
+    || path.startsWith("/api/ai/review-queue")
+    || path.startsWith("/api/admin/ai-schedules")
+    || path.startsWith("/api/stocks/quotes")
+    || path.startsWith("/api/news/headlines")
+  ) return 0;
+
+  if (path.startsWith("/api/calendar/")) return 30_000;
+  if (path.startsWith("/api/messages") || path.startsWith("/api/search")) return 20_000;
+  if (path.startsWith("/api/archives") || path.startsWith("/api/folders")) return 10_000;
+  if (path.startsWith("/api/todos")) return 10_000;
+  if (path.startsWith("/api/admin/settings")) return 60_000;
+  return DEFAULT_QUERY_CACHE_MS;
 }
 
 function queryString(values: Record<string, unknown>): string {

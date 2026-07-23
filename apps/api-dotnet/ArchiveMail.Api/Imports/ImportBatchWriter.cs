@@ -5,11 +5,45 @@ using ArchiveMail.Api.Mail;
 
 namespace ArchiveMail.Api.Imports;
 
-public sealed class ImportBatchWriter(NpgsqlDataSource database)
+public sealed class ImportBatchWriter(NpgsqlDataSource database, ILogger<ImportBatchWriter> logger)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const int ImportCommandTimeoutSeconds = 120;
 
     public async Task CommitAsync(
+        ImportJobRecord job,
+        IReadOnlyList<ParsedMessage> messages,
+        ImportCheckpoint checkpoint,
+        TimeSpan lease,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await CommitOnceAsync(job, messages, checkpoint, lease, cancellationToken);
+                return;
+            }
+            catch (NpgsqlException error) when (
+                attempt < maxAttempts
+                && IsTransientDatabaseFailure(error)
+                && !cancellationToken.IsCancellationRequested)
+            {
+                var delay = TimeSpan.FromSeconds(1 << (attempt - 1));
+                logger.LogWarning(
+                    error,
+                    "Import batch for job {JobId} timed out or was blocked; retrying attempt {Attempt} of {MaxAttempts} after {DelaySeconds} seconds",
+                    job.Public.Id,
+                    attempt + 1,
+                    maxAttempts,
+                    delay.TotalSeconds);
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+    }
+
+    private async Task CommitOnceAsync(
         ImportJobRecord job,
         IReadOnlyList<ParsedMessage> messages,
         ImportCheckpoint checkpoint,
@@ -21,6 +55,13 @@ public sealed class ImportBatchWriter(NpgsqlDataSource database)
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var limits = new NpgsqlCommand(
+            "SET LOCAL lock_timeout = '15s'; SET LOCAL statement_timeout = '120s';",
+            connection,
+            transaction))
+        {
+            await limits.ExecuteNonQueryAsync(cancellationToken);
+        }
         var preparedMessages = await ApplyTabSettingsAsync(
             connection, transaction, job.Public.ArchiveId, messages, cancellationToken);
         await EnsureFoldersAsync(connection, transaction, job.Public.ArchiveId, preparedMessages, cancellationToken);
@@ -45,20 +86,24 @@ public sealed class ImportBatchWriter(NpgsqlDataSource database)
               ON folder.archive_id = batch.archive_id AND folder.path = batch.folder_path
             LEFT JOIN LATERAL (
               SELECT rule.folder_id
-              FROM sender_filing_rules rule
+              FROM (
+                SELECT 'from'::text AS match_field,
+                       lower(trim(batch.sender_address)) AS sender_address
+                UNION ALL
+                SELECT 'to'::text,
+                       lower(trim(COALESCE(recipient->>'address', '')))
+                FROM jsonb_array_elements(batch.to_json::jsonb) recipient
+              ) candidate
+              JOIN sender_filing_rules rule
+                ON rule.archive_id = batch.archive_id
+               AND rule.match_field = candidate.match_field
+               AND rule.sender_address = candidate.sender_address
               JOIN folders target ON target.id = rule.folder_id AND target.archive_id = batch.archive_id
-              WHERE rule.archive_id = batch.archive_id
+              WHERE candidate.sender_address <> ''
                 AND (
                   rule.source_scope = 'all'
                   OR (rule.source_scope = 'inbox' AND lower(trim(folder.name)) = 'inbox')
                   OR (rule.source_scope = 'folder' AND rule.source_folder_id = folder.id)
-                )
-                AND (
-                  (rule.match_field = 'from' AND lower(trim(batch.sender_address)) = rule.sender_address)
-                  OR (rule.match_field = 'to' AND EXISTS (
-                    SELECT 1 FROM jsonb_array_elements(batch.to_json::jsonb) recipient
-                    WHERE lower(trim(COALESCE(recipient->>'address', ''))) = rule.sender_address
-                  ))
                 )
               ORDER BY CASE rule.source_scope WHEN 'folder' THEN 0 WHEN 'inbox' THEN 1 ELSE 2 END,
                 rule.updated_at DESC
@@ -66,7 +111,10 @@ public sealed class ImportBatchWriter(NpgsqlDataSource database)
             ) filing ON TRUE
             ON CONFLICT (archive_id, source_key) DO NOTHING
             """;
-        await using (var merge = new NpgsqlCommand(messageMergeSql, connection, transaction))
+        await using (var merge = new NpgsqlCommand(messageMergeSql, connection, transaction)
+        {
+            CommandTimeout = ImportCommandTimeoutSeconds
+        })
             await merge.ExecuteNonQueryAsync(cancellationToken);
 
         const string stateMergeSql = """
@@ -77,7 +125,10 @@ public sealed class ImportBatchWriter(NpgsqlDataSource database)
               ON message.archive_id = batch.archive_id AND message.source_key = batch.source_key
             ON CONFLICT (message_id) DO NOTHING
             """;
-        await using (var states = new NpgsqlCommand(stateMergeSql, connection, transaction))
+        await using (var states = new NpgsqlCommand(stateMergeSql, connection, transaction)
+        {
+            CommandTimeout = ImportCommandTimeoutSeconds
+        })
             await states.ExecuteNonQueryAsync(cancellationToken);
 
         const string deferredMergeSql = """
@@ -93,7 +144,10 @@ public sealed class ImportBatchWriter(NpgsqlDataSource database)
             WHERE batch.has_attachments <> 0
             ON CONFLICT (message_id) DO NOTHING
             """;
-        await using (var merge = new NpgsqlCommand(deferredMergeSql, connection, transaction))
+        await using (var merge = new NpgsqlCommand(deferredMergeSql, connection, transaction)
+        {
+            CommandTimeout = ImportCommandTimeoutSeconds
+        })
         {
             merge.Parameters.AddWithValue(job.Public.Id);
             merge.Parameters.AddWithValue(job.StagingPath
@@ -110,7 +164,10 @@ public sealed class ImportBatchWriter(NpgsqlDataSource database)
                 lease_until = $5, message = 'Importing emails', updated_at = $6
             WHERE id = $1 AND status = 'running'
             """;
-        await using (var update = new NpgsqlCommand(checkpointSql, connection, transaction))
+        await using (var update = new NpgsqlCommand(checkpointSql, connection, transaction)
+        {
+            CommandTimeout = ImportCommandTimeoutSeconds
+        })
         {
             update.Parameters.AddWithValue(job.Public.Id);
             update.Parameters.AddWithValue(checkpoint.CommittedItems);
@@ -124,6 +181,11 @@ public sealed class ImportBatchWriter(NpgsqlDataSource database)
 
         await transaction.CommitAsync(cancellationToken);
     }
+
+    internal static bool IsTransientDatabaseFailure(NpgsqlException error) =>
+        error.IsTransient
+        || error.InnerException is TimeoutException
+        || error.SqlState is "40001" or "40P01" or "55P03" or "57014";
 
     private static async Task CreateStagingTableAsync(
         NpgsqlConnection connection,

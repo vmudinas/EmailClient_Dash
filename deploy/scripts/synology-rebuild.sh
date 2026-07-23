@@ -48,8 +48,10 @@ compose() {
   "$DOCKER_BIN" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-echo "Building a fresh Archive Mail image without cache..."
-compose build --no-cache archive-mail postgres-migrate
+echo "Building the Archive Mail images..."
+# Reuse the expensive OS/package layers. Source COPY layers and the test/publish
+# gates are invalidated whenever the uploaded repository changes.
+compose build archive-mail postgres-migrate
 
 echo "Removing the stale container and project network..."
 compose down --remove-orphans

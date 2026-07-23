@@ -118,7 +118,7 @@ describe("CalendarView", () => {
     expect(onReauthorize).toHaveBeenCalledWith(connection);
   });
 
-  it("always exposes add and reauthorize actions on the Calendar screen", async () => {
+  it("shows healthy Google calendar accounts as connected without an unnecessary reauthorize button", async () => {
     const api = {
       listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
       listCalendarSourceEvents: vi.fn().mockResolvedValue([]),
@@ -130,10 +130,11 @@ describe("CalendarView", () => {
 
     const add = await waitFor(() => screen.getByRole("button", { name: "Add Google account" }));
     fireEvent.click(add);
-    fireEvent.click(screen.getByRole("button", { name: "Reauthorize owner@example.test for Gmail and Calendar" }));
 
     expect(onAddGoogle).toHaveBeenCalledOnce();
-    expect(onReauthorize).toHaveBeenCalledWith(CONNECTION);
+    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reauthorize owner@example.test for Gmail and Calendar" })).toBeNull();
+    expect(onReauthorize).not.toHaveBeenCalled();
   });
 
   it("shows the provider error when an Apple calendar cannot be loaded", async () => {

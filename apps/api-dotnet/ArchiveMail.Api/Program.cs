@@ -65,6 +65,8 @@ builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequired
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<SmartRuleService>());
 builder.Services.AddHostedService<PropertyAutomationHostedService>();
 builder.Services.AddHttpClient("external", client => client.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHttpClient("ai", client => client.Timeout = TimeSpan.FromMinutes(2));
+builder.Services.AddHttpClient("gmail", client => client.Timeout = TimeSpan.FromMinutes(2));
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>

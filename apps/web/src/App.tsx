@@ -66,7 +66,6 @@ import {
   type MessageListItem
 } from "./components/MessageList.js";
 import { MessageReader } from "./components/MessageReader.js";
-import { CalendarView } from "./components/CalendarView.js";
 import {
   ALL_MAIL_SEARCH_SCOPE,
   EMPTY_FILTERS,
@@ -92,7 +91,6 @@ import { DraftsDialog } from "./components/DraftsDialog.js";
 import { GuideDialog } from "./components/GuideDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
 import { TenantInvitationScreen } from "./components/TenantInvitationScreen.js";
-import { SettingsDialog } from "./components/SettingsDialog.js";
 import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
 import { MessageActionDialog, type ReviewAction } from "./components/MessageActionDialog.js";
 import { StockTickerBar } from "./components/StockTickerBar.js";
@@ -144,9 +142,17 @@ const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string
 };
 
 const MAX_BULK_SELECTION = 500;
+const CalendarView = lazy(async () => {
+  const module = await import("./components/CalendarView.js");
+  return { default: module.CalendarView };
+});
 const PropertyManagementView = lazy(async () => {
   const module = await import("./components/PropertyManagementView.js");
   return { default: module.PropertyManagementView };
+});
+const SettingsDialog = lazy(async () => {
+  const module = await import("./components/SettingsDialog.js");
+  return { default: module.SettingsDialog };
 });
 
 function viewForPath(pathname = window.location.pathname): AppView {
@@ -211,6 +217,7 @@ export function App() {
   const [mobileView, setMobileView] = useState<MobileView>("folders");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [viewMode, setViewMode] = useState<AppView>(() => viewForPath());
+  const [visitedViews, setVisitedViews] = useState<Set<AppView>>(() => new Set([viewForPath()]));
   const [importOpen, setImportOpen] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importProgress, setImportProgress] = useState<UploadProgress | null>(null);
@@ -259,6 +266,7 @@ export function App() {
   const [messageListRevision, setMessageListRevision] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsVisited, setSettingsVisited] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
   const [diagnosticsClearing, setDiagnosticsClearing] = useState(false);
@@ -277,6 +285,7 @@ export function App() {
   const canUseMail = Boolean(session && !isRenter);
   const canAccessScreen = (screen: UserScreenId) => !session || userCanAccessScreen(session.user, screen);
   const navigateView = (next: AppView, replace = false) => {
+    setVisitedViews((current) => current.has(next) ? current : new Set([...current, next]));
     setViewMode(next);
     const path = next === "mail" ? "/mail" : `/${next}`;
     if (window.location.pathname !== path) {
@@ -285,7 +294,11 @@ export function App() {
   };
 
   useEffect(() => {
-    const handlePopState = () => setViewMode(viewForPath());
+    const handlePopState = () => {
+      const next = viewForPath();
+      setVisitedViews((current) => current.has(next) ? current : new Set([...current, next]));
+      setViewMode(next);
+    };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
@@ -455,6 +468,7 @@ export function App() {
     api?.setAccessToken("");
     setSession(null);
     setSettingsOpen(false);
+    setSettingsVisited(false);
     setArchives([]);
     setFolders([]);
     setItems([]);
@@ -478,6 +492,10 @@ export function App() {
   useEffect(() => {
     void connect();
   }, [connect]);
+
+  useEffect(() => {
+    if (settingsOpen) setSettingsVisited(true);
+  }, [settingsOpen]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setSearchTerm(query.trim()), 250);
@@ -529,6 +547,7 @@ export function App() {
   }, [api]);
 
   const importScreenAllowed = !session || userCanAccessScreen(session.user, "import");
+  const hasActiveImportJobs = jobs.some((job) => job.status === "running" || job.status === "queued");
 
   const refreshJobs = useCallback(async () => {
     if (!api || readOnly || !importScreenAllowed) return;
@@ -567,9 +586,9 @@ export function App() {
   useEffect(() => {
     if (!api || readOnly) return;
     void refreshJobs();
-    const interval = window.setInterval(() => void refreshJobs(), 1_500);
+    const interval = window.setInterval(() => void refreshJobs(), hasActiveImportJobs ? 1_500 : 15_000);
     return () => window.clearInterval(interval);
-  }, [api, readOnly, refreshJobs]);
+  }, [api, readOnly, refreshJobs, hasActiveImportJobs]);
 
   useEffect(() => {
     if (!api || !selectedArchiveId) {
@@ -2179,16 +2198,21 @@ export function App() {
       </header>
 
       <main className={`workspace ${viewMode === "mail" && selectedMessageId ? "reader-open" : ""} ${folderPanelVisible ? "" : "folders-collapsed"} ${viewMode === "properties" ? "property-workspace" : ""}`}>
-        {viewMode === "calendar" ? (
-          api && <CalendarView api={api} connections={gmailConnections} onAddGoogle={openGmail} onReauthorize={reauthorizeGmail} onError={showError} />
-        ) : viewMode === "properties" ? (
-          api && (
+        {visitedViews.has("calendar") && api && (
+          <div className={`workspace-view ${viewMode === "calendar" ? "active" : ""}`} aria-hidden={viewMode !== "calendar"}>
+            <Suspense fallback={<div className="calendar-source-loading"><LoaderCircle className="spin" size={20} /> Loading calendar workspace…</div>}>
+              <CalendarView api={api} connections={gmailConnections} active={viewMode === "calendar"} onAddGoogle={openGmail} onReauthorize={reauthorizeGmail} onError={showError} />
+            </Suspense>
+          </div>
+        )}
+        {visitedViews.has("properties") && api && (
+          <div className={`workspace-view ${viewMode === "properties" ? "active" : ""}`} aria-hidden={viewMode !== "properties"}>
             <Suspense fallback={<div className="property-loading"><LoaderCircle className="spin" size={24} /> Loading property workspace…</div>}>
               <PropertyManagementView api={api} readOnly={readOnly} isAdmin={isAdmin} onError={showError} onNotice={setNotice} />
             </Suspense>
-          )
-        ) : (
-          <>
+          </div>
+        )}
+        <div className={`workspace-view ${viewMode === "mail" ? "active" : ""}`} aria-hidden={viewMode !== "mail"}>
             <Sidebar
               archives={archives}
               folders={folders}
@@ -2289,8 +2313,7 @@ export function App() {
               moveBusy={moveBusy}
               spamBusy={spamBusy}
             />
-          </>
-        )}
+        </div>
       </main>
 
       {!isRenter && <NewsTickerBar
@@ -2536,36 +2559,38 @@ export function App() {
         />
       )}
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
-      {!readOnly && (
-        <SettingsDialog
-          open={settingsOpen}
-          api={api}
-          session={session}
-          onClose={() => setSettingsOpen(false)}
-          onSignedOut={signOutLocally}
-          onOpenGuide={() => {
-            setSettingsOpen(false);
-            setGuideOpen(true);
-          }}
-          onOpenDiagnostics={() => {
-            setSettingsOpen(false);
-            openDiagnostics();
-          }}
-          pendingDiagnosticCount={pendingDiagnosticCount}
-          onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
-          onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
-          onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
-          onNewsSettingsChanged={() => { if (api) void refreshNewsHeadlines(api); }}
-          onInboxTabSettingsChanged={(settings) => {
-            if (settings.archiveId !== selectedArchiveId) return;
-            setInboxTabSettings(settings);
-            const nextCategory = settings.tabs.some((tab) => tab.id === inboxCategory && tab.enabled)
-              ? inboxCategory
-              : "primary";
-            setInboxCategory(nextCategory);
-            if (nextCategory === inboxCategory) void loadMessages(false);
-          }}
-        />
+      {!readOnly && (settingsOpen || settingsVisited) && (
+        <Suspense fallback={settingsOpen ? <div className="dialog-backdrop"><div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings…</div></div> : null}>
+          <SettingsDialog
+            open={settingsOpen}
+            api={api}
+            session={session}
+            onClose={() => setSettingsOpen(false)}
+            onSignedOut={signOutLocally}
+            onOpenGuide={() => {
+              setSettingsOpen(false);
+              setGuideOpen(true);
+            }}
+            onOpenDiagnostics={() => {
+              setSettingsOpen(false);
+              openDiagnostics();
+            }}
+            pendingDiagnosticCount={pendingDiagnosticCount}
+            onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
+            onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
+            onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
+            onNewsSettingsChanged={() => { if (api) void refreshNewsHeadlines(api); }}
+            onInboxTabSettingsChanged={(settings) => {
+              if (settings.archiveId !== selectedArchiveId) return;
+              setInboxTabSettings(settings);
+              const nextCategory = settings.tabs.some((tab) => tab.id === inboxCategory && tab.enabled)
+                ? inboxCategory
+                : "primary";
+              setInboxCategory(nextCategory);
+              if (nextCategory === inboxCategory) void loadMessages(false);
+            }}
+          />
+        </Suspense>
       )}
       <DiagnosticsDialog
         open={diagnosticsOpen}
