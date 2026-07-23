@@ -136,6 +136,20 @@ describe("CalendarView", () => {
     expect(onReauthorize).toHaveBeenCalledWith(CONNECTION);
   });
 
+  it("shows the provider error when an Apple calendar cannot be loaded", async () => {
+    const appleSource = { ...SOURCE, id: "apple:account-1", provider: "apple" as const, accountLabel: "iCloud", name: "iCloud" };
+    const onError = vi.fn();
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([appleSource]),
+      listCalendarSourceEvents: vi.fn().mockRejectedValue(new Error("Apple Calendar account iCloud must be disconnected and authorized again")),
+      listTodos: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={onError} />);
+
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("Apple Calendar account iCloud must be disconnected and authorized again"));
+  });
+
   it("loads the day's events and to-dos, and adds a new to-do", async () => {
     const api = {
       listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),

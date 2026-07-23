@@ -24,5 +24,5 @@ public static class CalendarEndpoints
         return app;
     }
     private static SessionRecord Session(HttpContext context)=>(SessionRecord)context.Items[AuthService.SessionItemKey]!;private static bool Admin(HttpContext context)=>Session(context).Role=="admin";
-    private static IResult Error(Exception error)=>error switch{KeyNotFoundException=>Results.NotFound(new{error=error.Message}),ArgumentException=>Results.BadRequest(new{error=error.Message}),InvalidOperationException=>Results.Conflict(new{error=error.Message}),_=>throw error};
+    private static IResult Error(Exception error)=>error switch{KeyNotFoundException=>Results.NotFound(new{error=error.Message}),ArgumentException=>Results.BadRequest(new{error=error.Message}),InvalidOperationException=>Results.Conflict(new{error=error.Message}),System.Xml.XmlException or FormatException=>Results.Conflict(new{error="The calendar provider returned invalid event data. Reauthorize the account and try again."}),HttpRequestException=>Results.Json(new{error="The calendar provider could not be reached. Try again shortly."},statusCode:StatusCodes.Status502BadGateway),_=>throw error};
 }

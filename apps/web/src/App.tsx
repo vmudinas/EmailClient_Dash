@@ -86,6 +86,11 @@ import {
   type UiSearchFilters
 } from "./components/Dialogs.js";
 import { ApiClient, resolveRuntimeConfig, type UploadProgress } from "./lib/api.js";
+import {
+  navigateGoogleAuthorizationPopup,
+  openGoogleAuthorizationPopup,
+  showGoogleAuthorizationError
+} from "./lib/googleOAuthPopup.js";
 import { ComposeDialog, type ComposeDraft } from "./components/ComposeDialog.js";
 import { DraftsDialog } from "./components/DraftsDialog.js";
 import { GuideDialog } from "./components/GuideDialog.js";
@@ -1828,16 +1833,21 @@ export function App() {
     if (!api || readOnly) return;
     setGmailBusy(true);
     setGmailError("");
-    const popup = window.open("", "_blank");
-    if (popup) popup.opener = null;
+    const popup = openGoogleAuthorizationPopup();
+    if (!popup) {
+      const message = "Google authorization was blocked. Allow pop-ups for Archive Mail and try again.";
+      setGmailError(message);
+      showError(message);
+      setGmailBusy(false);
+      return;
+    }
     try {
       const authorization = await api.startGmailAuthorization(request);
-      if (popup) popup.location.href = authorization.authorizationUrl;
-      else window.open(authorization.authorizationUrl, "_blank", "noopener,noreferrer");
+      navigateGoogleAuthorizationPopup(popup, authorization.authorizationUrl);
       showError("Finish Gmail authorization in your browser");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Gmail authorization could not start";
-      if (popup && !popup.closed) showGmailAuthorizationError(popup, message);
+      if (popup && !popup.closed) showGoogleAuthorizationError(popup, message);
       setGmailError(message);
       showError(message);
     } finally {
@@ -2629,20 +2639,6 @@ export function App() {
       )}
     </div>
   );
-}
-
-function showGmailAuthorizationError(popup: Window, message: string) {
-  popup.document.title = "Gmail authorization could not start";
-  popup.document.body.replaceChildren();
-  const main = popup.document.createElement("main");
-  const heading = popup.document.createElement("h1");
-  heading.textContent = "Gmail authorization could not start";
-  const detail = popup.document.createElement("p");
-  detail.textContent = message;
-  const guidance = popup.document.createElement("p");
-  guidance.textContent = "Return to Archive Mail, correct the Gmail OAuth configuration in Admin settings, and try again.";
-  main.append(heading, detail, guidance);
-  popup.document.body.append(main);
 }
 
 function hitToItem(hit: SearchHit): MessageListItem {

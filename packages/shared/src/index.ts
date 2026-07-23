@@ -1195,6 +1195,7 @@ export interface AdminSettings {
     source: GmailConfigurationSource;
     settingsPath: string;
     configurationError: string | null;
+    oauthCallbackUrl?: string | null;
     syncIntervalMinutes: number;
     syncIntervalEnvManaged: boolean;
     syncMailboxActions: boolean;

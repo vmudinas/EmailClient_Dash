@@ -1492,8 +1492,8 @@ function downloadBlob(blob: Blob, filename: string): void {
 async function responseError(response: Response): Promise<Error> {
   let message = `Request failed (${response.status})`;
   try {
-    const body = await response.json() as { error?: string };
-    message = body.error ?? message;
+    const body = await response.json() as { error?: string; detail?: string; title?: string };
+    message = body.error ?? body.detail ?? body.title ?? message;
   } catch {
     // Use the status-based fallback when the response is not JSON.
   }

@@ -248,6 +248,30 @@ describe("ApiClient request headers", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[4]![1] as RequestInit).body))).toEqual({ targetParentId: "parent-folder" });
   });
 
+  it("surfaces RFC problem details returned while starting Google authorization", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        title: "Service Unavailable",
+        detail: "Gmail is not configured. Load a Google OAuth JSON file."
+      }), { status: 503, headers: { "Content-Type": "application/problem+json" } }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await expect(client.startGmailAuthorization({
+      archiveId: null,
+      folderId: null,
+      archiveName: "Gmail",
+      folderName: "Inbox",
+      query: "",
+      ocrEnabled: false
+    })).rejects.toThrow("Gmail is not configured. Load a Google OAuth JSON file.");
+  });
+
   it("sends mailbox and read-state filters for lists and search", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ items: [], nextCursor: null }))

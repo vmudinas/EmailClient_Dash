@@ -1539,6 +1539,8 @@ function GmailPanel({
   onAddGoogle?(): void;
   onReauthorize?(connection: GmailConnection): void;
 }) {
+  const oauthCallbackUrl = settings.gmail.oauthCallbackUrl ?? `${window.location.origin}/api/gmail/oauth/callback`;
+  const oauthCallbackSecure = isGoogleOAuthCallbackSecure(oauthCallbackUrl);
   const [clientId, setClientId] = useState(settings.gmail.clientId);
   const [clientSecret, setClientSecret] = useState("");
   const [clearClientSecret, setClearClientSecret] = useState(false);
@@ -1701,6 +1703,12 @@ function GmailPanel({
     <>
       <h3>Gmail</h3>
       <p>One Google OAuth configuration can authorize multiple Gmail accounts. Use a Desktop client for local launches or a Web client with an HTTPS callback for a server deployment.</p>
+      <div className={`settings-warning ${oauthCallbackSecure ? "configured" : ""}`}>
+        {oauthCallbackSecure ? <ShieldCheck size={17} /> : <AlertTriangle size={17} />}
+        <span>{oauthCallbackSecure
+          ? <>Google OAuth callback: <code>{oauthCallbackUrl}</code></>
+          : <>Google will reject <code>{oauthCallbackUrl}</code>. Set <code>EMAIL_CLIENT_PUBLIC_URL</code> to an HTTPS domain, create a Google Web application OAuth client, and register the exact callback URL.</>}</span>
+      </div>
       {settings.gmail.configurationError && (
         <div className="settings-warning"><AlertTriangle size={17} /><span>{settings.gmail.configurationError}</span></div>
       )}
@@ -1882,6 +1890,16 @@ function GmailPanel({
       <div className="settings-warning neutral"><MailCheck size={17} /><span>Changing the OAuth client may require existing Gmail accounts to be disconnected and authorized again.</span></div>
     </>
   );
+}
+
+function isGoogleOAuthCallbackSecure(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      || ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function CalendarAccountsPanel({
