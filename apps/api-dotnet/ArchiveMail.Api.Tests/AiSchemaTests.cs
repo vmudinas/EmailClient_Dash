@@ -36,6 +36,22 @@ public sealed class AiSchemaTests
             "CREATE UNIQUE INDEX ai_jobs_active_message_idx ON ai_jobs(message_id, task)",
             DatabaseInitializer.ConnectedServicesSchemaSql,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ai_message_analysis_message_conflict_idx",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ON ai_message_analysis(message_id);",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ai_analysis_reviews_message_conflict_idx",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ON ai_analysis_reviews(message_id);",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
     }
 
     [Fact]

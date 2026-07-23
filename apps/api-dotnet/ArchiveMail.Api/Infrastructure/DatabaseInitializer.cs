@@ -640,6 +640,8 @@ public sealed class DatabaseInitializer(
         ALTER TABLE ai_message_analysis ADD COLUMN IF NOT EXISTS context_hash TEXT NOT NULL DEFAULT '';
         ALTER TABLE ai_message_analysis ADD COLUMN IF NOT EXISTS related_context_json TEXT NOT NULL DEFAULT '[]';
         ALTER TABLE ai_message_analysis ADD COLUMN IF NOT EXISTS thread_message_count BIGINT NOT NULL DEFAULT 1;
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_message_analysis_message_conflict_idx
+          ON ai_message_analysis(message_id);
         CREATE INDEX IF NOT EXISTS ai_message_analysis_updated_idx ON ai_message_analysis(updated_at DESC);
 
         CREATE TABLE IF NOT EXISTS ai_usage_daily (
@@ -735,6 +737,8 @@ public sealed class DatabaseInitializer(
           message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
           reviewed_at TEXT NOT NULL
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_analysis_reviews_message_conflict_idx
+          ON ai_analysis_reviews(message_id);
 
         CREATE TABLE IF NOT EXISTS calendar_accounts (
           id TEXT PRIMARY KEY,

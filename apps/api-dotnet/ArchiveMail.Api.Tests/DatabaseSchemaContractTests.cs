@@ -20,6 +20,8 @@ public sealed class DatabaseSchemaContractTests
         Assert.Contains("managed_properties", Contract.Tables);
         Assert.Contains("messages_archive_source_key_conflict_idx", Contract.UniqueIndexes);
         Assert.Contains("ai_jobs_active_message_idx", Contract.UniqueIndexes);
+        Assert.Contains("ai_message_analysis_message_conflict_idx", Contract.UniqueIndexes);
+        Assert.Contains("ai_analysis_reviews_message_conflict_idx", Contract.UniqueIndexes);
     }
 
     [Theory]
