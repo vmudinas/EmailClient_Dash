@@ -7,10 +7,12 @@ CONTROL_PATH="$HOME/.ssh/archive-mail-setup-$$"
 # Synology exposes a virtual shared-folder root to SCP/SFTP, so /tmp there is
 # not the /tmp seen by its SSH shell. Stream the script over SSH instead.
 REMOTE_TEMP="/tmp/archive-mail-rebuild-$$.sh"
+REMOTE_INSTALLER="/tmp/archive-mail-install-rebuild-$$.sh"
 SSH_IDENTITY=${ARCHIVE_MAIL_SSH_IDENTITY:-$HOME/.ssh/archive_mail_synology_ed25519}
 
 cleanup() {
-  ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" "rm -f '$REMOTE_TEMP'" >/dev/null 2>&1 || true
+  ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" \
+    "rm -f '$REMOTE_TEMP' '$REMOTE_INSTALLER'" >/dev/null 2>&1 || true
   ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" -O exit "$NAS_HOST" >/dev/null 2>&1 || true
   rm -f "$CONTROL_PATH"
 }
@@ -39,21 +41,12 @@ esac
 
 ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" \
   "umask 077; tee '$REMOTE_TEMP' >/dev/null" < "$SCRIPT_DIR/synology-rebuild.sh"
+ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" \
+  "umask 077; tee '$REMOTE_INSTALLER' >/dev/null" < "$SCRIPT_DIR/install-synology-rebuild.sh"
 
 echo "Synology may ask for the sudo password once. Future deployments will not need it."
-ssh -tt -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" "sudo /bin/sh -c '
-  set -eu
-  cp $REMOTE_TEMP /usr/local/bin/archive-mail-rebuild.sh
-  chown root:root /usr/local/bin/archive-mail-rebuild.sh
-  chmod 755 /usr/local/bin/archive-mail-rebuild.sh
-  printf \"%s ALL=(root) NOPASSWD: /usr/local/bin/archive-mail-rebuild.sh\\n\" $remote_user > /etc/sudoers.d/archive-mail
-  chmod 440 /etc/sudoers.d/archive-mail
-  if command -v visudo >/dev/null 2>&1; then
-    visudo -c
-  else
-    echo "visudo is not installed; the caller will validate the rule with sudo -n -l."
-  fi
-'"
+ssh -tt -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" \
+  "sudo /bin/sh '$REMOTE_INSTALLER' '$REMOTE_TEMP' '$remote_user'"
 
 if ! ssh -i "$SSH_IDENTITY" -o IdentitiesOnly=yes -S "$CONTROL_PATH" "$NAS_HOST" \
   "sudo -n -l /usr/local/bin/archive-mail-rebuild.sh" >/dev/null 2>&1; then
