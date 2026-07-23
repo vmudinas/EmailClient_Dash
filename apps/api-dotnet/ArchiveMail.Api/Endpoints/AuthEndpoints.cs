@@ -12,27 +12,17 @@ public static class AuthEndpoints
             LoginRequest request,
             HttpContext context,
             AuthService service,
-            SharingService sharing,
             CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrWhiteSpace(request.Username) || request.Pin is null || request.Pin.Length is < 4 or > 128)
                 return Results.BadRequest(new { error = "Enter a valid username and password or PIN" });
             try
             {
-                DateTimeOffset? viewerExpiry = null;
-                if (request.PairingToken is not null)
-                {
-                    if (!sharing.TryValidate(request.PairingToken, out var validUntil))
-                        return Results.Json(new { error = "The sharing link is invalid or has expired" }, statusCode: StatusCodes.Status403Forbidden);
-                    viewerExpiry = validUntil;
-                }
                 var result = await service.LoginAsync(
                     request,
                     AuthService.ClientIp(context),
                     context.Request.Headers.UserAgent.ToString(),
-                    cancellationToken,
-                    viewerExpiry is null ? null : "viewer",
-                    viewerExpiry);
+                    cancellationToken);
                 context.Response.Cookies.Append("archive_mail_session", result.AccessToken, new CookieOptions
                 {
                     HttpOnly = true,

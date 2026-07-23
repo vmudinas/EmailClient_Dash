@@ -134,7 +134,8 @@ export function CalendarView({ api, connections, onAddGoogle, onReauthorize, onE
       }));
       setEvents(results.flatMap((result) => result.status === "fulfilled" ? result.value : []));
       const failures = results.filter((result) => result.status === "rejected");
-      if (failures.length > 0) onError(`${failures.length} selected calendar${failures.length === 1 ? "" : "s"} could not be loaded.`);
+      if (failures.length === 1) onError(errorText(failures[0]!.reason));
+      else if (failures.length > 1) onError(`${failures.length} selected calendars could not be loaded.`);
     } finally {
       setLoadingEvents(false);
     }

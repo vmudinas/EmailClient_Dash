@@ -1,6 +1,6 @@
 namespace ArchiveMail.Api.Security;
 
-public sealed record LoginRequest(string Username, string Pin, string? PairingToken = null);
+public sealed record LoginRequest(string Username, string Pin);
 public sealed record PinChangeRequest(string CurrentPin, string NewPin);
 public sealed record UserCreateRequest(string Username, string DisplayName, string Role, string Pin, string[]? AllowedScreens);
 public sealed record UserUpdateRequest(string? DisplayName, string? Role, bool? IsActive, string? Pin, string[]? AllowedScreens);

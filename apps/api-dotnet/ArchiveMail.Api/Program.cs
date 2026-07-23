@@ -48,7 +48,6 @@ builder.Services.AddSingleton<SmartRuleService>();
 builder.Services.AddSingleton<CalendarService>();
 builder.Services.AddSingleton<PropertyService>();
 builder.Services.AddSingleton<PropertyPaymentGateway>();
-builder.Services.AddSingleton<SharingService>();
 builder.Services.AddSingleton<DatabaseInitializer>();
 builder.Services.AddSingleton<AuthService>();
 builder.Services.AddSingleton<ImportJobRepository>();

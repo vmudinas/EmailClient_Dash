@@ -236,7 +236,6 @@ public static class MailEndpoints
         {
             "admin" => session,
             "user" => session,
-            "viewer" when !write => session,
             _ => null
         };
     }

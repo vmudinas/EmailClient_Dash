@@ -79,7 +79,6 @@ import type {
   SenderFilingStatus,
   SenderFolderRuleResult,
   SenderSpamRuleResult,
-  SharingState,
   SmartMailRule,
   SmartMailRuleCreate,
   SmartMailRulePatch,
@@ -185,8 +184,7 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({
         username,
-        pin,
-        pairingToken: this.config.pairingToken || undefined
+        pin
       })
     });
     this.setAccessToken(result.accessToken);
@@ -1107,14 +1105,6 @@ export class ApiClient {
     queuePendingDiagnostic(diagnostic);
   }
 
-  getSharingState(): Promise<SharingState> {
-    return this.request("/api/sharing");
-  }
-
-  setSharingEnabled(enabled: boolean): Promise<SharingState> {
-    return this.request("/api/admin/sharing", { method: "POST", body: JSON.stringify({ enabled }) });
-  }
-
   adminSettings(): Promise<AdminSettings> {
     return this.request("/api/admin/settings");
   }
@@ -1452,21 +1442,12 @@ export class ApiClient {
 }
 
 export async function resolveRuntimeConfig(): Promise<RuntimeConfig> {
-  const url = new URL(window.location.href);
-  const shareFromUrl = url.searchParams.get("share");
-  if (shareFromUrl) {
-    sessionStorage.setItem("archive-mail-share-token", shareFromUrl);
-    url.searchParams.delete("share");
-    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-  }
-  const shareToken = shareFromUrl ?? sessionStorage.getItem("archive-mail-share-token") ?? "";
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL
     ?? (window.location.port === "5173" ? "" : window.location.origin);
   const mobile = window.matchMedia("(max-width: 800px)").matches;
   return {
     apiBaseUrl,
     accessToken: "",
-    pairingToken: shareToken || undefined,
     platform: mobile ? "mobile" : "browser"
   };
 }
@@ -1492,8 +1473,8 @@ function downloadBlob(blob: Blob, filename: string): void {
 async function responseError(response: Response): Promise<Error> {
   let message = `Request failed (${response.status})`;
   try {
-    const body = await response.json() as { error?: string };
-    message = body.error ?? message;
+    const body = await response.json() as { error?: string; detail?: string; title?: string };
+    message = body.error ?? body.detail ?? body.title ?? message;
   } catch {
     // Use the status-based fallback when the response is not JSON.
   }

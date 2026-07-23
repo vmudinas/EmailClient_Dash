@@ -34,6 +34,16 @@ set +a
 # redirect which binary this root script executes.
 DOCKER_BIN="$RESOLVED_DOCKER_BIN"
 
+case "${EMAIL_CLIENT_PUBLIC_URL:-}" in
+  https://*.*) ;;
+  "")
+    echo "WARNING: EMAIL_CLIENT_PUBLIC_URL is empty. Google OAuth from another computer will not work until an HTTPS public URL is configured." >&2
+    ;;
+  *)
+    echo "WARNING: EMAIL_CLIENT_PUBLIC_URL must be an HTTPS domain for Google OAuth; '${EMAIL_CLIENT_PUBLIC_URL}' will be rejected by Google." >&2
+    ;;
+esac
+
 compose() {
   "$DOCKER_BIN" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
@@ -69,7 +79,11 @@ while [ "$attempt" -lt 90 ]; do
         exit 1
         ;;
       esac
-      echo "Archive Mail is healthy on host port ${ARCHIVE_MAIL_PORT:-3001}."
+      if [ -n "${EMAIL_CLIENT_PUBLIC_URL:-}" ]; then
+        echo "Archive Mail is healthy at $EMAIL_CLIENT_PUBLIC_URL"
+      else
+        echo "Archive Mail is healthy on host port ${ARCHIVE_MAIL_PORT:-3001}."
+      fi
       exit 0
       ;;
     unhealthy|exited|dead)

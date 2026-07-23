@@ -4,11 +4,10 @@ import { Archive, KeyRound, LoaderCircle, LogIn } from "lucide-react";
 interface LoginScreenProps {
   busy: boolean;
   error: string;
-  pairedViewer: boolean;
   onLogin(username: string, pin: string): void;
 }
 
-export function LoginScreen({ busy, error, pairedViewer, onLogin }: LoginScreenProps) {
+export function LoginScreen({ busy, error, onLogin }: LoginScreenProps) {
   const [username, setUsername] = useState("admin");
   const [pin, setPin] = useState("");
 
@@ -22,7 +21,7 @@ export function LoginScreen({ busy, error, pairedViewer, onLogin }: LoginScreenP
       <form className="login-panel" onSubmit={submit}>
         <div className="login-brand">
           <span className="brand-mark"><Archive size={23} /></span>
-          <div><strong>Archive Mail</strong><span>{pairedViewer ? "Paired read-only viewer" : "Local email archive"}</span></div>
+          <div><strong>Archive Mail</strong><span>Local email archive</span></div>
         </div>
         <div className="login-heading">
           <KeyRound size={21} />

@@ -154,7 +154,7 @@ describe("Sidebar archive and mailbox actions", () => {
     expect(screen.queryByRole("button", { name: "Delete mailbox Inbox" })).toBeNull();
   });
 
-  it("does not expose mutation controls to read-only viewers", () => {
+  it("does not expose mutation controls in read-only mode", () => {
     renderSidebar({ readOnly: true });
 
     expect(screen.queryByRole("button", { name: "Rename Ready archive" })).toBeNull();

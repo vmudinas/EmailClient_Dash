@@ -13,7 +13,7 @@ public static class GmailEndpoints
     {
         app.MapGet("/api/gmail/connections", async (HttpContext context,GmailService gmail,CancellationToken token)=>Results.Ok(await gmail.ListAsync(Session(context).User.Id,token))).WithName("ListGmailConnections").WithTags("Gmail");
         app.MapPost("/api/gmail/oauth/start", (JsonElement request,HttpContext context,GmailService gmail)=>
-        {try{var publicUrl=Environment.GetEnvironmentVariable("EMAIL_CLIENT_PUBLIC_URL")?.TrimEnd('/');var redirect=$"{(string.IsNullOrWhiteSpace(publicUrl)?$"{context.Request.Scheme}://{context.Request.Host}":publicUrl)}/api/gmail/oauth/callback";return Results.Ok(gmail.StartAuthorization(request,Session(context).User.Id,redirect));}catch(Exception error){return Results.Problem(error.Message,statusCode:503);}}).WithName("StartGmailOAuth").WithTags("Gmail");
+        {try{var redirect=GoogleOAuthRedirect.Resolve(Environment.GetEnvironmentVariable("EMAIL_CLIENT_PUBLIC_URL"),context.Request.Scheme,context.Request.Host);return Results.Ok(gmail.StartAuthorization(request,Session(context).User.Id,redirect));}catch(Exception error){return Results.Json(new{error=error.Message},statusCode:503);}}).WithName("StartGmailOAuth").WithTags("Gmail");
         app.MapGet("/api/gmail/oauth/callback",async(string? code,string? state,string? error,string? error_description,GmailService gmail,CancellationToken token)=>
         {
             if(!string.IsNullOrWhiteSpace(error))return Results.Content(Page("Gmail was not connected",error_description??error,false),"text/html",Encoding.UTF8,400);
@@ -45,5 +45,20 @@ public static class GmailEndpoints
         var encoder=HtmlEncoder.Default;
         var payload=JsonSerializer.Serialize(new{type="archive-mail-gmail-oauth",success,message});
         return $"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{encoder.Encode(title)}</title></head><body><main><h1>{encoder.Encode(title)}</h1><p>{encoder.Encode(message)}</p><p>{(success?"This window will close automatically.":"Return to Archive Mail and try again after correcting the error.")}</p><script>(()=>{{const result={payload};try{{localStorage.setItem('archive-mail-gmail-oauth-result',JSON.stringify({{...result,completedAt:Date.now()}}));}}catch{{}}if(window.opener)window.opener.postMessage(result,window.location.origin);if(result.success)setTimeout(()=>window.close(),500);}})();</script></main></body></html>";
+    }
+}
+
+internal static class GoogleOAuthRedirect
+{
+    internal static string Resolve(string? configuredPublicUrl,string requestScheme,HostString requestHost)
+    {
+        var origin=string.IsNullOrWhiteSpace(configuredPublicUrl)?$"{requestScheme}://{requestHost}":configuredPublicUrl.Trim().TrimEnd('/');
+        if(!Uri.TryCreate(origin,UriKind.Absolute,out var uri)||!string.IsNullOrEmpty(uri.UserInfo)||!string.IsNullOrEmpty(uri.Query)||!string.IsNullOrEmpty(uri.Fragment)||uri.AbsolutePath!="/")
+            throw new InvalidOperationException("EMAIL_CLIENT_PUBLIC_URL must be one HTTPS origin without a path, query, credentials, or fragment");
+        var loopback=uri.IsLoopback&&(uri.Scheme==Uri.UriSchemeHttp||uri.Scheme==Uri.UriSchemeHttps);
+        var rawIp=System.Net.IPAddress.TryParse(uri.Host,out _);
+        if(!loopback&&(uri.Scheme!=Uri.UriSchemeHttps||rawIp||uri.Host.EndsWith(".local",StringComparison.OrdinalIgnoreCase)||!uri.Host.Contains('.')))
+            throw new InvalidOperationException($"Google rejected the insecure OAuth callback {origin}/api/gmail/oauth/callback. Set EMAIL_CLIENT_PUBLIC_URL to an HTTPS domain you own, create a Google Web application OAuth client, and register that exact /api/gmail/oauth/callback URL in Google Cloud.");
+        return $"{uri.Scheme}://{uri.Authority}/api/gmail/oauth/callback";
     }
 }

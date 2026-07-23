@@ -18,6 +18,7 @@ public sealed class AdminSettingsViewService(
         var users = await auth.ListUsersAsync(cancellationToken);
         var application = appSettings.Current();
         var gmail = application.GmailValue;
+        var publicUrl = Environment.GetEnvironmentVariable("EMAIL_CLIENT_PUBLIC_URL")?.Trim().TrimEnd('/');
         var drafts = application.DraftsValue;
         var stocks = application.StocksValue;
         var news = application.NewsValue;
@@ -74,6 +75,7 @@ public sealed class AdminSettingsViewService(
                 source = gmail.ClientId.Length == 0 ? "none" : !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GMAIL_CLIENT_ID")) ? "environment" : "admin",
                 settingsPath = appSettings.SettingsPath,
                 configurationError = (string?)null,
+                oauthCallbackUrl = string.IsNullOrWhiteSpace(publicUrl) ? null : $"{publicUrl}/api/gmail/oauth/callback",
                 syncIntervalMinutes = gmail.SyncIntervalMinutes,
                 syncIntervalEnvManaged = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GMAIL_SYNC_INTERVAL_MINUTES")),
                 syncMailboxActions = gmail.SyncMailboxActions,

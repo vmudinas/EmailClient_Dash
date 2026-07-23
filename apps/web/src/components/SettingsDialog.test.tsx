@@ -430,8 +430,15 @@ describe("SettingsDialog", () => {
   });
 
   it("shows database, Gmail, AI, users, security, and IP audit settings", async () => {
+    const settingsWithInsecureGoogleCallback: AdminSettings = {
+      ...SETTINGS,
+      gmail: {
+        ...SETTINGS.gmail,
+        oauthCallbackUrl: "http://synology.local:3001/api/gmail/oauth/callback"
+      }
+    };
     const api = {
-      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      adminSettings: vi.fn().mockResolvedValue(settingsWithInsecureGoogleCallback),
       listGmailConnections: vi.fn().mockResolvedValue([]),
       listUsers: vi.fn().mockResolvedValue(USERS),
       listAiSchedules: vi.fn().mockResolvedValue([]),
@@ -475,6 +482,11 @@ describe("SettingsDialog", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: "Gmail" })[0]!);
     expect(screen.getByText(/Gmail authorization cannot start/)).toBeTruthy();
+    expect(screen.getByText((_, element) =>
+      element?.classList.contains("settings-warning") === true
+      && element.textContent?.includes("Google will reject") === true
+      && element.textContent.includes("http://synology.local:3001/api/gmail/oauth/callback")
+    )).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "AI" }));
     expect(screen.getByText(/does not provide API billing/i)).toBeTruthy();

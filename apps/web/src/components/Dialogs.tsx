@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import QRCode from "qrcode";
 import {
   Activity,
   Archive,
@@ -14,7 +13,6 @@ import {
   KeyRound,
   LoaderCircle,
   MailCheck,
-  MonitorSmartphone,
   PencilLine,
   RefreshCw,
   ScanText,
@@ -30,8 +28,7 @@ import type {
   DiagnosticsSnapshot,
   Folder,
   GmailAuthRequest,
-  GmailConnection,
-  SharingState
+  GmailConnection
 } from "@email-client/shared";
 import type { UploadProgress } from "../lib/api.js";
 import { importEmailCountLabel, importProgressPercent } from "../lib/import-progress.js";
@@ -877,71 +874,6 @@ export function FilterPanel({
         }}>Apply</button>
       </footer>
     </section>
-  );
-}
-
-interface ShareDialogProps {
-  open: boolean;
-  state: SharingState;
-  busy: boolean;
-  onClose(): void;
-  onToggle(enabled: boolean): void;
-}
-
-export function ShareDialog({
-  open,
-  state,
-  busy,
-  onClose,
-  onToggle
-}: ShareDialogProps) {
-  const [qrDataUrl, setQrDataUrl] = useState("");
-
-  useEffect(() => {
-    if (!state.url) {
-      setQrDataUrl("");
-      return;
-    }
-    void QRCode.toDataURL(state.url, {
-      width: 256,
-      margin: 1,
-      color: { dark: "#202622", light: "#ffffff" }
-    }).then(setQrDataUrl);
-  }, [state.url]);
-
-  if (!open) return null;
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="dialog share-dialog" role="dialog" aria-modal="true" aria-labelledby="share-title" onMouseDown={(event) => event.stopPropagation()}>
-        <header className="dialog-header">
-          <div><MonitorSmartphone size={20} /><h2 id="share-title">iPhone viewer</h2></div>
-          <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
-        </header>
-        <div className="dialog-body share-body">
-          {state.enabled && qrDataUrl ? (
-            <>
-              <img className="qr-code" src={qrDataUrl} alt="QR code for the mobile viewer" />
-              <strong>Scan while on the same Wi-Fi</strong>
-              <span className="share-url">{state.url}</span>
-              <small>Read-only access expires {state.expiresAt ? new Date(state.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "soon"}.</small>
-            </>
-          ) : (
-            <>
-              <span className="share-placeholder"><MonitorSmartphone size={34} /></span>
-              <strong>LAN sharing is off</strong>
-              <small>Enable it to create an expiring, read-only pairing code.</small>
-            </>
-          )}
-        </div>
-        <footer className="dialog-footer">
-          <button className="secondary-button" onClick={onClose}>Close</button>
-          <button className={state.enabled ? "danger-button" : "primary-button"} disabled={busy} onClick={() => onToggle(!state.enabled)}>
-            {busy ? <LoaderCircle className="spin" size={17} /> : state.enabled ? <X size={17} /> : <MonitorSmartphone size={17} />}
-            {state.enabled ? "Stop sharing" : "Start sharing"}
-          </button>
-        </footer>
-      </section>
-    </div>
   );
 }
 

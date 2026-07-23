@@ -24,6 +24,16 @@ case "$ARCHIVE_MAIL_DATA_DIR" in
   /) echo "ARCHIVE_MAIL_DATA_DIR cannot be /" >&2; exit 1 ;;
 esac
 
+case "${EMAIL_CLIENT_PUBLIC_URL:-}" in
+  https://*.*) ;;
+  "")
+    echo "WARNING: EMAIL_CLIENT_PUBLIC_URL is empty. Google OAuth from another computer will not work until an HTTPS public URL is configured." >&2
+    ;;
+  *)
+    echo "WARNING: EMAIL_CLIENT_PUBLIC_URL must be an HTTPS domain for Google OAuth; '${EMAIL_CLIENT_PUBLIC_URL}' will be rejected by Google." >&2
+    ;;
+esac
+
 mkdir -p "$ARCHIVE_MAIL_DATA_DIR" "$ARCHIVE_MAIL_POSTGRES_DIR"
 permission_probe="$ARCHIVE_MAIL_DATA_DIR/.archive-mail-write-test-$$"
 if ! (umask 077 && : > "$permission_probe") 2>/dev/null; then

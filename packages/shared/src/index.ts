@@ -40,7 +40,7 @@ export type AiJobStatus = "queued" | "running" | "completed" | "failed" | "cance
 export type AiJobTask = "analyze" | "draft_reply";
 export type AiPriority = "low" | "normal" | "high" | "urgent";
 export type AccountRole = "admin" | "user" | "renter";
-export type SessionRole = AccountRole | "viewer";
+export type SessionRole = AccountRole;
 export type DatabaseProvider = "postgresql" | "mssql";
 
 export interface Archive {
@@ -1060,16 +1060,9 @@ export interface SearchFilters {
   limit?: number;
 }
 
-export interface SharingState {
-  enabled: boolean;
-  url: string | null;
-  expiresAt: string | null;
-}
-
 export interface RuntimeConfig {
   apiBaseUrl: string;
   accessToken: string;
-  pairingToken?: string;
   platform: "desktop" | "browser" | "mobile";
 }
 
@@ -1195,6 +1188,7 @@ export interface AdminSettings {
     source: GmailConfigurationSource;
     settingsPath: string;
     configurationError: string | null;
+    oauthCallbackUrl?: string | null;
     syncIntervalMinutes: number;
     syncIntervalEnvManaged: boolean;
     syncMailboxActions: boolean;
@@ -2273,8 +2267,7 @@ const loginSecretSchema = z.string().min(4).max(128);
 
 export const authLoginSchema = z.object({
   username: usernameSchema,
-  pin: loginSecretSchema,
-  pairingToken: z.string().min(20).max(256).optional()
+  pin: loginSecretSchema
 }).strict();
 
 export type AuthLogin = z.infer<typeof authLoginSchema>;
@@ -2466,7 +2459,6 @@ export interface DesktopBridge {
   cancelImport(jobId: string, accessToken: string): Promise<ImportJob>;
   resumeImport(jobId: string, accessToken: string): Promise<ImportJob>;
   removeArchive(archiveId: string, accessToken: string): Promise<void>;
-  setSharingEnabled(enabled: boolean, accessToken: string): Promise<SharingState>;
 }
 
 declare global {

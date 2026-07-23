@@ -6,13 +6,13 @@ afterEach(() => {
 });
 
 describe("ApiClient request headers", () => {
-  it("logs in with the pairing token and uses the returned session token", async () => {
+  it("logs in and uses the returned session token", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({
         accessToken: "session-token",
         session: {
           id: "session-1",
-          role: "viewer",
+          role: "admin",
           expiresAt: "2026-07-13T12:00:00.000Z",
           user: {
             id: "user-1",
@@ -32,7 +32,6 @@ describe("ApiClient request headers", () => {
     const client = new ApiClient({
       apiBaseUrl: "http://127.0.0.1:3001",
       accessToken: "",
-      pairingToken: "pairing-token-with-enough-characters",
       platform: "mobile"
     });
 
@@ -41,8 +40,7 @@ describe("ApiClient request headers", () => {
 
     expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toEqual({
       username: "admin",
-      pin: "2332",
-      pairingToken: "pairing-token-with-enough-characters"
+      pin: "2332"
     });
     expect(new Headers((fetchMock.mock.calls[1]![1] as RequestInit).headers).get("Authorization"))
       .toBe("Bearer session-token");
@@ -246,6 +244,30 @@ describe("ApiClient request headers", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[3]![1] as RequestInit).body))).toEqual({ targetFolderId: "target-folder" });
     expect(fetchMock.mock.calls[4]![0]).toBe("http://127.0.0.1:3001/api/folders/move-folder/move");
     expect(JSON.parse(String((fetchMock.mock.calls[4]![1] as RequestInit).body))).toEqual({ targetParentId: "parent-folder" });
+  });
+
+  it("surfaces RFC problem details returned while starting Google authorization", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        title: "Service Unavailable",
+        detail: "Gmail is not configured. Load a Google OAuth JSON file."
+      }), { status: 503, headers: { "Content-Type": "application/problem+json" } }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await expect(client.startGmailAuthorization({
+      archiveId: null,
+      folderId: null,
+      archiveName: "Gmail",
+      folderName: "Inbox",
+      query: "",
+      ocrEnabled: false
+    })).rejects.toThrow("Gmail is not configured. Load a Google OAuth JSON file.");
   });
 
   it("sends mailbox and read-state filters for lists and search", async () => {

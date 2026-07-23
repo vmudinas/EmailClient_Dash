@@ -78,7 +78,7 @@ public sealed class DatabaseInitializer(
         CREATE TABLE IF NOT EXISTS auth_sessions (
           id TEXT PRIMARY KEY,
           user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          effective_role TEXT NOT NULL CHECK(effective_role IN ('admin', 'user', 'renter', 'viewer')),
+          effective_role TEXT NOT NULL CHECK(effective_role IN ('admin', 'user', 'renter')),
           token_hash TEXT NOT NULL UNIQUE,
           ip_address TEXT NOT NULL,
           user_agent TEXT,
@@ -89,6 +89,10 @@ public sealed class DatabaseInitializer(
         );
         CREATE INDEX IF NOT EXISTS auth_sessions_expiry_idx ON auth_sessions(expires_at);
         CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id, created_at DESC);
+        DELETE FROM auth_sessions WHERE effective_role='viewer';
+        ALTER TABLE auth_sessions DROP CONSTRAINT IF EXISTS auth_sessions_effective_role_check;
+        ALTER TABLE auth_sessions ADD CONSTRAINT auth_sessions_effective_role_check
+          CHECK(effective_role IN ('admin', 'user', 'renter'));
 
         CREATE TABLE IF NOT EXISTS archives (
           id TEXT PRIMARY KEY,
