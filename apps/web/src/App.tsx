@@ -23,7 +23,6 @@ import {
   LogOut,
   Mail,
   MailPlus,
-  MonitorSmartphone,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -55,10 +54,8 @@ import type {
   MessageFilingSuggestion,
   MessageSummary,
   NewsHeadline,
-  RuntimeConfig,
   SearchFilters,
   SearchHit,
-  SharingState,
   StockQuote,
   UserScreenId
 } from "@email-client/shared";
@@ -82,7 +79,6 @@ import {
   GmailDialog,
   MailboxDropDialog,
   RenameDialog,
-  ShareDialog,
   type UiSearchFilters
 } from "./components/Dialogs.js";
 import { ApiClient, resolveRuntimeConfig, type UploadProgress } from "./lib/api.js";
@@ -117,12 +113,6 @@ type SmartMailbox = "starred";
 type RenameTarget =
   | { kind: "archive"; id: string; name: string }
   | { kind: "mailbox"; id: string; archiveId: string; name: string };
-
-const EMPTY_SHARING: SharingState = {
-  enabled: false,
-  url: null,
-  expiresAt: null
-};
 
 const SESSION_STORAGE_KEY = "archive-mail-session-token";
 const SHOW_READ_STORAGE_KEY = "archive-mail-show-read-messages";
@@ -166,7 +156,6 @@ function viewForPath(pathname = window.location.pathname): AppView {
 }
 
 export function App() {
-  const [runtime, setRuntime] = useState<RuntimeConfig | null>(null);
   const [api, setApi] = useState<ApiClient | null>(null);
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
   const [stockQuotes, setStockQuotes] = useState<StockQuote[]>([]);
@@ -276,16 +265,13 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsSnapshot | null>(null);
   const [pendingDiagnosticCount, setPendingDiagnosticCount] = useState(0);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [shareOpen, setShareOpen] = useState(false);
-  const [shareBusy, setShareBusy] = useState(false);
-  const [sharing, setSharing] = useState<SharingState>(EMPTY_SHARING);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const importAbortRef = useRef<AbortController | null>(null);
   const gmailStatusRef = useRef(new Map<string, GmailConnection["status"]>());
   const messageRequestRef = useRef(0);
   const messageListRequestRef = useRef(0);
 
-  const readOnly = !session || session.role === "viewer";
+  const readOnly = !session;
   const isAdmin = session?.role === "admin";
   const isRenter = session?.user.role === "renter";
   const canUseMail = Boolean(session && !isRenter);
@@ -428,7 +414,6 @@ export function App() {
         setSettingsOpen(false);
         setNotice("Your session expired. Sign in again.");
       });
-      setRuntime(config);
       setApi(client);
       const savedToken = sessionStorage.getItem(SESSION_STORAGE_KEY);
       if (savedToken) client.setAccessToken(savedToken);
@@ -2010,27 +1995,6 @@ export function App() {
     }
   };
 
-  const openSharing = async () => {
-    setShareOpen(true);
-    try {
-      const state = api ? await api.getSharingState() : EMPTY_SHARING;
-      setSharing(state);
-    } catch {
-      setSharing(EMPTY_SHARING);
-    }
-  };
-
-  const toggleSharing = async (enabled: boolean) => {
-    setShareBusy(true);
-    try {
-      setSharing(api ? await api.setSharingEnabled(enabled) : EMPTY_SHARING);
-    } catch (error) {
-      showError(error instanceof Error ? error.message : "Sharing could not be changed");
-    } finally {
-      setShareBusy(false);
-    }
-  };
-
   const listTitle = searchTerm
     ? `Search in ${searchScopeLabel}: ${searchTerm}`
     : selectedSmartMailbox === "starred"
@@ -2077,7 +2041,6 @@ export function App() {
       <LoginScreen
         busy={loginBusy}
         error={loginError}
-        pairedViewer={Boolean(runtime?.pairingToken)}
         onLogin={(username, pin) => void login(username, pin)}
       />
     );
@@ -2181,11 +2144,6 @@ export function App() {
               {viewMode === "properties" ? <Mail size={18} /> : <Building2 size={18} />}
             </button>
           )}
-          {isAdmin && (
-            <button className="icon-button sharing-trigger" onClick={() => void openSharing()} title="Open iPhone viewer" aria-label="Open iPhone viewer">
-              <MonitorSmartphone size={18} />
-            </button>
-          )}
           {!readOnly && canAccessScreen("compose") && (
             <button className="icon-button drafts-trigger" onClick={openDrafts} title="Open drafts" aria-label="Open drafts">
               <FileEdit size={18} />
@@ -2217,7 +2175,6 @@ export function App() {
           <button className="icon-button logout-trigger" onClick={() => void logout()} title="Sign out" aria-label="Sign out">
             <LogOut size={18} />
           </button>
-          {readOnly && <span className="read-only-badge">Read only</span>}
         </div>
       </header>
 
@@ -2409,7 +2366,6 @@ export function App() {
               {canUseMail && <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>}
               {!readOnly && canAccessScreen("import") && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
               {!readOnly && (isAdmin || isRenter || canAccessScreen("settings")) && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>{isAdmin ? "Admin" : "Account"}</span>{isAdmin && pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
-              {isAdmin && <button onClick={() => { setMobileMenuOpen(false); void openSharing(); }}><MonitorSmartphone size={20} /><span>Phone access</span></button>}
             </div>
             <button className="mobile-sign-out" onClick={() => { setMobileMenuOpen(false); void logout(); }}><LogOut size={18} /> Sign out</button>
           </section>
@@ -2622,14 +2578,6 @@ export function App() {
         onDownload={() => void downloadDiagnostics()}
         onClear={() => void clearDiagnostics()}
       />
-      <ShareDialog
-        open={shareOpen}
-        state={sharing}
-        busy={shareBusy}
-        onClose={() => setShareOpen(false)}
-        onToggle={(enabled) => void toggleSharing(enabled)}
-      />
-
       {notice && (
         <div className="toast" role="status">
           <Filter size={16} />

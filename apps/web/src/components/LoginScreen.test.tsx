@@ -7,7 +7,7 @@ afterEach(cleanup);
 describe("LoginScreen", () => {
   it("accepts either a tenant password or administrator PIN", () => {
     const onLogin = vi.fn();
-    render(<LoginScreen busy={false} error="" pairedViewer={false} onLogin={onLogin} />);
+    render(<LoginScreen busy={false} error="" onLogin={onLogin} />);
 
     expect(screen.getByRole("heading", { name: "Sign in" })).toBeTruthy();
     expect(screen.getByText("admin", { selector: "code" })).toBeTruthy();

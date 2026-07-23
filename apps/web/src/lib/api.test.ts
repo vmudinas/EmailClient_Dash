@@ -6,13 +6,13 @@ afterEach(() => {
 });
 
 describe("ApiClient request headers", () => {
-  it("logs in with the pairing token and uses the returned session token", async () => {
+  it("logs in and uses the returned session token", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({
         accessToken: "session-token",
         session: {
           id: "session-1",
-          role: "viewer",
+          role: "admin",
           expiresAt: "2026-07-13T12:00:00.000Z",
           user: {
             id: "user-1",
@@ -32,7 +32,6 @@ describe("ApiClient request headers", () => {
     const client = new ApiClient({
       apiBaseUrl: "http://127.0.0.1:3001",
       accessToken: "",
-      pairingToken: "pairing-token-with-enough-characters",
       platform: "mobile"
     });
 
@@ -41,8 +40,7 @@ describe("ApiClient request headers", () => {
 
     expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toEqual({
       username: "admin",
-      pin: "2332",
-      pairingToken: "pairing-token-with-enough-characters"
+      pin: "2332"
     });
     expect(new Headers((fetchMock.mock.calls[1]![1] as RequestInit).headers).get("Authorization"))
       .toBe("Bearer session-token");

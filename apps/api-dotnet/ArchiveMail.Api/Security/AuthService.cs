@@ -19,9 +19,7 @@ public sealed class AuthService(NpgsqlDataSource database)
         LoginRequest request,
         string ipAddress,
         string? userAgent,
-        CancellationToken cancellationToken,
-        string? roleCap = null,
-        DateTimeOffset? expiresAtCap = null)
+        CancellationToken cancellationToken)
     {
         var failure = _failures.GetOrAdd(ipAddress, _ => new FailureState());
         lock (failure)
@@ -62,9 +60,8 @@ public sealed class AuthService(NpgsqlDataSource database)
         var accessToken = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
         var sessionId = Guid.NewGuid().ToString();
         var now = DateTimeOffset.UtcNow;
-        var limits = ResolveSessionLimits(user.Public.Role, roleCap, expiresAtCap, now);
-        var effectiveRole = limits.Role;
-        var expiresAt = limits.ExpiresAt.ToString("O");
+        var effectiveRole = user.Public.Role;
+        var expiresAt = now.Add(SessionDuration).ToString("O");
         const string sessionSql = """
             WITH created_session AS (
               INSERT INTO auth_sessions (
@@ -97,15 +94,6 @@ public sealed class AuthService(NpgsqlDataSource database)
             UpdatedAt = now.ToString("O")
         }, effectiveRole, expiresAt);
         return new LoginResult(accessToken, sessionDto);
-    }
-
-    public async Task RevokeViewerSessionsAsync(CancellationToken cancellationToken)
-    {
-        await using var command = database.CreateCommand(
-            "UPDATE auth_sessions SET revoked_at=$2 WHERE effective_role=$1 AND revoked_at IS NULL");
-        command.Parameters.AddWithValue("viewer");
-        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
-        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<SessionRecord?> AuthenticateAsync(HttpContext context, CancellationToken cancellationToken)
@@ -360,23 +348,6 @@ public sealed class AuthService(NpgsqlDataSource database)
         var salt = Base64UrlEncode(RandomNumberGenerator.GetBytes(16));
         var hash = SCrypt.Generate(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(salt), 16384, 8, 1, 64);
         return (Base64UrlEncode(hash), salt);
-    }
-
-    internal static (string Role, DateTimeOffset ExpiresAt) ResolveSessionLimits(
-        string userRole,
-        string? roleCap,
-        DateTimeOffset? expiresAtCap,
-        DateTimeOffset now)
-    {
-        var effectiveRole = roleCap switch
-        {
-            null => userRole,
-            "viewer" => "viewer",
-            _ => throw new ArgumentException("Only the read-only viewer role can cap a login session", nameof(roleCap))
-        };
-        if (expiresAtCap <= now) throw new AuthException("The sharing link is invalid or has expired");
-        var normalExpiry = now.Add(SessionDuration);
-        return (effectiveRole, expiresAtCap is null || expiresAtCap >= normalExpiry ? normalExpiry : expiresAtCap.Value);
     }
 
     private static readonly HashSet<string> ScreenIds = ["calendar", "properties", "compose", "ai", "import", "settings"];

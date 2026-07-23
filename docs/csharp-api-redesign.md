@@ -18,7 +18,7 @@ PostgreSQL
 
 The Electron application and Fastify API were removed. Node remains only in the development and image-build stages for TypeScript, Vite, and React tests. No Node executable or package is copied into the runtime image.
 
-The ASP.NET Core API implements the routes used by the React client for authentication and users, archives, folders, messages and search, uploads and imports, sender filing and smart rules, diagnostics and audit, settings, Gmail send/sync/OAuth, Google and Apple calendars, todos/follow-ups/drafts/resumes, AI jobs and schedules, news/stocks, sharing, and property management.
+The ASP.NET Core API implements the routes used by the React client for authentication and users, archives, folders, messages and search, uploads and imports, sender filing and smart rules, diagnostics and audit, settings, Gmail send/sync/OAuth, Google and Apple calendars, todos/follow-ups/drafts/resumes, AI jobs and schedules, news/stocks, and property management.
 
 ## Import design
 

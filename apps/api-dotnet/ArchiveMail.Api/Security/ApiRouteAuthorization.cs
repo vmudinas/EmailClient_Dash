@@ -4,13 +4,9 @@ internal static class ApiRouteAuthorization
 {
     internal const string RenterDenied = "Renter accounts can only access their property portal";
     internal const string ScreenDenied = "Access to this feature is disabled for your account. Ask an administrator to enable it.";
-    internal const string ViewerDenied = "This viewer is read-only";
-
     public static string? DenialReason(SessionRecord session, string method, PathString requestPath)
     {
         var path = requestPath.Value ?? string.Empty;
-        if (session.Role == "viewer" && method is not ("GET" or "HEAD")
-            && !(method == "POST" && path == "/api/auth/logout")) return ViewerDenied;
         if (session.User.Role == "renter" && !RenterCanAccess(method, path)) return RenterDenied;
         if (session.Role is not ("user" or "renter")) return null;
 

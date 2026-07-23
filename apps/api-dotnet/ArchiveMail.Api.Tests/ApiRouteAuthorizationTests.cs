@@ -52,35 +52,16 @@ public sealed class ApiRouteAuthorizationTests
     }
 
     [Fact]
-    public void AdminAndViewerEffectiveRolesAreNotScreenFiltered()
+    public void AdminRoleIsNotScreenFiltered()
     {
         Assert.Null(ApiRouteAuthorization.DenialReason(Session("admin", []), "GET", new PathString("/api/ai/review-queue")));
-        Assert.Null(ApiRouteAuthorization.DenialReason(Session("admin", [], "viewer"), "GET", new PathString("/api/ai/review-queue")));
     }
 
-    [Theory]
-    [InlineData("POST")]
-    [InlineData("PUT")]
-    [InlineData("PATCH")]
-    [InlineData("DELETE")]
-    public void RejectsEveryViewerWrite(string method)
-    {
-        Assert.Equal(ApiRouteAuthorization.ViewerDenied,
-            ApiRouteAuthorization.DenialReason(Session("admin", null, "viewer"), method, new PathString("/api/messages/message-1/state")));
-    }
-
-    [Fact]
-    public void AllowsViewerLogout()
-    {
-        Assert.Null(ApiRouteAuthorization.DenialReason(
-            Session("admin", null, "viewer"), "POST", new PathString("/api/auth/logout")));
-    }
-
-    private static SessionRecord Session(string userRole, string[]? screens, string? effectiveRole = null) => new(
+    private static SessionRecord Session(string userRole, string[]? screens) => new(
         "session-1",
         new UserDto("user-1", "person", "Person", userRole, true, false, screens, null,
             DateTimeOffset.UtcNow.ToString("O"), DateTimeOffset.UtcNow.ToString("O")),
-        effectiveRole ?? userRole,
+        userRole,
         "127.0.0.1",
         DateTimeOffset.UtcNow.AddHours(1).ToString("O"));
 }
