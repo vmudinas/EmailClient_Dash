@@ -772,6 +772,32 @@ public sealed class DatabaseInitializer(
         CREATE TABLE IF NOT EXISTS property_rent_charges(id TEXT PRIMARY KEY,owner_user_id TEXT NOT NULL,property_id TEXT NOT NULL REFERENCES managed_properties(id) ON DELETE CASCADE,lease_id TEXT REFERENCES property_leases(id) ON DELETE SET NULL,description TEXT NOT NULL,amount_cents BIGINT NOT NULL,due_date TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS property_payments(id TEXT PRIMARY KEY,owner_user_id TEXT NOT NULL,property_id TEXT NOT NULL REFERENCES managed_properties(id) ON DELETE CASCADE,lease_id TEXT REFERENCES property_leases(id) ON DELETE SET NULL,charge_id TEXT REFERENCES property_rent_charges(id) ON DELETE SET NULL,provider TEXT NOT NULL,method TEXT NOT NULL,amount_cents BIGINT NOT NULL,currency TEXT NOT NULL,status TEXT NOT NULL,external_id TEXT,provider_transaction_id TEXT,checkout_url TEXT,reference TEXT,paid_at TEXT,failure_reason TEXT,notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS property_payment_events(id TEXT PRIMARY KEY,payment_id TEXT NOT NULL REFERENCES property_payments(id) ON DELETE CASCADE,event_type TEXT NOT NULL,status TEXT NOT NULL,external_id TEXT,details_json TEXT,created_at TEXT NOT NULL);
+
+        -- Money integrity constraints. Added NOT VALID so an existing archive is never blocked from
+        -- starting by historical rows; every new or updated row is still checked. Run
+        -- "ALTER TABLE property_payments VALIDATE CONSTRAINT <name>;" once historical rows are known good.
+        DO $archive_mail$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'property_payments_amount_positive') THEN
+            ALTER TABLE property_payments
+              ADD CONSTRAINT property_payments_amount_positive CHECK (amount_cents > 0) NOT VALID;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'property_payments_provider_check') THEN
+            ALTER TABLE property_payments
+              ADD CONSTRAINT property_payments_provider_check
+              CHECK (provider IN ('stripe', 'paypal', 'zelle', 'apple_cash', 'manual')) NOT VALID;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'property_payments_status_check') THEN
+            ALTER TABLE property_payments
+              ADD CONSTRAINT property_payments_status_check
+              CHECK (status IN ('pending', 'processing', 'succeeded', 'failed', 'refunded', 'cancelled')) NOT VALID;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'property_rent_charges_amount_positive') THEN
+            ALTER TABLE property_rent_charges
+              ADD CONSTRAINT property_rent_charges_amount_positive CHECK (amount_cents > 0) NOT VALID;
+          END IF;
+        END
+        $archive_mail$;
         CREATE TABLE IF NOT EXISTS property_organizations(id TEXT PRIMARY KEY,owner_user_id TEXT NOT NULL,name TEXT NOT NULL,timezone TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS property_organization_members(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL REFERENCES property_organizations(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,role TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(organization_id,user_id));
         CREATE TABLE IF NOT EXISTS property_units(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL REFERENCES property_organizations(id) ON DELETE CASCADE,property_id TEXT NOT NULL REFERENCES managed_properties(id) ON DELETE CASCADE,name TEXT NOT NULL,bedrooms DOUBLE PRECISION,bathrooms DOUBLE PRECISION,monthly_rent_cents BIGINT,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);

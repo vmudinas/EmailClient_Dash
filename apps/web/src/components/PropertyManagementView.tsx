@@ -66,6 +66,7 @@ const EMPTY_OVERVIEW: PropertyPortfolioOverview = {
     stripe: { configured: false, methods: ["card", "apple_pay", "google_pay", "ach"] },
     paypal: { configured: false, environment: "sandbox", methods: ["paypal"] },
     zelle: { configured: false, recipient: null, note: "" },
+    appleCash: { configured: false, recipient: null, note: "" },
     manual: { configured: true, methods: ["cash", "check", "other"] }
   }
 };
@@ -77,7 +78,7 @@ const EMPTY_PLATFORM: PropertyPlatformOverview = {
   integrations: {
     stripeConfigured: false, stripeSource: "none", stripeWebhookConfigured: false,
     paypalConfigured: false, paypalSource: "none", paypalEnvironment: "sandbox",
-    paypalWebhookConfigured: false, zelleRecipient: null, twilioConfigured: false,
+    paypalWebhookConfigured: false, zelleRecipient: null, appleCashRecipient: null, appleCashNote: "", twilioConfigured: false,
     twilioSource: "none", gmailConnectionId: null
   },
   report: {
@@ -145,6 +146,36 @@ export function PropertyManagementView({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Stripe and PayPal return to /properties?payment=<id>&result=success|cancelled. Pull the final
+  // status from the provider straight away so the row is correct without waiting for the webhook,
+  // then strip the parameters so a refresh does not re-run the sync.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paymentId = params.get("payment");
+    const result = params.get("result");
+    if (!paymentId) return;
+    params.delete("payment");
+    params.delete("result");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    if (result === "cancelled") {
+      onNotice("Payment was cancelled. Nothing has been charged.");
+      return;
+    }
+    void (async () => {
+      try {
+        const payment = await api.syncPropertyPayment(paymentId);
+        onNotice(payment.status === "succeeded"
+          ? "Payment confirmed. A receipt has been recorded."
+          : "Payment is still being confirmed by the provider.");
+      } catch (error) {
+        onError(errorMessage(error));
+      } finally {
+        await load();
+      }
+    })();
+  }, [api, load, onNotice, onError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -711,7 +742,7 @@ export function PropertyManagementView({
               const checkout = await api.createPropertyPaymentCheckout(payment.id);
               setDialog(null);
               setPaymentChargeId(null);
-              if (checkout.action === "redirect" && checkout.url) window.open(checkout.url, "_blank", "noopener,noreferrer");
+              if (checkout.action === "redirect" && checkout.url) { window.location.assign(checkout.url); return; }
               if (checkout.instructions) setPaymentInstructions(checkout.instructions);
               onNotice(checkout.action === "redirect" ? "Secure payment checkout opened" : "Payment instructions created");
               await load();
@@ -836,6 +867,8 @@ export function PropertyManagementView({
               paypalEnvironment: data("paypalEnvironment") as "sandbox" | "live",
               zelleRecipient: data("zelleRecipient") || null,
               zelleNote: data("zelleNote"),
+              appleCashRecipient: data("appleCashRecipient") || null,
+              appleCashNote: data("appleCashNote"),
               ...(data("twilioAccountSid") ? { twilioAccountSid: data("twilioAccountSid") } : {}),
               ...(data("twilioAuthToken") ? { twilioAuthToken: data("twilioAuthToken") } : {}),
               ...(data("twilioMessagingServiceSid") ? { twilioMessagingServiceSid: data("twilioMessagingServiceSid") } : {}),
@@ -851,6 +884,8 @@ export function PropertyManagementView({
               <Field label="PayPal environment"><select name="paypalEnvironment" defaultValue={platform.integrations.paypalEnvironment}><option value="sandbox">Sandbox</option><option value="live">Live</option></select></Field>
               <Field label="Zelle recipient"><input name="zelleRecipient" defaultValue={platform.integrations.zelleRecipient ?? ""} /></Field>
               <Field label="Zelle instructions"><input name="zelleNote" defaultValue="Include the property address and payment reference in the memo." /></Field>
+              <Field label="Apple Cash recipient" wide><input name="appleCashRecipient" defaultValue={platform.integrations.appleCashRecipient ?? ""} placeholder="Phone number or Apple ID email that receives Apple Cash" /></Field>
+              <Field label="Apple Cash instructions" wide><input name="appleCashNote" defaultValue={platform.integrations.appleCashNote ?? ""} placeholder="Apple Cash is sent from Messages and must be confirmed manually — it cannot be verified automatically." /></Field>
               <Field label="Twilio Account SID"><input name="twilioAccountSid" placeholder={platform.integrations.twilioConfigured ? "Configured — leave blank to keep" : "AC…"} /></Field>
               <Field label="Twilio auth token"><input name="twilioAuthToken" type="password" placeholder={platform.integrations.twilioConfigured ? "Configured — leave blank to keep" : "Auth token"} /></Field>
               <Field label="Twilio Messaging Service SID"><input name="twilioMessagingServiceSid" placeholder="MG…" /></Field>
@@ -949,9 +984,10 @@ function label(value: string): string { return value.replaceAll("_", " ").replac
 function initials(value: string): string { return value.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join(""); }
 function defaultMethod(provider: PropertyPaymentProvider): PropertyPaymentMethod { if (provider === "stripe") return "card"; if (provider === "paypal") return "paypal"; if (provider === "zelle") return "zelle"; return "other"; }
 function providerOptions(overview: PropertyPortfolioOverview): Array<{ value: PropertyPaymentProvider; label: string; configured: boolean }> { return [
-  { value: "stripe", label: "Stripe — card / Apple Pay / Google Pay / ACH", configured: overview.paymentConfiguration.stripe.configured },
+  { value: "stripe", label: "Card, Apple Pay or Google Pay (Stripe)", configured: overview.paymentConfiguration.stripe.configured },
   { value: "paypal", label: "PayPal", configured: overview.paymentConfiguration.paypal.configured },
   { value: "zelle", label: "Zelle", configured: overview.paymentConfiguration.zelle.configured },
+  { value: "apple_cash", label: "Apple Cash (send in Messages)", configured: overview.paymentConfiguration.appleCash.configured },
   { value: "manual", label: "Cash / check / other", configured: true }
 ]; }
 function firstConfiguredProvider(overview: PropertyPortfolioOverview): PropertyPaymentProvider { return providerOptions(overview).find((option) => option.configured)?.value ?? "manual"; }

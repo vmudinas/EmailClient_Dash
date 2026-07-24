@@ -29,7 +29,7 @@ Archive Mail includes a property-management workspace for a private landlord or 
 - Dated rent charges, recurring monthly rent schedules, immutable ledger entries, adjustments, allocations, receipts, refunds, and CSV export.
 - Stripe-hosted Checkout for eligible cards, Apple Pay, Google Pay, and ACH methods enabled in the Stripe account.
 - PayPal Orders and captures.
-- Zelle instructions and manager reconciliation, plus manual cash/check/other records.
+- Zelle and Apple Cash instructions with manager reconciliation, plus manual cash/check/other records.
 - Provider transaction IDs and payment status history without storing card or bank credentials.
 - Signature-verified Stripe and PayPal webhooks stored in a durable, idempotent event queue.
 - Successful provider events create payment ledger entries and receipts exactly once.
@@ -140,7 +140,27 @@ Failed notification jobs use bounded exponential retry timing and stop after fiv
 - A positive ledger amount increases the tenant balance. Payments are stored as negative ledger entries.
 - Receipt numbers and provider event IDs are idempotent.
 - Hosted providers collect card and bank credentials; this application stores only amounts, states, references, and provider IDs.
-- Zelle and manual payments require manager confirmation because no general-purpose Zelle merchant-status API is used.
+- Zelle, Apple Cash, and manual payments require manager confirmation: none of them expose a merchant-status API.
+- A tenant can only ever open a payment as `pending`. Recording a payment as already settled is a manager
+  action, so a tenant cannot self-report rent as paid and have a ledger entry and receipt written.
+- Refunds are capped by what the payment still has left to refund, counted from the ledger. This matters most
+  for Apple Cash, Zelle, and manual payments, where no provider rejects an over-refund.
+- A payment allocated to a charge never allocates more than that charge still owes.
+
+### Apple Pay vs Apple Cash
+
+These are different products and are implemented differently:
+
+- **Apple Pay** is a wallet, not a payment processor. It is settled **through Stripe** — select the Stripe
+  provider with the `apple_pay` method and the tenant pays with Apple Pay on Stripe-hosted Checkout. Enable
+  Apple Pay in the Stripe dashboard; Stripe handles Apple domain verification for its hosted Checkout pages.
+  Funds land in the Stripe balance and pay out to the configured bank account. Apple Pay **cannot** deposit
+  into an Apple Cash balance.
+- **Apple Cash** is Apple's person-to-person transfer inside Messages and Wallet. Apple publishes **no
+  merchant or receiving API**, so there is no supported way for a server to pull funds into an Apple Cash
+  account or to confirm receipt automatically. It is therefore implemented exactly like Zelle: the tenant is
+  shown the recipient and a `RENT-XXXXXXXX` memo reference, sends the money from Messages, and a manager
+  marks the payment paid once it arrives. Configure the recipient under **Communications > Configure**.
 
 ## Documents and Backups
 
