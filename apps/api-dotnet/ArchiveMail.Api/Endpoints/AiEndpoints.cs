@@ -25,6 +25,18 @@ public static class AiEndpoints
         app.MapPost("/api/messages/{messageId}/ai/review",async(string messageId,HttpContext context,AiService ai,CancellationToken token)=>
         {try{return Results.Ok(await ai.ReviewAsync(messageId,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI");
 
+        app.MapPost("/api/ai/ask",async(JsonElement input,HttpContext context,AskService ask,CancellationToken token)=>
+        {try{return Results.Ok(await ask.AskAsync(input,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI");
+        app.MapGet("/api/ai/ask/history",async(HttpContext context,AskService ask,CancellationToken token)=>Results.Ok(await ask.HistoryAsync(Session(context).User.Id,token))).WithTags("AI");
+
+        app.MapGet("/api/ai/duplicates",async(string? status,HttpContext context,DeduplicationService duplicates,CancellationToken token)=>Results.Ok(await duplicates.ListGroupsAsync(status,Session(context).User.Id,token))).WithTags("AI duplicates");
+        app.MapGet("/api/ai/duplicates/{groupId}",async(string groupId,HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
+            await duplicates.GetGroupAsync(groupId,Session(context).User.Id,token) is{} group?Results.Ok(group):Results.NotFound(new{error="Duplicate group not found"})).WithTags("AI duplicates");
+        app.MapPatch("/api/ai/duplicates/{groupId}",async(string groupId,JsonElement input,HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
+        {try{return await duplicates.UpdateGroupAsync(groupId,input,Session(context).User.Id,token) is{} group?Results.Ok(group):Results.NotFound(new{error="Duplicate group not found"});}catch(Exception error){return Error(error);}}).WithTags("AI duplicates");
+        app.MapPost("/api/ai/duplicates/scan",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
+        {try{return Results.Ok(await duplicates.ScanAsync(Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI duplicates");
+
         app.MapGet("/api/admin/ai-schedules",async(HttpContext context,AiService ai,CancellationToken token)=>Admin(context)?Results.Ok(await ai.ListSchedulesAsync(Session(context).User.Id,token)):Results.Forbid()).WithTags("AI schedules");
         app.MapPost("/api/admin/ai-schedules",async(JsonElement input,HttpContext context,AiService ai,CancellationToken token)=>
         {if(!Admin(context))return Results.Forbid();try{return Results.Ok(await ai.CreateScheduleAsync(input,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI schedules");

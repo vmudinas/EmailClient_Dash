@@ -44,6 +44,8 @@ builder.Services.AddSingleton<TodoRepository>();
 builder.Services.AddSingleton<ProductivityRepository>();
 builder.Services.AddSingleton<GmailService>();
 builder.Services.AddSingleton<AiService>();
+builder.Services.AddSingleton<AskService>();
+builder.Services.AddSingleton<DeduplicationService>();
 builder.Services.AddSingleton<SmartRuleService>();
 builder.Services.AddSingleton<CalendarService>();
 builder.Services.AddSingleton<PropertyService>();
@@ -63,6 +65,7 @@ builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequired
 builder.Services.AddHostedService<GmailScheduledSyncService>();
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<AiService>());
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<SmartRuleService>());
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<DeduplicationService>());
 builder.Services.AddHostedService<PropertyAutomationHostedService>();
 builder.Services.AddHttpClient("external", client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddHttpClient("ai", client => client.Timeout = TimeSpan.FromMinutes(2));

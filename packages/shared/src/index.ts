@@ -350,6 +350,108 @@ export interface AiMessageState {
   analysis: MessageAnalysis | null;
 }
 
+/** Which deterministic tier formed a duplicate group. No tier deletes anything. */
+export type DuplicateDetectionTier = "exact_id" | "raw_hash" | "content_hash" | "near_duplicate";
+export type DuplicateReviewStatus = "pending" | "confirmed" | "dismissed";
+export type DuplicateRelation = "same_message" | "same_thread_copy" | "forwarded_copy";
+
+export interface DuplicateGroup {
+  id: string;
+  groupKey: string;
+  preferredMessageId: string | null;
+  detectionTier: DuplicateDetectionTier;
+  confidence: number;
+  memberCount: number;
+  reviewStatus: DuplicateReviewStatus;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DuplicateGroupMember {
+  message: MessageDetail;
+  relation: DuplicateRelation;
+  /** Human-readable reasons the message was grouped, e.g. "identical Message-ID header". */
+  evidence: string[];
+}
+
+export interface DuplicateGroupList {
+  groups: DuplicateGroup[];
+  totalPending: number;
+}
+
+export interface DuplicateGroupDetail {
+  group: DuplicateGroup;
+  members: DuplicateGroupMember[];
+}
+
+export interface DuplicateScanResult {
+  fingerprinted: number;
+  groupsCreated: number;
+  duplicateMessages: number;
+  scannedAt: string;
+}
+
+export const duplicateGroupPatchSchema = z.object({
+  reviewStatus: z.enum(["pending", "confirmed", "dismissed"]).optional(),
+  preferredMessageId: z.string().min(1).optional()
+});
+export type DuplicateGroupPatch = z.infer<typeof duplicateGroupPatchSchema>;
+
+/** Ask Archive Mail — retrieval-augmented Q&A. Retrieval is local; only excerpts are sent. */
+export type AskRetrievalMode = "fts" | "hybrid";
+
+export const askFiltersSchema = z.object({
+  senderAddress: z.string().trim().min(1).max(320).optional(),
+  since: z.string().trim().min(1).max(40).optional(),
+  until: z.string().trim().min(1).max(40).optional()
+});
+export type AskFilters = z.infer<typeof askFiltersSchema>;
+
+export const askRequestSchema = z.object({
+  question: z.string().trim().min(1).max(1_000),
+  filters: askFiltersSchema.optional()
+});
+export type AskRequest = z.infer<typeof askRequestSchema>;
+
+/** A message the answer explicitly cites, with the full message for rendering a source link. */
+export interface AskCitation {
+  messageId: string;
+  subject: string;
+  message: MessageDetail;
+}
+
+/** A message that was placed in the model's context, whether or not it was cited. */
+export interface AskConsultedMessage {
+  messageId: string;
+  subject: string;
+  sender: string;
+  receivedAt: string;
+  rank: number;
+}
+
+export interface AskAnswer {
+  answer: string;
+  citations: AskCitation[];
+  consulted: AskConsultedMessage[];
+  retrievalMode: AskRetrievalMode;
+  provider: AiProviderId;
+  model: string;
+  excerptCount: number;
+}
+
+export interface AskHistoryEntry {
+  id: string;
+  question: string;
+  answer: string;
+  citations: string[];
+  retrievalMode: AskRetrievalMode;
+  provider: AiProviderId;
+  model: string;
+  excerptCount: number;
+  createdAt: string;
+}
+
 export type AiScheduleMode = "all" | "unread";
 export type AiScheduleTask = "analyze" | "draft_reply";
 export type AiScheduleRunStatus = "queueing" | "processing" | "completed" | "completed_with_errors" | "failed";
