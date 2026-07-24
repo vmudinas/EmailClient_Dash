@@ -6,6 +6,7 @@ import {
   CalendarClock,
   CheckCircle2,
   ClipboardList,
+  Copy,
   CreditCard,
   Download,
   FileText,
@@ -26,6 +27,7 @@ import type {
   GmailConnection,
   PropertyPayment,
   PropertyPaymentMethod,
+  PropertyPaymentConfiguration,
   PropertyPaymentProvider,
   PropertyBackupSummary,
   PropertyPortfolioOverview,
@@ -216,6 +218,15 @@ export function PropertyManagementView({
     [overview.leases]
   );
   const manager = overview.mode === "manager";
+  // Out-of-band payments (Zelle, Apple Cash, cash/check) are settled by the tenant sending money
+  // themselves, so the recipient and reference must stay visible until a manager confirms receipt —
+  // not just in the banner shown once at checkout.
+  const awaitingInstructionPayments = useMemo(
+    () => overview.payments.filter((payment) =>
+      INSTRUCTION_PROVIDERS.includes(payment.provider)
+      && !["succeeded", "refunded", "cancelled", "failed"].includes(payment.status)),
+    [overview.payments]
+  );
   const paymentCharge = paymentChargeId
     ? overview.rentCharges.find((charge) => charge.id === paymentChargeId) ?? null
     : null;
@@ -461,6 +472,15 @@ export function PropertyManagementView({
               {overview.rentCharges.length === 0 && <EmptyState text="No rent charges." />}
             </div>
           </Panel>
+          {awaitingInstructionPayments.length > 0 && (
+            <Panel title="How to pay" wide>
+              <PaymentInstructionList
+                payments={awaitingInstructionPayments}
+                configuration={overview.paymentConfiguration}
+                onCopied={(what) => onNotice(`${what} copied`)}
+              />
+            </Panel>
+          )}
           <Panel title="Payment history" action={!readOnly ? <ActionButton label={manager ? "Record payment" : "Pay rent or fee"} onClick={() => openPayment()} /> : null}>
             <PaymentHistory
               payments={overview.payments}
@@ -882,9 +902,9 @@ export function PropertyManagementView({
               <Field label="PayPal secret"><input name="paypalClientSecret" type="password" placeholder={platform.integrations.paypalConfigured ? "Configured — leave blank to keep" : "Secret"} /></Field>
               <Field label="PayPal webhook ID"><input name="paypalWebhookId" placeholder={platform.integrations.paypalWebhookConfigured ? "Configured — leave blank to keep" : "Webhook ID"} /></Field>
               <Field label="PayPal environment"><select name="paypalEnvironment" defaultValue={platform.integrations.paypalEnvironment}><option value="sandbox">Sandbox</option><option value="live">Live</option></select></Field>
-              <Field label="Zelle recipient"><input name="zelleRecipient" defaultValue={platform.integrations.zelleRecipient ?? ""} /></Field>
+              <Field label="Zelle recipient" wide><input name="zelleRecipient" defaultValue={platform.integrations.zelleRecipient ?? ""} placeholder="Email address or mobile number registered with Zelle" /></Field>
               <Field label="Zelle instructions"><input name="zelleNote" defaultValue="Include the property address and payment reference in the memo." /></Field>
-              <Field label="Apple Cash recipient" wide><input name="appleCashRecipient" defaultValue={platform.integrations.appleCashRecipient ?? ""} placeholder="Phone number or Apple ID email that receives Apple Cash" /></Field>
+              <Field label="Apple Cash recipient" wide><input name="appleCashRecipient" defaultValue={platform.integrations.appleCashRecipient ?? ""} placeholder="Mobile number (or Apple ID email) that receives Apple Cash" /></Field>
               <Field label="Apple Cash instructions" wide><input name="appleCashNote" defaultValue={platform.integrations.appleCashNote ?? ""} placeholder="Apple Cash is sent from Messages and must be confirmed manually — it cannot be verified automatically." /></Field>
               <Field label="Twilio Account SID"><input name="twilioAccountSid" placeholder={platform.integrations.twilioConfigured ? "Configured — leave blank to keep" : "AC…"} /></Field>
               <Field label="Twilio auth token"><input name="twilioAuthToken" type="password" placeholder={platform.integrations.twilioConfigured ? "Configured — leave blank to keep" : "Auth token"} /></Field>
@@ -947,10 +967,114 @@ function ProviderGrid({ overview, detailed = false }: { overview: PropertyPortfo
   const providers = [
     { name: "Stripe", detail: "Cards, Apple Pay, Google Pay, and ACH", configured: overview.paymentConfiguration.stripe.configured },
     { name: "PayPal", detail: `PayPal Checkout · ${overview.paymentConfiguration.paypal.environment}`, configured: overview.paymentConfiguration.paypal.configured },
-    { name: "Zelle", detail: overview.paymentConfiguration.zelle.recipient ? `Manual reconciliation to ${overview.paymentConfiguration.zelle.recipient}` : "Add a recipient in the server environment", configured: overview.paymentConfiguration.zelle.configured },
+    { name: "Zelle", detail: overview.paymentConfiguration.zelle.recipient ? `Tenants send to ${overview.paymentConfiguration.zelle.recipient} · confirmed manually` : "Add a Zelle recipient in Communications > Configure", configured: overview.paymentConfiguration.zelle.configured },
+    { name: "Apple Cash", detail: overview.paymentConfiguration.appleCash.recipient ? `Tenants send to ${overview.paymentConfiguration.appleCash.recipient} in Messages · confirmed manually` : "Add an Apple Cash recipient in Communications > Configure", configured: overview.paymentConfiguration.appleCash.configured },
     { name: "Manual", detail: "Cash, check, and other verified offline receipts", configured: true }
   ];
   return <div className={`provider-grid ${detailed ? "detailed" : ""}`}>{providers.map((provider) => <article key={provider.name}><span className={provider.configured ? "configured" : "unconfigured"}>{provider.configured ? <CheckCircle2 size={17} /> : <X size={17} />}</span><div><strong>{provider.name}</strong><small>{provider.detail}</small></div><em>{provider.configured ? "Ready" : "Not configured"}</em></article>)}</div>;
+}
+
+const INSTRUCTION_PROVIDERS: PropertyPaymentProvider[] = ["zelle", "apple_cash", "manual"];
+
+/** Where an out-of-band payment should be sent, and how the manager will recognise it. */
+function instructionTarget(
+  provider: PropertyPaymentProvider,
+  configuration: PropertyPaymentConfiguration
+): { title: string; recipientLabel: string; recipient: string | null; note: string; how: string } {
+  if (provider === "apple_cash") return {
+    title: "Apple Cash",
+    recipientLabel: "Send to",
+    recipient: configuration.appleCash.recipient,
+    note: configuration.appleCash.note,
+    how: "Open Messages on your iPhone or iPad, start a conversation with this number, tap Apple Cash, enter the amount, and include the reference in the message."
+  };
+  if (provider === "zelle") return {
+    title: "Zelle",
+    recipientLabel: "Send to",
+    recipient: configuration.zelle.recipient,
+    note: configuration.zelle.note,
+    how: "Open your bank's app, choose Zelle, send to this recipient, and put the reference in the memo."
+  };
+  return {
+    title: "Cash, check or bank transfer",
+    recipientLabel: "Hand to",
+    recipient: null,
+    note: "",
+    how: "Arrange delivery with your property manager and quote the reference so the payment can be matched."
+  };
+}
+
+export function PaymentInstructionList({ payments, configuration, onCopied }: {
+  payments: PropertyPayment[];
+  configuration: PropertyPaymentConfiguration;
+  onCopied: (what: string) => void;
+}) {
+  const copy = async (value: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      onCopied(what);
+    } catch {
+      // Clipboard access can be denied; the value is on screen either way.
+    }
+  };
+  return (
+    <div className="payment-instructions">
+      {payments.map((payment) => {
+        const target = instructionTarget(payment.provider, configuration);
+        return (
+          <article key={payment.id} className="payment-instruction">
+            <header>
+              <div>
+                <strong>{money(payment.amountCents)}</strong>
+                <small>{target.title} · {payment.propertyName}</small>
+              </div>
+              <StatusBadge value={payment.status} />
+            </header>
+            <dl>
+              {target.recipient ? (
+                <div>
+                  <dt>{target.recipientLabel}</dt>
+                  <dd>
+                    <code>{target.recipient}</code>
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => void copy(target.recipient!, "Recipient")}
+                      aria-label={`Copy ${target.title} recipient`}
+                    >
+                      <Copy size={13} /> Copy
+                    </button>
+                  </dd>
+                </div>
+              ) : (
+                <div>
+                  <dt>{target.recipientLabel}</dt>
+                  <dd><span className="payment-instruction-missing">Ask your property manager where to send this payment.</span></dd>
+                </div>
+              )}
+              {payment.reference && (
+                <div>
+                  <dt>Reference</dt>
+                  <dd>
+                    <code>{payment.reference}</code>
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => void copy(payment.reference!, "Reference")}
+                      aria-label="Copy payment reference"
+                    >
+                      <Copy size={13} /> Copy
+                    </button>
+                  </dd>
+                </div>
+              )}
+            </dl>
+            <p className="payment-instruction-how">{target.how}</p>
+            {target.note && <p className="payment-instruction-note">{target.note}</p>}
+            <footer>Your manager marks this paid once the money arrives — {target.title} cannot confirm it automatically.</footer>
+          </article>
+        );
+      })}
+    </div>
+  );
 }
 
 function PaymentHistory({ payments, manager, busy, onSync, onMarkPaid, onRefund }: { payments: PropertyPayment[]; manager: boolean; busy: boolean; onSync: (payment: PropertyPayment) => void; onMarkPaid: (payment: PropertyPayment) => void; onRefund: (payment: PropertyPayment) => void }) {

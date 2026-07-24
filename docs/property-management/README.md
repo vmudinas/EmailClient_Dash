@@ -162,6 +162,22 @@ These are different products and are implemented differently:
   shown the recipient and a `RENT-XXXXXXXX` memo reference, sends the money from Messages, and a manager
   marks the payment paid once it arrives. Configure the recipient under **Communications > Configure**.
 
+### Configuring an out-of-band recipient
+
+Zelle and Apple Cash each take one recipient, set under **Communications > Configure**:
+
+- **Zelle recipient** — the email address or mobile number registered with Zelle.
+- **Apple Cash recipient** — the mobile number (or Apple ID email) that receives Apple Cash.
+
+Both accept either form. The value is validated on save: emails are lowercased, and mobile numbers are
+normalized to E.164 (a bare 10-digit US number becomes `+1XXXXXXXXXX`) so tenants always see one
+consistent value to type. A malformed value is rejected with a message naming the field.
+
+Tenants with an outstanding Zelle, Apple Cash, or manual payment see a persistent **How to pay** panel
+listing the amount, the recipient, and the reference, each with a copy button. This survives a reload —
+the recipient and reference are not only shown once at checkout — because these payments are settled by
+the tenant outside the app and may take days to arrive.
+
 ## Documents and Backups
 
 Property documents and request attachments are stored under `/data/property-files`; uploaded property photos are stored under `/data/property-photos`. Admin-created property restore points are PostgreSQL custom-format dumps under `/data/backups`. Full deployment backups also include the complete `/data` tree so documents, photos, protected integration settings, and data-protection keys stay together.

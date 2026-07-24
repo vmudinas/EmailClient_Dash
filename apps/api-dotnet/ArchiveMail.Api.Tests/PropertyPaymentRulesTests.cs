@@ -190,6 +190,53 @@ public sealed class PropertyPaymentRulesTests
         Assert.Equal(0, PropertyPaymentRules.AllocationCents(100_000, -5_000));
     }
 
+    // ---------- out-of-band recipients (Zelle email / Apple Cash phone) ----------
+
+    [Theory]
+    [InlineData("landlord@example.com", "landlord@example.com")]
+    [InlineData("  Landlord@Example.COM  ", "landlord@example.com")]
+    public void An_email_recipient_is_accepted_and_lowercased(string input, string expected) =>
+        Assert.Equal(expected, PropertyPaymentRules.NormalizeRecipient(input, "Zelle recipient"));
+
+    [Theory]
+    [InlineData("5551234567", "+15551234567")]
+    [InlineData("(555) 123-4567", "+15551234567")]
+    [InlineData("555-123-4567", "+15551234567")]
+    [InlineData("1 555 123 4567", "+15551234567")]
+    [InlineData("+1 555 123 4567", "+15551234567")]
+    public void A_us_mobile_number_is_normalized_to_e164(string input, string expected) =>
+        Assert.Equal(expected, PropertyPaymentRules.NormalizeRecipient(input, "Apple Cash recipient"));
+
+    [Fact]
+    public void An_international_number_keeps_its_country_code() =>
+        Assert.Equal("+447700900123", PropertyPaymentRules.NormalizeRecipient("+44 7700 900123", "Apple Cash recipient"));
+
+    [Theory]
+    [InlineData("not a recipient")]
+    [InlineData("nobody@")]
+    [InlineData("@example.com")]
+    [InlineData("landlord@example")]
+    [InlineData("land lord@example.com")]
+    [InlineData("555")]
+    [InlineData("12345")]
+    public void A_malformed_recipient_is_rejected(string input) =>
+        Assert.Throws<ArgumentException>(() => PropertyPaymentRules.NormalizeRecipient(input, "Zelle recipient"));
+
+    [Fact]
+    public void The_error_names_the_setting_so_the_admin_knows_which_field_is_wrong()
+    {
+        var error = Assert.Throws<ArgumentException>(
+            () => PropertyPaymentRules.NormalizeRecipient("nope", "Apple Cash recipient"));
+        Assert.Contains("Apple Cash recipient", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void A_blank_recipient_clears_the_setting(string? input) =>
+        Assert.Null(PropertyPaymentRules.NormalizeRecipient(input, "Zelle recipient"));
+
     // ---------- the enums must not drift from the database constraints ----------
 
     [Fact]

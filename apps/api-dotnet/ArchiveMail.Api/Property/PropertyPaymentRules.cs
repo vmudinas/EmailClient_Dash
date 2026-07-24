@@ -133,6 +133,47 @@ public static class PropertyPaymentRules
     public static bool IsFullRefund(long refundAmountCents, long amountCents, long alreadyRefundedCents) =>
         alreadyRefundedCents + refundAmountCents >= amountCents;
 
+    /// <summary>
+    /// Validates and normalizes an out-of-band payment recipient. Zelle and Apple Cash both accept either
+    /// a mobile number or an email address, so both forms are allowed; a phone number is normalized to
+    /// E.164 so the tenant sees one consistent value to type into Messages or their banking app.
+    /// Returns null for a cleared setting.
+    /// </summary>
+    public static string? NormalizeRecipient(string? value, string label)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var trimmed = value.Trim();
+        if (trimmed.Contains('@', StringComparison.Ordinal)) return NormalizeEmail(trimmed, label);
+        if (trimmed.Any(char.IsDigit)) return NormalizePhone(trimmed, label);
+        throw new ArgumentException($"{label} must be a mobile number or an email address");
+    }
+
+    private static string NormalizeEmail(string value, string label)
+    {
+        var parts = value.Split('@');
+        if (parts.Length != 2 || parts[0].Length == 0 || parts[1].Length < 3
+            || !parts[1].Contains('.', StringComparison.Ordinal)
+            || parts[1].StartsWith('.') || parts[1].EndsWith('.')
+            || value.Any(char.IsWhiteSpace))
+            throw new ArgumentException($"{label} is not a valid email address");
+        return value.ToLowerInvariant();
+    }
+
+    private static string NormalizePhone(string value, string label)
+    {
+        var digits = new string(value.Where(char.IsDigit).ToArray());
+        if (value.Any(character => !char.IsDigit(character) && !char.IsWhiteSpace(character)
+                && character is not ('+' or '-' or '(' or ')' or '.')))
+            throw new ArgumentException($"{label} is not a valid mobile number");
+        return digits.Length switch
+        {
+            10 => $"+1{digits}",                                   // bare US number
+            11 when digits.StartsWith('1') => $"+{digits}",         // US with country code
+            >= 8 and <= 15 => $"+{digits}",                         // other E.164-length numbers
+            _ => throw new ArgumentException($"{label} is not a valid mobile number")
+        };
+    }
+
     private static string Money(long cents) => $"${cents / 100m:0.00}";
 
     private static string Label(string value) =>
