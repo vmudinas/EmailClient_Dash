@@ -92,6 +92,11 @@ import {
 } from "./components/Dialogs.js";
 import { ApiClient, resolveRuntimeConfig, type UploadProgress } from "./lib/api.js";
 import {
+  clearPersistedScope,
+  pruneForeignPersistence,
+  usePersistentState
+} from "./lib/persistentState.js";
+import {
   DEFAULT_POLLING_SETTINGS,
   usePollingLoop,
   usePollingRegistry,
@@ -131,8 +136,6 @@ type RenameTarget =
   | { kind: "mailbox"; id: string; archiveId: string; name: string };
 
 const SESSION_STORAGE_KEY = "archive-mail-session-token";
-const SHOW_READ_STORAGE_KEY = "archive-mail-show-read-messages";
-const FOLDER_PANEL_STORAGE_KEY = "archive-mail-folder-panel-visible";
 const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   primary: 0,
   promotions: 0,
@@ -187,6 +190,9 @@ function viewForPath(pathname = window.location.pathname): AppView {
 export function App() {
   const [api, setApi] = useState<ApiClient | null>(null);
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
+  // Persistence scope. Every stored key is namespaced by this so one account never reads
+  // another's state on a shared machine.
+  const sessionUserId = session?.user.id;
   const [stockQuotes, setStockQuotes] = useState<StockQuote[]>([]);
   const [stockQuotesLoading, setStockQuotesLoading] = useState(false);
   const [stockQuotesError, setStockQuotesError] = useState("");
@@ -203,6 +209,20 @@ export function App() {
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  // Where the user last was. Ids only -- never message content. Dropped after a week so a
+  // long-abandoned tab does not reopen on an archive that has since been cleared.
+  const [lastLocation, setLastLocation] = usePersistentState<{ archiveId: string | null; folderId: string | null }>(
+    "lastLocation",
+    { archiveId: null, folderId: null },
+    { scope: sessionUserId, maxAgeMs: 7 * 24 * 60 * 60 * 1_000 }
+  );
+  useEffect(() => {
+    if (!sessionUserId) return;
+    if (lastLocation.archiveId === selectedArchiveId && lastLocation.folderId === selectedFolderId) return;
+    setLastLocation({ archiveId: selectedArchiveId, folderId: selectedFolderId });
+    // lastLocation/setLastLocation are excluded: writing here would re-trigger this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionUserId, selectedArchiveId, selectedFolderId]);
   const [selectedSmartMailbox, setSelectedSmartMailbox] = useState<SmartMailbox | null>(null);
   const [inboxCategory, setInboxCategory] = useState<InboxCategory>("primary");
   const [inboxCategoryCounts, setInboxCategoryCounts] = useState<InboxCategoryCounts>(EMPTY_INBOX_CATEGORY_COUNTS);
@@ -217,20 +237,8 @@ export function App() {
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [filters, setFilters] = useState<UiSearchFilters>(EMPTY_FILTERS);
-  const [showReadMessages, setShowReadMessages] = useState(() => {
-    try {
-      return window.localStorage.getItem(SHOW_READ_STORAGE_KEY) !== "false";
-    } catch {
-      return true;
-    }
-  });
-  const [folderPanelVisible, setFolderPanelVisible] = useState(() => {
-    try {
-      return window.localStorage.getItem(FOLDER_PANEL_STORAGE_KEY) !== "false";
-    } catch {
-      return true;
-    }
-  });
+  const [showReadMessages, setShowReadMessages] = usePersistentState<boolean>("showReadMessages", true);
+  const [folderPanelVisible, setFolderPanelVisible] = usePersistentState<boolean>("folderPanelVisible", true);
   const [sort, setSort] = useState<"relevance" | "newest">("relevance");
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState(false);
@@ -534,6 +542,9 @@ export function App() {
 
   const signOutLocally = () => {
     messageRequestRef.current += 1;
+    // Persisted state outlives the session unless it is dropped explicitly, and this machine
+    // may be shared.
+    clearPersistedScope(sessionUserId);
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
     api?.setAccessToken("");
     setSession(null);
@@ -571,18 +582,6 @@ export function App() {
     const timeout = window.setTimeout(() => setSearchTerm(query.trim()), 250);
     return () => window.clearTimeout(timeout);
   }, [query]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SHOW_READ_STORAGE_KEY, String(showReadMessages));
-    } catch {}
-  }, [showReadMessages]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(FOLDER_PANEL_STORAGE_KEY, String(folderPanelVisible));
-    } catch {}
-  }, [folderPanelVisible]);
 
   useEffect(() => {
     setFilters((current) => current.folderId && current.folderId !== ALL_MAIL_SEARCH_SCOPE
