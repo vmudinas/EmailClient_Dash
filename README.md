@@ -111,9 +111,13 @@ Accounts carry one of four roles. `admin` has full control, `user` gets a privat
 
 ## Lithuanian trainer
 
-Accounts with the `lucas` role sign in to a single screen for practising Lithuanian vocabulary. A word pair is one Lithuanian word beside its English translation. Only the Lithuanian side is spoken and recorded — the English word states the meaning and is not something being learned. The browser speaks the word with `speechSynthesis` at `lt-LT`, and the learner records their own attempt with `MediaRecorder`.
+Accounts with the `lucas` role sign in to a single screen for practising Lithuanian vocabulary. The learner chooses whether to add a **single word** or a **phrase** for context; either way the English side states the meaning and is never spoken or recorded, because Lithuanian is what is being learned. The browser speaks the entry with `speechSynthesis` at `lt-LT`, and the learner records their own attempt with `MediaRecorder`.
 
-**Scoring.** The recording is uploaded and transcribed on the server with OpenAI speech-to-text (`gpt-4o-transcribe`, `language=lt`). `LithuanianScoring` then compares the transcript to the target word: both are lowercased, stripped of punctuation, and folded to plain letters (recognizers are inconsistent about `ą č ę ė į š ų ū ž`), then measured by Levenshtein distance as a percentage. **85% or higher passes.** The expected word is deliberately never sent as a prompt — that would bias the recognizer toward returning it and inflate every score.
+**Phrase hints.** A phrase is broken into its individual Lithuanian words, each with its English meaning and one short pronunciation tip, so it does not arrive as an opaque block. Each word can be played on its own. The breakdown is written by the trainer's configured chat model at the moment the phrase is added, and can be rebuilt later from the card for a phrase added before a key was configured. No key means no hints — never a failed save.
+
+**Scoring.** The recording is uploaded and transcribed on the server with OpenAI speech-to-text (`gpt-4o-transcribe`, `language=lt`). `LithuanianScoring` then compares the transcript to the target word: both are lowercased, stripped of punctuation, and folded to plain letters (recognizers are inconsistent about `ą č ę ė į š ų ū ž`), then measured by Levenshtein distance as a percentage. Spaces survive folding so a phrase is compared word for word — otherwise a run-together attempt would score as a perfect one. The expected word is deliberately never sent as a prompt, which would bias the recognizer toward returning it and inflate every score.
+
+**The pass mark defaults to 85% and is set in Admin settings** (50–100). Lower it while a learner is starting out: single isolated words are the hardest case for speech recognition. Changing it re-judges existing recordings, since only the score is stored and the pass is derived from it.
 
 The browser also transcribes locally where it can, and that result is used only as a fallback when no key is configured or the API call fails. Either way the take is saved with its date; an unscored take is marked as such rather than discarded.
 

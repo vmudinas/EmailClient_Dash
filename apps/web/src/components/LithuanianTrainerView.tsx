@@ -5,6 +5,7 @@ import {
   CircleCheck,
   Flame,
   Languages,
+  Lightbulb,
   LoaderCircle,
   LogOut,
   Mic,
@@ -16,7 +17,9 @@ import {
 } from "lucide-react";
 import {
   LITHUANIAN_LOCALE,
+  LITHUANIAN_MAX_PHRASE_WORDS,
   LITHUANIAN_PASS_MARK,
+  type LithuanianEntryKind,
   type LithuanianRecording,
   type LithuanianWord
 } from "@email-client/shared";
@@ -63,10 +66,13 @@ export function LithuanianTrainerView({
   onSignOut: () => void;
 }) {
   const [words, setWords] = useState<LithuanianWord[]>([]);
+  const [passMark, setPassMark] = useState(LITHUANIAN_PASS_MARK);
   const [loading, setLoading] = useState(true);
   const [lithuanian, setLithuanian] = useState("");
   const [english, setEnglish] = useState("");
+  const [kind, setKind] = useState<LithuanianEntryKind>("word");
   const [adding, setAdding] = useState(false);
+  const [hintingId, setHintingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [recordingWordId, setRecordingWordId] = useState<string | null>(null);
@@ -96,7 +102,9 @@ export function LithuanianTrainerView({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setWords(await api.lithuanianWords());
+      const practice = await api.lithuanianPractice();
+      setWords(practice.words);
+      setPassMark(practice.passMark);
       setError("");
     } catch (reason) {
       setError(errorText(reason, "The word list could not be loaded"));
@@ -131,17 +139,34 @@ export function LithuanianTrainerView({
     setAdding(true);
     setError("");
     try {
-      const created = await api.createLithuanianWord({ lithuanian: nextLithuanian, english: nextEnglish });
+      const created = await api.createLithuanianWord({
+        lithuanian: nextLithuanian,
+        english: nextEnglish,
+        kind
+      });
       setWords((current) => [created, ...current]);
       setLithuanian("");
       setEnglish("");
       announce(practice.dueToday
-        ? `${created.lithuanian} added. Today's word is done.`
+        ? `${created.lithuanian} added. Today's ${kind} is done.`
         : `${created.lithuanian} added.`);
     } catch (reason) {
-      setError(errorText(reason, "The word could not be added"));
+      setError(errorText(reason, `The ${kind} could not be added`));
     } finally {
       setAdding(false);
+    }
+  };
+
+  const regenerateHints = async (word: LithuanianWord) => {
+    setHintingId(word.id);
+    setError("");
+    try {
+      const updated = await api.refreshLithuanianHints(word.id);
+      setWords((current) => current.map((item) => item.id === word.id ? updated : item));
+    } catch (reason) {
+      setError(errorText(reason, "The word-by-word hints could not be built"));
+    } finally {
+      setHintingId(null);
     }
   };
 
@@ -181,7 +206,7 @@ export function LithuanianTrainerView({
           ? `Saved. This browser could not check the pronunciation.`
           : saved.passed
             ? `${saved.score}% — pass. Nice, ${word.lithuanian} sounded right.`
-            : `${saved.score}% — keep practising ${word.lithuanian}. ${LITHUANIAN_PASS_MARK}% passes.`);
+            : `${saved.score}% — keep practising ${word.lithuanian}. ${passMark}% passes.`);
       } catch (reason) {
         setError(errorText(reason, "The recording could not be saved"));
       } finally {
@@ -294,15 +319,33 @@ export function LithuanianTrainerView({
         )}
 
         <form className="trainer-add" onSubmit={(event) => void addWord(event)}>
-          <h2>Add a word</h2>
+          <h2>Add {kind === "word" ? "a word" : "a phrase"}</h2>
+          <div className="trainer-kind" role="group" aria-label="What to add">
+            <button
+              type="button"
+              className={kind === "word" ? "selected" : ""}
+              onClick={() => setKind("word")}
+              aria-pressed={kind === "word"}
+            >
+              Single word
+            </button>
+            <button
+              type="button"
+              className={kind === "phrase" ? "selected" : ""}
+              onClick={() => setKind("phrase")}
+              aria-pressed={kind === "phrase"}
+            >
+              Phrase
+            </button>
+          </div>
           <div className="trainer-add-fields">
             <label>
               Lithuanian
               <input
                 value={lithuanian}
                 onChange={(event) => setLithuanian(event.target.value)}
-                placeholder="labas"
-                maxLength={64}
+                placeholder={kind === "word" ? "labas" : "labas rytas"}
+                maxLength={kind === "word" ? 64 : 200}
                 autoComplete="off"
                 spellCheck={false}
                 required
@@ -314,8 +357,8 @@ export function LithuanianTrainerView({
               <input
                 value={english}
                 onChange={(event) => setEnglish(event.target.value)}
-                placeholder="hello"
-                maxLength={64}
+                placeholder={kind === "word" ? "hello" : "good morning"}
+                maxLength={kind === "word" ? 64 : 200}
                 autoComplete="off"
                 spellCheck={false}
                 required
@@ -328,7 +371,11 @@ export function LithuanianTrainerView({
               {adding ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Add
             </button>
           </div>
-          <small>One word on each side. The English word is the meaning — only Lithuanian is practised.</small>
+          <small>
+            {kind === "word"
+              ? "One word on each side. The English side is the meaning — only Lithuanian is practised."
+              : `Up to ${LITHUANIAN_MAX_PHRASE_WORDS} words. Every Lithuanian word gets its own hint so the phrase is not one long block.`}
+          </small>
         </form>
 
         {!speechSupported && (
@@ -374,9 +421,10 @@ export function LithuanianTrainerView({
                     <time className="trainer-card-date" dateTime={word.createdAt}>
                       <CalendarDays size={14} /> Added {formatDate(word.createdAt)}
                     </time>
+                    {word.kind === "phrase" && <span className="trainer-kind-tag">Phrase</span>}
                     {best !== null && (
-                      <span className={`trainer-best ${best >= LITHUANIAN_PASS_MARK ? "pass" : "fail"}`}>
-                        {best >= LITHUANIAN_PASS_MARK ? <CircleCheck size={14} /> : <CircleAlert size={14} />}
+                      <span className={`trainer-best ${best >= passMark ? "pass" : "fail"}`}>
+                        {best >= passMark ? <CircleCheck size={14} /> : <CircleAlert size={14} />}
                         Best {best}%
                       </span>
                     )}
@@ -417,6 +465,42 @@ export function LithuanianTrainerView({
                   </div>
 
                   <p className="trainer-meaning"><span>Means</span> {word.english}</p>
+
+                  {word.kind === "phrase" && (
+                    word.hints.length > 0 ? (
+                      <ul className="trainer-hints">
+                        {word.hints.map((hint, index) => (
+                          <li key={`${hint.word}-${index}`}>
+                            <button
+                              type="button"
+                              className="trainer-hint-word"
+                              onClick={() => pronounce(hint.word)}
+                              disabled={!speechSupported || isRecording}
+                              aria-label={`Listen to ${hint.word} on its own`}
+                            >
+                              <Volume2 size={14} />
+                              <span lang={LITHUANIAN_LOCALE}>{hint.word}</span>
+                            </button>
+                            <div className="trainer-hint-text">
+                              <strong>{hint.meaning}</strong>
+                              {hint.tip && <span>{hint.tip}</span>}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <button
+                        type="button"
+                        className="text-button trainer-hint-build"
+                        onClick={() => void regenerateHints(word)}
+                        disabled={hintingId === word.id}
+                      >
+                        {hintingId === word.id
+                          ? <><LoaderCircle className="spin" size={15} /> Building hints</>
+                          : <><Lightbulb size={15} /> Explain word by word</>}
+                      </button>
+                    )
+                  )}
 
                   {word.recordings.length > 0 && (
                     <ul className="trainer-takes">

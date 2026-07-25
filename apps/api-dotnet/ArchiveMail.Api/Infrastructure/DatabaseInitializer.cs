@@ -119,10 +119,17 @@ public sealed class DatabaseInitializer(
           owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           lithuanian TEXT NOT NULL,
           english TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'word' CHECK(kind IN ('word', 'phrase')),
+          hints_json TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS lithuanian_words_owner_idx ON lithuanian_words(owner_user_id, created_at DESC);
+        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'word';
+        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS hints_json TEXT;
+        ALTER TABLE lithuanian_words DROP CONSTRAINT IF EXISTS lithuanian_words_kind_check;
+        ALTER TABLE lithuanian_words ADD CONSTRAINT lithuanian_words_kind_check
+          CHECK(kind IN ('word', 'phrase'));
         CREATE UNIQUE INDEX IF NOT EXISTS lithuanian_words_owner_pair_unique
           ON lithuanian_words (owner_user_id, lower(lithuanian), lower(english));
 

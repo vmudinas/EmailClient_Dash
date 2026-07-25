@@ -155,7 +155,9 @@ describe("SettingsDialog", () => {
 
     await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
       apiKey: "sk-test-key",
-      model: "gpt-4o-transcribe"
+      model: "gpt-4o-transcribe",
+      hintModel: "gpt-5-mini",
+      passMark: 85
     }));
     // Cleared from the form so it is never re-submitted or left on screen.
     expect((screen.getByLabelText("OpenAI API key") as HTMLInputElement).value).toBe("");
@@ -178,7 +180,38 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: /Save/ }));
 
     // An empty apiKey field must not wipe the stored key.
-    await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({ model: "whisper-1" }));
+    await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
+      model: "whisper-1",
+      hintModel: "gpt-5-mini",
+      passMark: 85
+    }));
+  });
+
+  it("lets an administrator move the pass mark and refuses one out of range", async () => {
+    const updateLithuanianSettings = vi.fn().mockResolvedValue(SETTINGS);
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      updateLithuanianSettings
+    } as unknown as ApiClient;
+
+    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Lithuanian" }));
+
+    // The input's own min/max stops an out-of-range mark from ever reaching the server; the
+    // handler's range check behind it is the backstop, and the server clamps regardless.
+    fireEvent.change(screen.getByLabelText("Pass mark (%)"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(updateLithuanianSettings).not.toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("Pass mark (%)"), { target: { value: "60" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+
+    await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
+      model: "gpt-4o-transcribe",
+      hintModel: "gpt-5-mini",
+      passMark: 60
+    }));
   });
 
   it("configures the default draft sender and placeholder name", async () => {
@@ -1743,6 +1776,12 @@ const SETTINGS: AdminSettings = {
     source: "none",
     model: "gpt-4o-transcribe",
     defaultModel: "gpt-4o-transcribe",
+    hintModel: "gpt-5-mini",
+    defaultHintModel: "gpt-5-mini",
+    passMark: 85,
+    defaultPassMark: 85,
+    minimumPassMark: 50,
+    maximumPassMark: 100,
     learnerCount: 1,
     settingsPath: "/tmp/app-settings.protected.json",
     configurationError: null

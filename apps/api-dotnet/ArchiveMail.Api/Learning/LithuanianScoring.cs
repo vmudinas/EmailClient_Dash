@@ -14,10 +14,7 @@ namespace ArchiveMail.Api.Learning;
 /// </summary>
 internal static class LithuanianScoring
 {
-    /// <summary>A take at or above this percentage passes. Mirrored by LITHUANIAN_PASS_MARK.</summary>
-    internal const int PassMark = 85;
-
-    internal const int MaxTranscriptLength = 200;
+    internal const int MaxTranscriptLength = 400;
 
     /// <summary>
     /// Percentage match between what was heard and the target word, or null when there is no
@@ -33,12 +30,16 @@ internal static class LithuanianScoring
         return (int)Math.Round(100.0 * (longest - distance) / longest, MidpointRounding.AwayFromZero);
     }
 
-    internal static bool Passed(int score) => score >= PassMark;
+    internal static bool Passed(int score, int passMark) => score >= passMark;
 
     /// <summary>
-    /// Lowercases, drops everything that is not a letter or digit, and folds Lithuanian
-    /// diacritics. Recognizers are inconsistent about ą/č/ę/ė/į/š/ų/ū/ž, and the learner is being
-    /// judged on the sounds produced rather than on the recognizer's spelling.
+    /// Lowercases, drops everything that is not a letter, digit, or a single separating space, and
+    /// folds Lithuanian diacritics. Recognizers are inconsistent about ą/č/ę/ė/į/š/ų/ū/ž, and the
+    /// learner is being judged on the sounds produced rather than on the recognizer's spelling.
+    ///
+    /// Spaces are kept as separators so a phrase is compared word for word: without them
+    /// "labas rytas" and "labasrytas" would be identical, and a run-together attempt would score
+    /// as a perfect one.
     /// </summary>
     internal static string Fold(string? value)
     {
@@ -49,8 +50,10 @@ internal static class LithuanianScoring
         {
             if (CharUnicodeInfo.GetUnicodeCategory(character) == UnicodeCategory.NonSpacingMark) continue;
             if (char.IsLetterOrDigit(character)) folded.Append(character);
+            // Collapse any run of whitespace or punctuation between words into one space.
+            else if (folded.Length > 0 && folded[^1] != ' ') folded.Append(' ');
         }
-        return folded.ToString().Normalize(NormalizationForm.FormC);
+        return folded.ToString().TrimEnd().Normalize(NormalizationForm.FormC);
     }
 
     internal static string NormalizeTranscript(string? value)

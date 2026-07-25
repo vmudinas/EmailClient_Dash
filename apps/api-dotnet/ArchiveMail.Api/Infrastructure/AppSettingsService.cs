@@ -28,7 +28,9 @@ public sealed record AiRuntimeSettings(
 /// </summary>
 public sealed record LithuanianRuntimeSettings(
     string ApiKey = "",
-    string Model = LithuanianDefaults.TranscriptionModel);
+    string Model = LithuanianDefaults.TranscriptionModel,
+    string HintModel = LithuanianDefaults.HintModel,
+    int PassMark = LithuanianDefaults.PassMark);
 
 public sealed record PropertyIntegrationRuntimeSettings(
     string StripeSecretKey="",string StripeWebhookSecret="",string PaypalClientId="",string PaypalClientSecret="",
@@ -257,7 +259,12 @@ public sealed class AppSettingsService
             _settings = _settings with { Lithuanian = current with
             {
                 ApiKey = Boolean(input, "clearApiKey") == true ? "" : String(input, "apiKey") ?? current.ApiKey,
-                Model = String(input, "model") is { Length: > 0 } model ? model.Trim() : current.Model
+                Model = String(input, "model") is { Length: > 0 } model ? model.Trim() : current.Model,
+                HintModel = String(input, "hintModel") is { Length: > 0 } hintModel ? hintModel.Trim() : current.HintModel,
+                PassMark = Math.Clamp(
+                    Integer(input, "passMark") ?? current.PassMark,
+                    LithuanianDefaults.MinimumPassMark,
+                    LithuanianDefaults.MaximumPassMark)
             }};
             Save();
             return WithEnvironment(_settings);
@@ -399,7 +406,15 @@ public sealed class AppSettingsService
                 : source.LithuanianValue.ApiKey,
             Model = source.LithuanianValue.Model is { Length: > 0 } lithuanianModel
                 ? lithuanianModel
-                : LithuanianDefaults.TranscriptionModel
+                : LithuanianDefaults.TranscriptionModel,
+            HintModel = source.LithuanianValue.HintModel is { Length: > 0 } hintModel
+                ? hintModel
+                : LithuanianDefaults.HintModel,
+            // A settings file written before the pass mark existed deserialises it as 0, which
+            // would pass every take.
+            PassMark = source.LithuanianValue.PassMark < LithuanianDefaults.MinimumPassMark
+                ? LithuanianDefaults.PassMark
+                : Math.Min(source.LithuanianValue.PassMark, LithuanianDefaults.MaximumPassMark)
         };
         return source with { Gmail = gmail, Ai = ai, PropertyIntegrations = property, Lithuanian = lithuanian };
     }

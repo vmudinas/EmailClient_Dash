@@ -1222,8 +1222,24 @@ export interface AuthSessionInfo {
  */
 export const LITHUANIAN_LOCALE = "lt-LT";
 
-/** A take scoring at or above this percentage passes. */
+/** Default percentage a take must reach to pass. Adjustable per installation in Admin settings. */
 export const LITHUANIAN_PASS_MARK = 85;
+export const LITHUANIAN_MIN_PASS_MARK = 50;
+export const LITHUANIAN_MAX_PASS_MARK = 100;
+
+/** Whether the learner is practising one word or a phrase for context. */
+export type LithuanianEntryKind = "word" | "phrase";
+
+export const LITHUANIAN_MAX_PHRASE_WORDS = 12;
+export const LITHUANIAN_MAX_PHRASE_LENGTH = 200;
+export const LITHUANIAN_MAX_WORD_LENGTH = 64;
+
+/** One word of a phrase, explained. Empty for single-word entries. */
+export interface LithuanianHint {
+  word: string;
+  meaning: string;
+  tip: string;
+}
 
 /** One word a day is the practice target. */
 export const LITHUANIAN_DAILY_WORD_GOAL = 1;
@@ -1248,9 +1264,18 @@ export interface LithuanianWord {
   id: string;
   lithuanian: string;
   english: string;
+  kind: LithuanianEntryKind;
   createdAt: string;
+  /** Word-by-word breakdown of a phrase; always empty for a single word. */
+  hints: LithuanianHint[];
   /** Newest first. */
   recordings: LithuanianRecording[];
+}
+
+export interface LithuanianPractice {
+  /** The mark in force right now, which an administrator can change. */
+  passMark: number;
+  words: LithuanianWord[];
 }
 
 export interface AuthLoginResult {
@@ -1375,6 +1400,12 @@ export interface AdminSettings {
     source: "none" | "admin" | "environment";
     model: string;
     defaultModel: string;
+    hintModel: string;
+    defaultHintModel: string;
+    passMark: number;
+    defaultPassMark: number;
+    minimumPassMark: number;
+    maximumPassMark: number;
     /** How many accounts currently use the trainer. */
     learnerCount: number;
     settingsPath: string;
@@ -2494,21 +2525,50 @@ export const userUpdateSchema = z.object({
 
 export type UserUpdate = z.infer<typeof userUpdateSchema>;
 
-// One word on each side keeps the practice card readable and the pronunciation unambiguous.
-const singleWordSchema = z.string().trim().min(1).max(64)
-  .refine((value) => !/\s/.test(value), "Enter a single word without spaces");
+// A single word rejects spaces so the card stays readable and the pronunciation unambiguous. A
+// phrase is allowed when the learner wants context, bounded by word count as well as length.
+const entrySchema = z.string().trim().min(1).max(LITHUANIAN_MAX_PHRASE_LENGTH);
 
 export const lithuanianWordCreateSchema = z.object({
-  lithuanian: singleWordSchema,
-  english: singleWordSchema
-}).strict();
+  lithuanian: entrySchema,
+  english: entrySchema,
+  kind: z.enum(["word", "phrase"]).default("word")
+}).strict().superRefine((value, context) => {
+  for (const side of ["lithuanian", "english"] as const) {
+    const entry = value[side].trim();
+    const words = entry.split(/\s+/).filter(Boolean);
+    if (value.kind === "word" && words.length > 1) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [side],
+        message: "Enter a single word, or switch to a phrase"
+      });
+    }
+    if (value.kind === "word" && entry.length > LITHUANIAN_MAX_WORD_LENGTH) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [side],
+        message: `Keep a single word to ${LITHUANIAN_MAX_WORD_LENGTH} characters`
+      });
+    }
+    if (value.kind === "phrase" && words.length > LITHUANIAN_MAX_PHRASE_WORDS) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [side],
+        message: `Keep a phrase to ${LITHUANIAN_MAX_PHRASE_WORDS} words or fewer`
+      });
+    }
+  }
+});
 
 export type LithuanianWordCreate = z.infer<typeof lithuanianWordCreateSchema>;
 
 export const lithuanianSettingsPatchSchema = z.object({
   apiKey: z.string().trim().min(1).max(500).optional(),
   clearApiKey: z.boolean().optional(),
-  model: z.string().trim().min(1).max(100).optional()
+  model: z.string().trim().min(1).max(100).optional(),
+  hintModel: z.string().trim().min(1).max(100).optional(),
+  passMark: z.number().int().min(LITHUANIAN_MIN_PASS_MARK).max(LITHUANIAN_MAX_PASS_MARK).optional()
 }).strict().refine(
   (value) => Object.keys(value).length > 0,
   "At least one trainer setting is required"
