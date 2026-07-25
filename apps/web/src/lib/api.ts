@@ -57,6 +57,8 @@ import type {
   InboxTabSettingsUpdate,
   LithuanianPractice,
   LithuanianRecording,
+  LithuanianGameInput,
+  LithuanianGameResult,
   LithuanianPhraseSuggestions,
   LithuanianSettingsPatch,
   LithuanianTranslateInput,
@@ -303,6 +305,10 @@ export class ApiClient {
       body: JSON.stringify({ english }),
       signal
     });
+  }
+
+  saveLithuanianGame(input: LithuanianGameInput): Promise<LithuanianGameResult> {
+    return this.request("/api/lithuanian/games", { method: "POST", body: JSON.stringify(input) });
   }
 
   lithuanianPronunciationBlob(wordId: string): Promise<Blob> {

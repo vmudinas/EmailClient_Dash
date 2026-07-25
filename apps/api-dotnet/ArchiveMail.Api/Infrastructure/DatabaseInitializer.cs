@@ -137,6 +137,18 @@ public sealed class DatabaseInitializer(
         CREATE UNIQUE INDEX IF NOT EXISTS lithuanian_words_owner_pair_unique
           ON lithuanian_words (owner_user_id, lower(lithuanian), lower(english));
 
+        -- One finished game. Only the numbers are kept: the questions were drawn from the words
+        -- table and are not worth replaying, but the best score is what the learner comes back for.
+        CREATE TABLE IF NOT EXISTS lithuanian_games (
+          id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          score BIGINT NOT NULL DEFAULT 0,
+          best_combo BIGINT NOT NULL DEFAULT 0,
+          played_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS lithuanian_games_owner_idx
+          ON lithuanian_games(owner_user_id, score DESC);
+
         CREATE TABLE IF NOT EXISTS lithuanian_recordings (
           id TEXT PRIMARY KEY,
           word_id TEXT NOT NULL REFERENCES lithuanian_words(id) ON DELETE CASCADE,

@@ -1300,7 +1300,21 @@ export interface LithuanianWord {
 export interface LithuanianPractice {
   /** The mark in force right now, which an administrator can change. */
   passMark: number;
+  /** The best game so far, or 0 before any has been played. */
+  bestScore: number;
   words: LithuanianWord[];
+}
+
+export interface LithuanianGameInput {
+  score: number;
+  bestCombo: number;
+}
+
+export interface LithuanianGameResult {
+  score: number;
+  bestScore: number;
+  /** Whether this game beat the previous best. */
+  record: boolean;
 }
 
 export interface LithuanianTranslateInput {

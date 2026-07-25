@@ -4,6 +4,7 @@ import {
   CircleAlert,
   CircleCheck,
   Flame,
+  Gamepad2,
   Languages,
   Lightbulb,
   LoaderCircle,
@@ -28,6 +29,7 @@ import type { ApiClient } from "../lib/api.js";
 import { formatDate, formatDateTime } from "../lib/format.js";
 import { daysSince, practiceStatus } from "../lib/practiceDays.js";
 import { spellOut, specialLetters } from "../lib/lithuanianLetters.js";
+import { LithuanianGameView } from "./LithuanianGameView.js";
 import {
   PronunciationRecorder,
   SILENT_CLIP,
@@ -98,6 +100,8 @@ export function LithuanianTrainerView({
 }) {
   const [words, setWords] = useState<LithuanianWord[]>([]);
   const [passMark, setPassMark] = useState(LITHUANIAN_PASS_MARK);
+  const [highScore, setHighScore] = useState(0);
+  const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [lithuanian, setLithuanian] = useState("");
   const [english, setEnglish] = useState("");
@@ -213,6 +217,7 @@ export function LithuanianTrainerView({
       const practice = await api.lithuanianPractice();
       setWords(practice.words);
       setPassMark(practice.passMark);
+      setHighScore(practice.bestScore);
       setError("");
     } catch (reason) {
       setError(errorText(reason, "The word list could not be loaded"));
@@ -453,6 +458,18 @@ export function LithuanianTrainerView({
     }
   };
 
+  if (playing) {
+    return (
+      <LithuanianGameView
+        api={api}
+        words={words}
+        bestScore={highScore}
+        onFinished={setHighScore}
+        onClose={() => setPlaying(false)}
+      />
+    );
+  }
+
   return (
     <main className="trainer-screen">
       <header className="trainer-topbar">
@@ -469,6 +486,17 @@ export function LithuanianTrainerView({
       </header>
 
       <div className="trainer-body">
+        {!loading && words.length > 0 && (
+          <section className="trainer-play">
+            <div>
+              <strong>Play a round</strong>
+              <span>{highScore > 0 ? `Best ${highScore}` : "No score yet — go and set one"}</span>
+            </div>
+            <button type="button" className="primary-button" onClick={() => setPlaying(true)}>
+              <Gamepad2 size={17} /> Play
+            </button>
+          </section>
+        )}
         {!loading && (
           <section className={`trainer-today ${practice.dueToday ? "due" : "done"}`} aria-live="polite">
             <div className="trainer-today-day">

@@ -120,7 +120,7 @@ function installRecorder() {
 
 function client(overrides: Partial<Record<keyof ApiClient, unknown>> = {}): ApiClient {
   return {
-    lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [word()] }),
+    lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, bestScore: 0, words: [word()] }),
     refreshLithuanianHints: vi.fn(),
     // No suggestion by default, which is what an installation without a trainer key returns.
     translateLithuanian: vi.fn().mockResolvedValue({ lithuanian: "" }),
@@ -258,7 +258,7 @@ describe("LithuanianTrainerView", () => {
   it("says a word is owed when none was added today, and shows the streak", async () => {
     render(
       <LithuanianTrainerView
-        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [word({ createdAt: YESTERDAY })] }) })}
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, bestScore: 0, words: [word({ createdAt: YESTERDAY })] }) })}
         displayName="Lucas"
         onSignOut={vi.fn()}
       />
@@ -279,7 +279,7 @@ describe("LithuanianTrainerView", () => {
     const stale = new Date(Date.now() - 5 * 86_400_000).toISOString();
     render(
       <LithuanianTrainerView
-        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [word({ createdAt: stale })] }) })}
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, bestScore: 0, words: [word({ createdAt: stale })] }) })}
         displayName="Lucas"
         onSignOut={vi.fn()}
       />
@@ -302,7 +302,7 @@ describe("LithuanianTrainerView", () => {
     });
     render(
       <LithuanianTrainerView
-        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [phrase] }) })}
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, bestScore: 0, words: [phrase] }) })}
         displayName="Lucas"
         onSignOut={vi.fn()}
       />
@@ -354,7 +354,7 @@ describe("LithuanianTrainerView", () => {
     render(
       <LithuanianTrainerView
         api={client({
-          lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [bare] }),
+          lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, bestScore: 0, words: [bare] }),
           refreshLithuanianHints
         })}
         displayName="Lucas"
@@ -386,7 +386,7 @@ describe("LithuanianTrainerView", () => {
     });
     render(
       <LithuanianTrainerView
-        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 60, words: [seventy] }) })}
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 60, bestScore: 0, words: [seventy] }) })}
         displayName="Lucas"
         onSignOut={vi.fn()}
       />
@@ -486,7 +486,7 @@ describe("LithuanianTrainerView", () => {
     render(
       <LithuanianTrainerView
         api={client({
-          lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [spoken] }),
+          lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, bestScore: 0, words: [spoken] }),
           lithuanianPronunciationBlob
         })}
         displayName="Lucas"

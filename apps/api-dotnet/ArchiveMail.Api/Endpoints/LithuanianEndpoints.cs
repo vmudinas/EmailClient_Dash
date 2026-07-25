@@ -26,6 +26,16 @@ public static class LithuanianEndpoints
             return Results.Ok(await repository.PracticeAsync(session.User.Id, token));
         }).WithName("GetLithuanianPractice").Produces<LithuanianPracticeDto>();
 
+        // A finished game. The score was counted in the browser, so it is clamped on the way in
+        // rather than taken at face value.
+        group.MapPost("/games", async (LithuanianGameRequest request, HttpContext context,
+            LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            return Results.Ok(await repository.SaveGameAsync(request, session.User.Id, token));
+        }).WithName("SaveLithuanianGame").Produces<LithuanianGameResultDto>();
+
         group.MapPost("/words/{wordId}/hints", async (string wordId, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
         {

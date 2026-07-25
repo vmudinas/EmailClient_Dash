@@ -10828,6 +10828,261 @@ textarea:focus-visible {
   text-transform: none;
 }
 
+.trainer-play {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.trainer-play strong {
+  display: block;
+  font-size: 14px;
+}
+
+.trainer-play span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trainer-play .primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* The game takes the whole screen: a countdown is hard to take seriously in a panel. */
+.game {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 100vh;
+  padding: 16px;
+  background: var(--surface);
+}
+
+.game-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.game-quit {
+  display: inline-flex;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.game-lives {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.game-life {
+  color: #d2544f;
+  fill: #d2544f;
+}
+
+.game-life-lost {
+  color: var(--line-strong);
+}
+
+.game-score {
+  margin-left: auto;
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.game-combo {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #f5e2c8;
+  color: #8a5a20;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.game-clock {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  overflow: hidden;
+}
+
+.game-clock span {
+  display: block;
+  height: 100%;
+  background: var(--accent, #4b7f52);
+  /* Matches the tick, so the bar slides instead of stepping. */
+  transition: width 100ms linear;
+}
+
+.game-clock.urgent span {
+  background: #d2544f;
+}
+
+.game-progress {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.game-question {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 12px;
+  text-align: center;
+}
+
+.game-ask {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.game-prompt {
+  font-size: clamp(28px, 8vw, 44px);
+  line-height: 1.15;
+}
+
+.game-listen {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.game-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.game-choice {
+  min-height: 64px;
+  padding: 12px;
+  border: 2px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.game-choice:disabled {
+  cursor: default;
+}
+
+.game-choice.right {
+  border-color: #3f8b4a;
+  background: #e7f3e6;
+  color: #24552b;
+}
+
+.game-choice.dimmed {
+  opacity: 0.45;
+}
+
+.game-spell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.game-spell input {
+  width: 100%;
+  height: 56px;
+  padding: 0 14px;
+  border: 2px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  text-align: center;
+  /* 16px or more keeps iOS Safari from zooming the page when the field takes focus. */
+  font-size: 20px;
+}
+
+.game-verdict {
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.game-verdict.right {
+  background: #e7f3e6;
+  color: #24552b;
+}
+
+.game-verdict.wrong {
+  background: #f7e3e2;
+  color: #7d2f2c;
+}
+
+.game-empty,
+.game-over {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.game-trophy-won {
+  color: #c8901f;
+}
+
+.game-final {
+  margin: 0;
+  font-size: 56px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.game-best,
+.game-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (min-width: 620px) {
+  .game {
+    max-width: 640px;
+    margin: 0 auto;
+  }
+}
+
 /* The letters Lithuanian has and English does not, marked inside the word itself. Underlined as
    well as coloured so the mark does not depend on colour alone. */
 .trainer-letter {

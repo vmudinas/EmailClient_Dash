@@ -34,7 +34,15 @@ public sealed record LithuanianWordDto(
 
 public sealed record LithuanianWordCreateRequest(string Lithuanian, string English, string? Kind);
 
-public sealed record LithuanianPracticeDto(int PassMark, IReadOnlyList<LithuanianWordDto> Words);
+public sealed record LithuanianPracticeDto(
+    int PassMark,
+    /// <summary>The best game so far, or 0 before any has been played.</summary>
+    int BestScore,
+    IReadOnlyList<LithuanianWordDto> Words);
+
+public sealed record LithuanianGameRequest(int Score, int BestCombo);
+
+public sealed record LithuanianGameResultDto(int Score, int BestScore, bool Record);
 
 /// <summary>
 /// Word pairs and pronunciation recordings for the Lithuanian practice screen. Only the
@@ -445,7 +453,52 @@ public sealed class LithuanianRepository(
     }
 
     public async Task<LithuanianPracticeDto> PracticeAsync(string owner, CancellationToken token) =>
-        new(PassMark, await ListAsync(owner, token));
+        new(PassMark, await BestScoreAsync(owner, token), await ListAsync(owner, token));
+
+    /// <summary>Highest score this learner has reached, or 0 before the first game.</summary>
+    public async Task<int> BestScoreAsync(string owner, CancellationToken token)
+    {
+        await using var command = database.CreateCommand(
+            "SELECT COALESCE(MAX(score), 0) FROM lithuanian_games WHERE owner_user_id = @owner");
+        command.Parameters.AddWithValue("owner", owner);
+        var best = await command.ExecuteScalarAsync(token);
+        return best is long value ? (int)Math.Clamp(value, 0, int.MaxValue) : 0;
+    }
+
+    /// <summary>
+    /// Records a finished game and says whether it beat the previous best. The score is clamped
+    /// rather than trusted: it arrives from the browser, where it was counted.
+    /// </summary>
+    public async Task<LithuanianGameResultDto> SaveGameAsync(
+        LithuanianGameRequest request,
+        string owner,
+        CancellationToken token)
+    {
+        var score = Math.Clamp(request.Score, 0, MaxGameScore);
+        var combo = Math.Clamp(request.BestCombo, 0, MaxGameCombo);
+        var previousBest = await BestScoreAsync(owner, token);
+
+        await using var command = database.CreateCommand("""
+            INSERT INTO lithuanian_games(id, owner_user_id, score, best_combo, played_at)
+            VALUES(@id, @owner, @score, @combo, @now)
+            """);
+        command.Parameters.AddWithValue("id", Guid.NewGuid().ToString());
+        command.Parameters.AddWithValue("owner", owner);
+        command.Parameters.AddWithValue("score", (long)score);
+        command.Parameters.AddWithValue("combo", (long)combo);
+        command.Parameters.AddWithValue("now", DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
+
+        return new LithuanianGameResultDto(score, Math.Max(previousBest, score), score > previousBest);
+    }
+
+    /// <summary>
+    /// Far above anything the rules can produce in one round, and low enough that a bad or
+    /// tampered-with number cannot become an unbeatable high score.
+    /// </summary>
+    internal const int MaxGameScore = 100_000;
+
+    internal const int MaxGameCombo = 1_000;
 
     private async Task<string> WordTextAsync(string wordId, string owner, CancellationToken token)
     {
