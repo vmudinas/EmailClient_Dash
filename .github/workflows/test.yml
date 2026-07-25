@@ -48,5 +48,11 @@ jobs:
       - name: Build shared package
         run: npm run build -w @email-client/shared
 
+      # The production build runs `tsc -b && vite build`, so a type error fails the image
+      # build on main while `vitest run` alone passes -- test files are executed by vitest
+      # but were never type-checked here. That gap let a type error reach main once already.
+      - name: Type-check frontend
+        run: npm run typecheck -w @email-client/web
+
       - name: Run frontend tests
         run: npm run test:run -w @email-client/web
