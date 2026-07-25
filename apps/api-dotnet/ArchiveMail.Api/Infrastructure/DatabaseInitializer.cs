@@ -127,11 +127,27 @@ public sealed class DatabaseInitializer(
         CREATE INDEX IF NOT EXISTS lithuanian_words_owner_idx ON lithuanian_words(owner_user_id, created_at DESC);
         ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'word';
         ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS hints_json TEXT;
+        -- The cached reference pronunciation. Null until one is generated, which is why every
+        -- read has to cope with its absence rather than assuming a file is there.
+        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS pronunciation_key TEXT;
+        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS pronunciation_type TEXT;
         ALTER TABLE lithuanian_words DROP CONSTRAINT IF EXISTS lithuanian_words_kind_check;
         ALTER TABLE lithuanian_words ADD CONSTRAINT lithuanian_words_kind_check
           CHECK(kind IN ('word', 'phrase'));
         CREATE UNIQUE INDEX IF NOT EXISTS lithuanian_words_owner_pair_unique
           ON lithuanian_words (owner_user_id, lower(lithuanian), lower(english));
+
+        -- One finished game. Only the numbers are kept: the questions were drawn from the words
+        -- table and are not worth replaying, but the best score is what the learner comes back for.
+        CREATE TABLE IF NOT EXISTS lithuanian_games (
+          id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          score BIGINT NOT NULL DEFAULT 0,
+          best_combo BIGINT NOT NULL DEFAULT 0,
+          played_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS lithuanian_games_owner_idx
+          ON lithuanian_games(owner_user_id, score DESC);
 
         CREATE TABLE IF NOT EXISTS lithuanian_recordings (
           id TEXT PRIMARY KEY,

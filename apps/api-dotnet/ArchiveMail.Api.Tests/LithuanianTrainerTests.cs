@@ -336,6 +336,63 @@ public sealed class LithuanianTrainerTests
     }
 
     [Fact]
+    public void PhraseSuggestionsAreBoundedAndDeduplicated()
+    {
+        var suggestions = LithuanianPhraseService.Parse(
+            """{"phrases":["good morning","Good Morning","morning coffee","every morning","one more","and another"]}""");
+
+        // Case-insensitive duplicates are one offer, and the list is capped so the row stays
+        // readable on a phone.
+        Assert.Equal(LithuanianDefaults.MaxPhraseSuggestions, suggestions.Phrases.Count);
+        Assert.Equal("good morning", suggestions.Phrases[0]);
+        Assert.Equal("morning coffee", suggestions.Phrases[1]);
+    }
+
+    [Fact]
+    public void PhraseSuggestionsDropWhatSavingWouldReject()
+    {
+        var tooManyWords = string.Join(' ', Enumerable.Range(0, LithuanianDefaults.MaxPhraseWords + 1)
+            .Select(index => $"w{index}"));
+
+        var suggestions = LithuanianPhraseService.Parse(
+            $$"""{"phrases":["{{tooManyWords}}","  good   morning  ",42,""]}""");
+
+        Assert.Single(suggestions.Phrases);
+        Assert.Equal("good morning", suggestions.Phrases[0]);
+    }
+
+    [Fact]
+    public void PhraseSuggestionsSurviveAMalformedReply()
+    {
+        Assert.Empty(LithuanianPhraseService.Parse("not json").Phrases);
+        Assert.Empty(LithuanianPhraseService.Parse(null).Phrases);
+        Assert.Empty(LithuanianPhraseService.Parse("""{"phrases":"nope"}""").Phrases);
+    }
+
+    [Fact]
+    public void SchemaAddsPronunciationAndGameStorage()
+    {
+        var schema = DatabaseInitializer.LearningSchemaSql;
+
+        // Both are added to an existing installation, so both have to be additive.
+        Assert.Contains(
+            "ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS pronunciation_key TEXT",
+            schema, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS lithuanian_games", schema, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    // The score is counted in the browser, so it is clamped rather than trusted.
+    [InlineData(0, 0)]
+    [InlineData(-500, 0)]
+    [InlineData(1_500, 1_500)]
+    [InlineData(int.MaxValue, LithuanianRepository.MaxGameScore)]
+    public void GameScoresAreClampedIntoRange(int submitted, int expected)
+    {
+        Assert.Equal(expected, Math.Clamp(submitted, 0, LithuanianRepository.MaxGameScore));
+    }
+
+    [Fact]
     public void CapsAnOverlongTranscriptInsteadOfStoringIt()
     {
         var transcript = LithuanianScoring.NormalizeTranscript(new string('a', 500));

@@ -34,6 +34,26 @@ public static class LithuanianDefaults
     public const string ChatEndpoint = "https://api.openai.com/v1/chat/completions";
 
     /// <summary>
+    /// Reads a word aloud on the server so every device hears the same thing. A browser only
+    /// speaks Lithuanian if the device happens to have a Lithuanian voice installed, and without
+    /// one it reads the word with an English voice -- which teaches the wrong sounds. Generated
+    /// once per word and cached, so this costs one call per word ever.
+    /// </summary>
+    public const string SpeechEndpoint = "https://api.openai.com/v1/audio/speech";
+
+    /// <summary>
+    /// Overridable from Admin settings, like the other models: how good any given voice is at
+    /// Lithuanian is a question for the ear, not something to settle in a deploy.
+    /// </summary>
+    public const string SpeechModel = "gpt-4o-mini-tts";
+
+    public const string SpeechVoice = "alloy";
+
+    public const string SpeechContentType = "audio/mpeg";
+
+    public const string SpeechExtension = ".mp3";
+
+    /// <summary>
     /// Percentage a take must reach to pass. Adjustable per installation, because how strict this
     /// should be depends on the learner -- an eight-year-old's first weeks are not the same bar as
     /// a fluent speaker polishing an accent.
@@ -42,6 +62,12 @@ public static class LithuanianDefaults
 
     public const int MinimumPassMark = 50;
     public const int MaximumPassMark = 100;
+
+    /// <summary>
+    /// How many phrases are offered around the word being typed. Four fits on one row on a phone
+    /// and is few enough to read without the offer becoming a decision of its own.
+    /// </summary>
+    public const int MaxPhraseSuggestions = 4;
 
     /// <summary>Longest phrase accepted, in characters and in words.</summary>
     public const int MaxPhraseLength = 200;

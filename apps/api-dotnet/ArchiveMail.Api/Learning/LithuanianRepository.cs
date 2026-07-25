@@ -25,11 +25,24 @@ public sealed record LithuanianWordDto(
     string CreatedAt,
     /// <summary>Per-word breakdown of a phrase. Always empty for a single word.</summary>
     IReadOnlyList<LithuanianHint> Hints,
+    /// <summary>
+    /// Whether a reference pronunciation has been generated. False falls the screen back to the
+    /// browser's own voice, which is only right on a device with a Lithuanian voice installed.
+    /// </summary>
+    bool HasPronunciation,
     IReadOnlyList<LithuanianRecordingDto> Recordings);
 
 public sealed record LithuanianWordCreateRequest(string Lithuanian, string English, string? Kind);
 
-public sealed record LithuanianPracticeDto(int PassMark, IReadOnlyList<LithuanianWordDto> Words);
+public sealed record LithuanianPracticeDto(
+    int PassMark,
+    /// <summary>The best game so far, or 0 before any has been played.</summary>
+    int BestScore,
+    IReadOnlyList<LithuanianWordDto> Words);
+
+public sealed record LithuanianGameRequest(int Score, int BestCombo);
+
+public sealed record LithuanianGameResultDto(int Score, int BestScore, bool Record);
 
 /// <summary>
 /// Word pairs and pronunciation recordings for the Lithuanian practice screen. Only the
@@ -43,7 +56,8 @@ public sealed class LithuanianRepository(
     ActiveDatabaseConfiguration active,
     AppSettingsService settings,
     LithuanianTranscriptionService transcription,
-    LithuanianHintService hints)
+    LithuanianHintService hints,
+    LithuanianSpeechService speech)
 {
     private static readonly JsonSerializerOptions HintJson = new(JsonSerializerDefaults.Web);
 
@@ -51,6 +65,9 @@ public sealed class LithuanianRepository(
 
     internal const long MaxRecordingBytes = 8 * 1024 * 1024;
     internal const string StorageFolder = "lithuanian-recordings";
+
+    /// <summary>Kept apart from the learner's own takes: one is generated, the other is his.</summary>
+    internal const string SpeechFolder = "lithuanian-speech";
 
     // Browsers pick their own container: Chrome and Firefox record WebM/Opus, Safari records
     // MP4 or a raw Core Audio stream. Anything outside this list is rejected rather than stored
@@ -72,7 +89,8 @@ public sealed class LithuanianRepository(
         var passMark = PassMark;
         const string sql = """
             SELECT w.id, w.lithuanian, w.english, w.kind, w.hints_json, w.created_at,
-                   r.id, r.content_type, r.size_bytes, r.duration_ms, r.transcript, r.score, r.recorded_at
+                   r.id, r.content_type, r.size_bytes, r.duration_ms, r.transcript, r.score, r.recorded_at,
+                   w.pronunciation_key
             FROM lithuanian_words w
             LEFT JOIN lithuanian_recordings r ON r.word_id = w.id
             WHERE w.owner_user_id = @owner
@@ -82,7 +100,7 @@ public sealed class LithuanianRepository(
         command.Parameters.AddWithValue("owner", owner);
         await using var reader = await command.ExecuteReaderAsync(token);
         var order = new List<string>();
-        var words = new Dictionary<string, (string Lithuanian, string English, string Kind, IReadOnlyList<LithuanianHint> Hints, string CreatedAt, List<LithuanianRecordingDto> Recordings)>();
+        var words = new Dictionary<string, (string Lithuanian, string English, string Kind, IReadOnlyList<LithuanianHint> Hints, string CreatedAt, bool Spoken, List<LithuanianRecordingDto> Recordings)>();
         while (await reader.ReadAsync(token))
         {
             var wordId = reader.GetString(0);
@@ -91,7 +109,7 @@ public sealed class LithuanianRepository(
                 word = (
                     reader.GetString(1), reader.GetString(2), reader.GetString(3),
                     ParseHints(reader.IsDBNull(4) ? null : reader.GetString(4)),
-                    reader.GetString(5), []);
+                    reader.GetString(5), !reader.IsDBNull(13), []);
                 words[wordId] = word;
                 order.Add(wordId);
             }
@@ -106,7 +124,7 @@ public sealed class LithuanianRepository(
         return order
             .Select(id => new LithuanianWordDto(
                 id, words[id].Lithuanian, words[id].English, words[id].Kind,
-                words[id].CreatedAt, words[id].Hints, words[id].Recordings))
+                words[id].CreatedAt, words[id].Hints, words[id].Spoken, words[id].Recordings))
             .ToArray();
     }
 
@@ -134,10 +152,14 @@ public sealed class LithuanianRepository(
 
         var id = Guid.NewGuid().ToString();
         var now = DateTimeOffset.UtcNow.ToString("O");
+        // Said aloud once and kept, so every device plays the same reference rather than whatever
+        // voice it happens to have. Best effort for the same reason as the hints.
+        var spokenKey = await StoreSpeechAsync(id, lithuanian, token);
         const string sql = """
             INSERT INTO lithuanian_words(
-              id, owner_user_id, lithuanian, english, kind, hints_json, created_at, updated_at)
-            VALUES(@id, @owner, @lithuanian, @english, @kind, @hints, @now, @now)
+              id, owner_user_id, lithuanian, english, kind, hints_json,
+              pronunciation_key, pronunciation_type, created_at, updated_at)
+            VALUES(@id, @owner, @lithuanian, @english, @kind, @hints, @speech, @speechType, @now, @now)
             """;
         await using var command = database.CreateCommand(sql);
         command.Parameters.AddWithValue("id", id);
@@ -148,11 +170,124 @@ public sealed class LithuanianRepository(
         AddNullable(command, "hints",
             breakdown.Count == 0 ? null : JsonSerializer.Serialize(breakdown, HintJson),
             NpgsqlTypes.NpgsqlDbType.Text);
+        AddNullable(command, "speech", spokenKey, NpgsqlTypes.NpgsqlDbType.Text);
+        AddNullable(command, "speechType",
+            spokenKey is null ? null : LithuanianDefaults.SpeechContentType,
+            NpgsqlTypes.NpgsqlDbType.Text);
         command.Parameters.AddWithValue("now", now);
         try { await command.ExecuteNonQueryAsync(token); }
         catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation)
-        { throw new ArgumentException($"That {kind} is already on the list"); }
-        return new LithuanianWordDto(id, lithuanian, english, kind, now, breakdown, []);
+        {
+            DeleteSpeech(spokenKey);
+            throw new ArgumentException($"That {kind} is already on the list");
+        }
+        catch
+        {
+            DeleteSpeech(spokenKey);
+            throw;
+        }
+        return new LithuanianWordDto(id, lithuanian, english, kind, now, breakdown, spokenKey is not null, []);
+    }
+
+    /// <summary>
+    /// Writes the generated audio beside the learner's recordings and returns its storage key, or
+    /// null when none could be produced -- which is not an error: the screen falls back to the
+    /// browser's own voice.
+    /// </summary>
+    private async Task<string?> StoreSpeechAsync(string wordId, string lithuanian, CancellationToken token)
+    {
+        var audio = await speech.GenerateAsync(lithuanian, token);
+        if (audio is null) return null;
+        var directory = Path.Combine(active.DataDirectory, SpeechFolder);
+        Directory.CreateDirectory(directory);
+        var key = $"{SpeechFolder}/{wordId}{LithuanianDefaults.SpeechExtension}";
+        var path = Path.Combine(active.DataDirectory, key);
+        try
+        {
+            await File.WriteAllBytesAsync(path, audio, token);
+            return key;
+        }
+        catch (Exception)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return null;
+        }
+    }
+
+    private void DeleteSpeech(string? key)
+    {
+        if (key is null) return;
+        var path = Path.Combine(active.DataDirectory, key);
+        if (File.Exists(path)) File.Delete(path);
+    }
+
+    /// <summary>The cached reference pronunciation for a word.</summary>
+    public async Task<(string Path, string ContentType)> PronunciationContentAsync(
+        string wordId,
+        string owner,
+        CancellationToken token)
+    {
+        const string sql = """
+            SELECT pronunciation_key, pronunciation_type FROM lithuanian_words
+            WHERE id = @id AND owner_user_id = @owner
+            """;
+        await using var command = database.CreateCommand(sql);
+        command.Parameters.AddWithValue("id", wordId);
+        command.Parameters.AddWithValue("owner", owner);
+        await using var reader = await command.ExecuteReaderAsync(token);
+        if (!await reader.ReadAsync(token)) throw new MailNotFoundException("Word not found");
+        if (reader.IsDBNull(0)) throw new MailNotFoundException("This word has no spoken version yet");
+        var path = Path.Combine(active.DataDirectory, reader.GetString(0));
+        if (!File.Exists(path)) throw new MailNotFoundException("The spoken version is missing");
+        return (path, reader.IsDBNull(1) ? LithuanianDefaults.SpeechContentType : reader.GetString(1));
+    }
+
+    /// <summary>
+    /// Says a word again, for one added before a key was configured or when the voice has since
+    /// been changed in Admin settings.
+    /// </summary>
+    public async Task<LithuanianWordDto> RefreshPronunciationAsync(
+        string wordId,
+        string owner,
+        CancellationToken token)
+    {
+        const string selectSql = """
+            SELECT lithuanian, pronunciation_key FROM lithuanian_words
+            WHERE id = @id AND owner_user_id = @owner
+            """;
+        await using var select = database.CreateCommand(selectSql);
+        select.Parameters.AddWithValue("id", wordId);
+        select.Parameters.AddWithValue("owner", owner);
+        string lithuanian;
+        string? previous;
+        await using (var reader = await select.ExecuteReaderAsync(token))
+        {
+            if (!await reader.ReadAsync(token)) throw new MailNotFoundException("Word not found");
+            lithuanian = reader.GetString(0);
+            previous = reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+
+        var key = await StoreSpeechAsync(wordId, lithuanian, token);
+        if (key is null)
+            throw new ArgumentException(
+                "The spoken version is unavailable. Check the Lithuanian trainer key in Admin settings.");
+
+        await using var update = database.CreateCommand("""
+            UPDATE lithuanian_words
+            SET pronunciation_key = @key, pronunciation_type = @type, updated_at = @now
+            WHERE id = @id AND owner_user_id = @owner
+            """);
+        update.Parameters.AddWithValue("key", key);
+        update.Parameters.AddWithValue("type", LithuanianDefaults.SpeechContentType);
+        update.Parameters.AddWithValue("now", DateTimeOffset.UtcNow.ToString("O"));
+        update.Parameters.AddWithValue("id", wordId);
+        update.Parameters.AddWithValue("owner", owner);
+        await update.ExecuteNonQueryAsync(token);
+
+        // Only once the row points at the new file, and only when the name actually changed.
+        if (previous is not null && previous != key) DeleteSpeech(previous);
+
+        return (await ListAsync(owner, token)).First(word => word.Id == wordId);
     }
 
     /// <summary>
@@ -198,12 +333,17 @@ public sealed class LithuanianRepository(
         var keys = await StorageKeysAsync(
             "SELECT storage_key FROM lithuanian_recordings WHERE word_id = @id AND owner_user_id = @owner",
             wordId, owner, token);
+        // The generated audio goes with the word, or it would outlive the row that names it.
+        var spoken = await StorageKeysAsync(
+            "SELECT pronunciation_key FROM lithuanian_words WHERE id = @id AND owner_user_id = @owner",
+            wordId, owner, token);
         await using var command = database.CreateCommand(
             "DELETE FROM lithuanian_words WHERE id = @id AND owner_user_id = @owner");
         command.Parameters.AddWithValue("id", wordId);
         command.Parameters.AddWithValue("owner", owner);
         if (await command.ExecuteNonQueryAsync(token) == 0) throw new MailNotFoundException("Word not found");
         foreach (var key in keys) await DeleteUnreferencedFileAsync(key, token);
+        foreach (var key in spoken) DeleteSpeech(key);
     }
 
     public async Task<LithuanianRecordingDto> SaveRecordingAsync(
@@ -313,7 +453,52 @@ public sealed class LithuanianRepository(
     }
 
     public async Task<LithuanianPracticeDto> PracticeAsync(string owner, CancellationToken token) =>
-        new(PassMark, await ListAsync(owner, token));
+        new(PassMark, await BestScoreAsync(owner, token), await ListAsync(owner, token));
+
+    /// <summary>Highest score this learner has reached, or 0 before the first game.</summary>
+    public async Task<int> BestScoreAsync(string owner, CancellationToken token)
+    {
+        await using var command = database.CreateCommand(
+            "SELECT COALESCE(MAX(score), 0) FROM lithuanian_games WHERE owner_user_id = @owner");
+        command.Parameters.AddWithValue("owner", owner);
+        var best = await command.ExecuteScalarAsync(token);
+        return best is long value ? (int)Math.Clamp(value, 0, int.MaxValue) : 0;
+    }
+
+    /// <summary>
+    /// Records a finished game and says whether it beat the previous best. The score is clamped
+    /// rather than trusted: it arrives from the browser, where it was counted.
+    /// </summary>
+    public async Task<LithuanianGameResultDto> SaveGameAsync(
+        LithuanianGameRequest request,
+        string owner,
+        CancellationToken token)
+    {
+        var score = Math.Clamp(request.Score, 0, MaxGameScore);
+        var combo = Math.Clamp(request.BestCombo, 0, MaxGameCombo);
+        var previousBest = await BestScoreAsync(owner, token);
+
+        await using var command = database.CreateCommand("""
+            INSERT INTO lithuanian_games(id, owner_user_id, score, best_combo, played_at)
+            VALUES(@id, @owner, @score, @combo, @now)
+            """);
+        command.Parameters.AddWithValue("id", Guid.NewGuid().ToString());
+        command.Parameters.AddWithValue("owner", owner);
+        command.Parameters.AddWithValue("score", (long)score);
+        command.Parameters.AddWithValue("combo", (long)combo);
+        command.Parameters.AddWithValue("now", DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
+
+        return new LithuanianGameResultDto(score, Math.Max(previousBest, score), score > previousBest);
+    }
+
+    /// <summary>
+    /// Far above anything the rules can produce in one round, and low enough that a bad or
+    /// tampered-with number cannot become an unbeatable high score.
+    /// </summary>
+    internal const int MaxGameScore = 100_000;
+
+    internal const int MaxGameCombo = 1_000;
 
     private async Task<string> WordTextAsync(string wordId, string owner, CancellationToken token)
     {
@@ -344,7 +529,10 @@ public sealed class LithuanianRepository(
         command.Parameters.AddWithValue("owner", owner);
         await using var reader = await command.ExecuteReaderAsync(token);
         var keys = new List<string>();
-        while (await reader.ReadAsync(token)) keys.Add(reader.GetString(0));
+        // A word keeps its spoken version in a nullable column, so a row without one is a normal
+        // result here rather than a key.
+        while (await reader.ReadAsync(token))
+            if (!reader.IsDBNull(0)) keys.Add(reader.GetString(0));
         return keys;
     }
 

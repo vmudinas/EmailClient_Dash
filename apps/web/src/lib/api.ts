@@ -57,6 +57,9 @@ import type {
   InboxTabSettingsUpdate,
   LithuanianPractice,
   LithuanianRecording,
+  LithuanianGameInput,
+  LithuanianGameResult,
+  LithuanianPhraseSuggestions,
   LithuanianSettingsPatch,
   LithuanianTranslateInput,
   LithuanianTranslation,
@@ -294,6 +297,26 @@ export class ApiClient {
 
   translateLithuanian(input: LithuanianTranslateInput, signal?: AbortSignal): Promise<LithuanianTranslation> {
     return this.request("/api/lithuanian/translate", { method: "POST", body: JSON.stringify(input), signal });
+  }
+
+  suggestLithuanianPhrases(english: string, signal?: AbortSignal): Promise<LithuanianPhraseSuggestions> {
+    return this.request("/api/lithuanian/phrases", {
+      method: "POST",
+      body: JSON.stringify({ english }),
+      signal
+    });
+  }
+
+  saveLithuanianGame(input: LithuanianGameInput): Promise<LithuanianGameResult> {
+    return this.request("/api/lithuanian/games", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  lithuanianPronunciationBlob(wordId: string): Promise<Blob> {
+    return this.blobRequest(`/api/lithuanian/words/${encodeURIComponent(wordId)}/pronunciation`);
+  }
+
+  refreshLithuanianPronunciation(wordId: string): Promise<LithuanianWord> {
+    return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}/pronunciation`, { method: "POST" });
   }
 
   deleteLithuanianWord(wordId: string): Promise<void> {
@@ -1819,6 +1842,10 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
       defaultHintModel: text(lithuanian.defaultHintModel),
       translationModel: text(lithuanian.translationModel),
       defaultTranslationModel: text(lithuanian.defaultTranslationModel),
+      speechModel: text(lithuanian.speechModel),
+      defaultSpeechModel: text(lithuanian.defaultSpeechModel),
+      speechVoice: text(lithuanian.speechVoice),
+      defaultSpeechVoice: text(lithuanian.defaultSpeechVoice),
       passMark: finiteNumber(lithuanian.passMark, LITHUANIAN_PASS_MARK),
       defaultPassMark: finiteNumber(lithuanian.defaultPassMark, LITHUANIAN_PASS_MARK),
       minimumPassMark: finiteNumber(lithuanian.minimumPassMark, LITHUANIAN_MIN_PASS_MARK),

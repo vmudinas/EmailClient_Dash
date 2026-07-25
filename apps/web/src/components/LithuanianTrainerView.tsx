@@ -4,6 +4,7 @@ import {
   CircleAlert,
   CircleCheck,
   Flame,
+  Gamepad2,
   Languages,
   Lightbulb,
   LoaderCircle,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import {
   LITHUANIAN_LOCALE,
+  LITHUANIAN_MAX_PHRASE_SUGGESTIONS,
   LITHUANIAN_MAX_PHRASE_WORDS,
   LITHUANIAN_PASS_MARK,
   type LithuanianEntryKind,
@@ -26,6 +28,8 @@ import {
 import type { ApiClient } from "../lib/api.js";
 import { formatDate, formatDateTime } from "../lib/format.js";
 import { daysSince, practiceStatus } from "../lib/practiceDays.js";
+import { spellOut, specialLetters } from "../lib/lithuanianLetters.js";
+import { LithuanianGameView } from "./LithuanianGameView.js";
 import {
   PronunciationRecorder,
   SILENT_CLIP,
@@ -49,6 +53,28 @@ function errorText(error: unknown, fallback: string): string {
  * the time the learner looks up from the keyboard.
  */
 const TranslateDebounceMs = 600;
+
+/**
+ * A Lithuanian word with the letters English does not have marked.
+ *
+ * The marking is decoration: splitting a word into per-letter elements makes some screen readers
+ * spell it out, so a word that has such letters carries the whole word alongside for assistive
+ * tech. A word English could spell needs neither, and is left as plain text.
+ */
+function SpelledWord({ text }: { text: string }) {
+  const runs = spellOut(text);
+  if (runs.every((run) => run.note === null)) return <>{text}</>;
+  return (
+    <>
+      <span className="visually-hidden">{text}</span>
+      <span aria-hidden="true">
+        {runs.map((run, index) => run.note === null
+          ? <span key={index}>{run.text}</span>
+          : <em key={index} className="trainer-letter">{run.text}</em>)}
+      </span>
+    </>
+  );
+}
 
 function bestScore(recordings: LithuanianRecording[]): number | null {
   const scores = recordings.map((take) => take.score).filter((score): score is number => score !== null);
@@ -74,11 +100,14 @@ export function LithuanianTrainerView({
 }) {
   const [words, setWords] = useState<LithuanianWord[]>([]);
   const [passMark, setPassMark] = useState(LITHUANIAN_PASS_MARK);
+  const [highScore, setHighScore] = useState(0);
+  const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(true);
   const [lithuanian, setLithuanian] = useState("");
   const [english, setEnglish] = useState("");
   const [kind, setKind] = useState<LithuanianEntryKind>("word");
   const [translating, setTranslating] = useState(false);
+  const [phrases, setPhrases] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const [hintingId, setHintingId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -104,6 +133,13 @@ export function LithuanianTrainerView({
     void voiceRevision;
     return speechSupported && speechAvailability(LITHUANIAN_LOCALE) === "missing-voice";
   }, [speechSupported, voiceRevision]);
+  // Whether any word still depends on this device having a voice. Once the server can say them
+  // all, warning about the device's voices would be telling the learner about a problem the
+  // screen no longer has.
+  const leansOnDeviceVoice = useMemo(
+    () => words.length === 0 || words.some((word) => !word.hasPronunciation),
+    [words]
+  );
   const practice = useMemo(() => practiceStatus(words), [words]);
   const idleDays = daysSince(practice.lastAddedDay);
 
@@ -150,12 +186,38 @@ export function LithuanianTrainerView({
     };
   }, [api, english, kind, lithuanian]);
 
+  /**
+   * Offers phrases built around the single word being typed, so one word can grow into something
+   * Lucas could actually say. Only offered while adding a word -- once he is writing a phrase the
+   * offer would be competing with what he is already typing.
+   */
+  useEffect(() => {
+    const wanted = english.trim();
+    if (kind !== "word" || wanted.split(/\s+/).length !== 1 || wanted.length < 2) {
+      setPhrases([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api.suggestLithuanianPhrases(wanted, controller.signal)
+        .then((result) => {
+          if (!controller.signal.aborted) setPhrases(result.phrases.slice(0, LITHUANIAN_MAX_PHRASE_SUGGESTIONS));
+        })
+        .catch(() => {});
+    }, TranslateDebounceMs);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [api, english, kind]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const practice = await api.lithuanianPractice();
       setWords(practice.words);
       setPassMark(practice.passMark);
+      setHighScore(practice.bestScore);
       setError("");
     } catch (reason) {
       setError(errorText(reason, "The word list could not be loaded"));
@@ -189,6 +251,18 @@ export function LithuanianTrainerView({
     if (!lithuanianEdited.current) setLithuanian("");
   };
 
+  /**
+   * Takes up one of the offered phrases. The English is replaced and the Lithuanian is cleared so
+   * the translator writes the phrase rather than leaving the single word's translation behind.
+   */
+  const choosePhrase = (offer: string) => {
+    setKind("phrase");
+    setEnglish(offer);
+    setPhrases([]);
+    lithuanianEdited.current = false;
+    setLithuanian("");
+  };
+
   const addWord = async (event: FormEvent) => {
     event.preventDefault();
     const nextLithuanian = lithuanian.trim();
@@ -205,6 +279,7 @@ export function LithuanianTrainerView({
       setWords((current) => [created, ...current]);
       setLithuanian("");
       setEnglish("");
+      setPhrases([]);
       lithuanianEdited.current = false;
       announce(practice.dueToday
         ? `${created.lithuanian} added. Today's ${kind} is done.`
@@ -244,9 +319,55 @@ export function LithuanianTrainerView({
     }
   };
 
-  const pronounce = (text: string) => {
+  /**
+   * One word out of a phrase. Only whole entries are generated on the server, so a piece of a
+   * phrase is always the device's own voice.
+   */
+  const sayWithDeviceVoice = (text: string) => {
     setError("");
     if (!speak(text, LITHUANIAN_LOCALE)) setError("This browser cannot speak words out loud");
+  };
+
+  /**
+   * Says a word out loud, preferring the version the server generated.
+   *
+   * The browser's own voice only says Lithuanian properly on a device that happens to have a
+   * Lithuanian voice installed; without one it reads the word with an English voice, which
+   * teaches the wrong sounds. The generated audio is the same on every device, so it is what is
+   * played whenever it exists -- the browser voice is the fallback, not the other way round.
+   */
+  const pronounce = async (word: LithuanianWord) => {
+    setError("");
+    if (!word.hasPronunciation) {
+      if (!speak(word.lithuanian, LITHUANIAN_LOCALE)) setError("This browser cannot speak words out loud");
+      return;
+    }
+
+    const key = `say:${word.id}`;
+    const player = audio.current;
+    let url = objectUrls.current.get(key);
+    // Claims playback permission during the tap, for the same reason play() does.
+    if (player && !url && !audioUnlocked.current) {
+      audioUnlocked.current = true;
+      player.src = SILENT_CLIP;
+      void Promise.resolve(player.play()).catch(() => { audioUnlocked.current = false; });
+    }
+    setBusyId(key);
+    try {
+      if (!url) {
+        url = URL.createObjectURL(await api.lithuanianPronunciationBlob(word.id));
+        objectUrls.current.set(key, url);
+      }
+      if (!player) return;
+      player.src = url;
+      await player.play();
+    } catch {
+      // A missing or unplayable file is not worth an error message when the browser can have a
+      // go at it instead.
+      speak(word.lithuanian, LITHUANIAN_LOCALE);
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const toggleRecording = async (word: LithuanianWord) => {
@@ -337,6 +458,18 @@ export function LithuanianTrainerView({
     }
   };
 
+  if (playing) {
+    return (
+      <LithuanianGameView
+        api={api}
+        words={words}
+        bestScore={highScore}
+        onFinished={setHighScore}
+        onClose={() => setPlaying(false)}
+      />
+    );
+  }
+
   return (
     <main className="trainer-screen">
       <header className="trainer-topbar">
@@ -353,6 +486,17 @@ export function LithuanianTrainerView({
       </header>
 
       <div className="trainer-body">
+        {!loading && words.length > 0 && (
+          <section className="trainer-play">
+            <div>
+              <strong>Play a round</strong>
+              <span>{highScore > 0 ? `Best ${highScore}` : "No score yet — go and set one"}</span>
+            </div>
+            <button type="button" className="primary-button" onClick={() => setPlaying(true)}>
+              <Gamepad2 size={17} /> Play
+            </button>
+          </section>
+        )}
         {!loading && (
           <section className={`trainer-today ${practice.dueToday ? "due" : "done"}`} aria-live="polite">
             <div className="trainer-today-day">
@@ -399,6 +543,19 @@ export function LithuanianTrainerView({
           </div>
           <div className="trainer-add-fields">
             <label>
+              English
+              <input
+                value={english}
+                onChange={(event) => setEnglish(event.target.value)}
+                placeholder={kind === "word" ? "hello" : "good morning"}
+                maxLength={kind === "word" ? 64 : 200}
+                autoComplete="off"
+                spellCheck={false}
+                required
+              />
+            </label>
+            <span className="trainer-add-equals" aria-hidden="true">=</span>
+            <label>
               <span className="trainer-field-label">
                 Lithuanian
                 {translating && (
@@ -423,19 +580,6 @@ export function LithuanianTrainerView({
                 required
               />
             </label>
-            <span className="trainer-add-equals" aria-hidden="true">=</span>
-            <label>
-              English
-              <input
-                value={english}
-                onChange={(event) => setEnglish(event.target.value)}
-                placeholder={kind === "word" ? "hello" : "good morning"}
-                maxLength={kind === "word" ? 64 : 200}
-                autoComplete="off"
-                spellCheck={false}
-                required
-              />
-            </label>
             <button
               className="primary-button trainer-add-submit"
               disabled={adding || !lithuanian.trim() || !english.trim()}
@@ -443,6 +587,21 @@ export function LithuanianTrainerView({
               {adding ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Add
             </button>
           </div>
+          {phrases.length > 0 && (
+            <div className="trainer-phrase-offers">
+              <span className="trainer-phrase-lead">Say more with it:</span>
+              {phrases.map((offer) => (
+                <button
+                  key={offer}
+                  type="button"
+                  className="trainer-phrase-offer"
+                  onClick={() => choosePhrase(offer)}
+                >
+                  {offer}
+                </button>
+              ))}
+            </div>
+          )}
           <small>
             {kind === "word"
               ? "Type the English and the Lithuanian is written for you — change it if you know a better word. Only the Lithuanian side is practised."
@@ -450,12 +609,12 @@ export function LithuanianTrainerView({
           </small>
         </form>
 
-        {!speechSupported && (
+        {!speechSupported && leansOnDeviceVoice && (
           <p className="trainer-warning" role="status">
             <CircleAlert size={16} /> This browser cannot speak words out loud, so only your own recordings will play.
           </p>
         )}
-        {missingVoice && (
+        {missingVoice && leansOnDeviceVoice && (
           <p className="trainer-warning" role="status">
             <CircleAlert size={16} /> No Lithuanian voice is installed, so words are read with the default voice.
           </p>
@@ -505,14 +664,15 @@ export function LithuanianTrainerView({
                   <div className="trainer-word trainer-word-lt">
                     <div className="trainer-word-text">
                       <span className="trainer-word-label">Lithuanian</span>
-                      <strong lang={LITHUANIAN_LOCALE}>{word.lithuanian}</strong>
+                      <strong lang={LITHUANIAN_LOCALE}><SpelledWord text={word.lithuanian} /></strong>
                     </div>
                     <div className="trainer-word-actions">
                       <button
                         type="button"
                         className="trainer-action"
-                        onClick={() => pronounce(word.lithuanian)}
-                        disabled={!speechSupported || isRecording}
+                        onClick={() => void pronounce(word)}
+                        // A word the server can say needs no voice on this device at all.
+                        disabled={(!speechSupported && !word.hasPronunciation) || isRecording}
                         title={`Listen to ${word.lithuanian}`}
                         aria-label={`Listen to ${word.lithuanian}`}
                       >
@@ -538,6 +698,17 @@ export function LithuanianTrainerView({
 
                   <p className="trainer-meaning"><span>Means</span> {word.english}</p>
 
+                  {specialLetters(word.lithuanian).length > 0 && (
+                    <ul className="trainer-letters" aria-label="Letters English does not have">
+                      {specialLetters(word.lithuanian).map((letter) => (
+                        <li key={letter.text}>
+                          <em className="trainer-letter" lang={LITHUANIAN_LOCALE}>{letter.text}</em>
+                          <span>{letter.note}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
                   {word.kind === "phrase" && (
                     word.hints.length > 0 ? (
                       <ul className="trainer-hints">
@@ -546,7 +717,7 @@ export function LithuanianTrainerView({
                             <button
                               type="button"
                               className="trainer-hint-word"
-                              onClick={() => pronounce(hint.word)}
+                              onClick={() => sayWithDeviceVoice(hint.word)}
                               disabled={!speechSupported || isRecording}
                               aria-label={`Listen to ${hint.word} on its own`}
                             >

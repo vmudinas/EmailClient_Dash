@@ -31,6 +31,8 @@ public sealed record LithuanianRuntimeSettings(
     string Model = LithuanianDefaults.TranscriptionModel,
     string HintModel = LithuanianDefaults.HintModel,
     string TranslationModel = LithuanianDefaults.TranslationModel,
+    string SpeechModel = LithuanianDefaults.SpeechModel,
+    string SpeechVoice = LithuanianDefaults.SpeechVoice,
     int PassMark = LithuanianDefaults.PassMark);
 
 public sealed record PropertyIntegrationRuntimeSettings(
@@ -265,6 +267,12 @@ public sealed class AppSettingsService
                 TranslationModel = String(input, "translationModel") is { Length: > 0 } translationModel
                     ? translationModel.Trim()
                     : current.TranslationModel,
+                SpeechModel = String(input, "speechModel") is { Length: > 0 } speechModel
+                    ? speechModel.Trim()
+                    : current.SpeechModel,
+                SpeechVoice = String(input, "speechVoice") is { Length: > 0 } speechVoice
+                    ? speechVoice.Trim()
+                    : current.SpeechVoice,
                 PassMark = Math.Clamp(
                     Integer(input, "passMark") ?? current.PassMark,
                     LithuanianDefaults.MinimumPassMark,
@@ -418,6 +426,12 @@ public sealed class AppSettingsService
             TranslationModel = source.LithuanianValue.TranslationModel is { Length: > 0 } translationModel
                 ? translationModel
                 : LithuanianDefaults.TranslationModel,
+            SpeechModel = source.LithuanianValue.SpeechModel is { Length: > 0 } speechModel
+                ? speechModel
+                : LithuanianDefaults.SpeechModel,
+            SpeechVoice = source.LithuanianValue.SpeechVoice is { Length: > 0 } speechVoice
+                ? speechVoice
+                : LithuanianDefaults.SpeechVoice,
             // A settings file written before the pass mark existed deserialises it as 0, which
             // would pass every take.
             PassMark = source.LithuanianValue.PassMark < LithuanianDefaults.MinimumPassMark

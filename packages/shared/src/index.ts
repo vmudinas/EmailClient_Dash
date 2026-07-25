@@ -1232,6 +1232,25 @@ export type LithuanianEntryKind = "word" | "phrase";
 
 export const LITHUANIAN_MAX_PHRASE_WORDS = 12;
 export const LITHUANIAN_MAX_PHRASE_LENGTH = 200;
+
+/** How many phrases are offered around the word being typed. */
+export const LITHUANIAN_MAX_PHRASE_SUGGESTIONS = 4;
+
+/**
+ * The letters Lithuanian has and English does not. Shown marked on a saved word so the spelling
+ * that differs from English is the part that stands out.
+ */
+export const LITHUANIAN_SPECIAL_LETTERS: Readonly<Record<string, string>> = {
+  ą: "nasal a — longer than a plain a",
+  č: "ch, as in chair",
+  ę: "wide e — like the a in cat",
+  ė: "narrow e — like the a in gate",
+  į: "long ee",
+  š: "sh, as in shoe",
+  ų: "long oo",
+  ū: "long oo",
+  ž: "zh, like the s in measure"
+};
 export const LITHUANIAN_MAX_WORD_LENGTH = 64;
 
 /** One word of a phrase, explained. Empty for single-word entries. */
@@ -1268,6 +1287,12 @@ export interface LithuanianWord {
   createdAt: string;
   /** Word-by-word breakdown of a phrase; always empty for a single word. */
   hints: LithuanianHint[];
+  /**
+   * Whether the server has a spoken version of this word. False falls playback back to the
+   * browser's own voice, which only says Lithuanian properly on a device that has a Lithuanian
+   * voice installed.
+   */
+  hasPronunciation: boolean;
   /** Newest first. */
   recordings: LithuanianRecording[];
 }
@@ -1275,12 +1300,31 @@ export interface LithuanianWord {
 export interface LithuanianPractice {
   /** The mark in force right now, which an administrator can change. */
   passMark: number;
+  /** The best game so far, or 0 before any has been played. */
+  bestScore: number;
   words: LithuanianWord[];
+}
+
+export interface LithuanianGameInput {
+  score: number;
+  bestCombo: number;
+}
+
+export interface LithuanianGameResult {
+  score: number;
+  bestScore: number;
+  /** Whether this game beat the previous best. */
+  record: boolean;
 }
 
 export interface LithuanianTranslateInput {
   english: string;
   kind: LithuanianEntryKind;
+}
+
+/** Everyday English phrases built around the word being typed. Empty is a normal answer. */
+export interface LithuanianPhraseSuggestions {
+  phrases: string[];
 }
 
 /**
@@ -1418,6 +1462,10 @@ export interface AdminSettings {
     defaultHintModel: string;
     translationModel: string;
     defaultTranslationModel: string;
+    speechModel: string;
+    defaultSpeechModel: string;
+    speechVoice: string;
+    defaultSpeechVoice: string;
     passMark: number;
     defaultPassMark: number;
     minimumPassMark: number;
@@ -2585,6 +2633,8 @@ export const lithuanianSettingsPatchSchema = z.object({
   model: z.string().trim().min(1).max(100).optional(),
   hintModel: z.string().trim().min(1).max(100).optional(),
   translationModel: z.string().trim().min(1).max(100).optional(),
+  speechModel: z.string().trim().min(1).max(100).optional(),
+  speechVoice: z.string().trim().min(1).max(100).optional(),
   passMark: z.number().int().min(LITHUANIAN_MIN_PASS_MARK).max(LITHUANIAN_MAX_PASS_MARK).optional()
 }).strict().refine(
   (value) => Object.keys(value).length > 0,

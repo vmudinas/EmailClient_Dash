@@ -26,6 +26,16 @@ public static class LithuanianEndpoints
             return Results.Ok(await repository.PracticeAsync(session.User.Id, token));
         }).WithName("GetLithuanianPractice").Produces<LithuanianPracticeDto>();
 
+        // A finished game. The score was counted in the browser, so it is clamped on the way in
+        // rather than taken at face value.
+        group.MapPost("/games", async (LithuanianGameRequest request, HttpContext context,
+            LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            return Results.Ok(await repository.SaveGameAsync(request, session.User.Id, token));
+        }).WithName("SaveLithuanianGame").Produces<LithuanianGameResultDto>();
+
         group.MapPost("/words/{wordId}/hints", async (string wordId, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
         {
@@ -47,6 +57,16 @@ public static class LithuanianEndpoints
             return Results.Ok(await translation.TranslateAsync(request.English ?? "", kind, token));
         }).WithName("TranslateLithuanian").Produces<LithuanianTranslation>();
 
+        // Offers phrases built around the word being typed. Suggestions are an offer, so an empty
+        // list is a normal answer rather than an error.
+        group.MapPost("/phrases", async (LithuanianPhraseRequest request, HttpContext context,
+            LithuanianPhraseService phrases, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            return Results.Ok(await phrases.SuggestAsync(request.English ?? "", token));
+        }).WithName("SuggestLithuanianPhrases").Produces<LithuanianPhraseSuggestions>();
+
         group.MapPost("/words", async (LithuanianWordCreateRequest request, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
         {
@@ -55,6 +75,30 @@ public static class LithuanianEndpoints
             try { return Results.Json(await repository.CreateWordAsync(request, session.User.Id, token), statusCode: StatusCodes.Status201Created); }
             catch (Exception error) { return Error(error); }
         }).WithName("CreateLithuanianWord").Produces<LithuanianWordDto>(StatusCodes.Status201Created);
+
+        // The reference pronunciation, generated once when the word was added. A word added
+        // before a key was configured has none until this is posted to.
+        group.MapGet("/words/{wordId}/pronunciation", async (string wordId, HttpContext context,
+            LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            try
+            {
+                var (path, contentType) = await repository.PronunciationContentAsync(wordId, session.User.Id, token);
+                return Results.File(path, contentType);
+            }
+            catch (Exception error) { return Error(error); }
+        }).WithName("GetLithuanianPronunciation");
+
+        group.MapPost("/words/{wordId}/pronunciation", async (string wordId, HttpContext context,
+            LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            try { return Results.Ok(await repository.RefreshPronunciationAsync(wordId, session.User.Id, token)); }
+            catch (Exception error) { return Error(error); }
+        }).WithName("RefreshLithuanianPronunciation").Produces<LithuanianWordDto>();
 
         group.MapDelete("/words/{wordId}", async (string wordId, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
