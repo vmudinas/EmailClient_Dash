@@ -101,7 +101,9 @@ app.UseSwaggerUI(options =>
 });
 
 app.UseDefaultFiles();
-app.UseStaticFiles();
+// Content-hashed bundles are cached permanently; index.html always revalidates so a deploy
+// is picked up immediately. See StaticAssetCaching for why the two differ.
+app.UseStaticFiles(ArchiveMail.Api.Infrastructure.StaticAssetCaching.Options());
 
 app.Use(async (context, next) =>
 {
@@ -176,7 +178,9 @@ app.MapCalendarEndpoints();
 app.MapPropertyEndpoints();
 app.MapAdminEndpoints();
 if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
-    app.MapFallbackToFile("index.html");
+    // The SPA fallback serves index.html too, and it does not inherit UseStaticFiles'
+    // options, so it needs the same no-cache treatment or a deploy can go unnoticed.
+    app.MapFallbackToFile("index.html", ArchiveMail.Api.Infrastructure.StaticAssetCaching.Options());
 app.Run();
 
 public partial class Program;
