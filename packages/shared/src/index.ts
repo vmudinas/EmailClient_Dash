@@ -1258,7 +1258,25 @@ export interface DatabaseConnectionTestResult {
   message: string;
 }
 
+export interface AdminPollingLoop {
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  intervalMs: number;
+  defaultIntervalMs: number;
+  activeIntervalMs: number | null;
+  defaultActiveIntervalMs: number | null;
+  activeLabel: string | null;
+  customized: boolean;
+}
+
 export interface AdminSettings {
+  polling?: {
+    minimumIntervalMs: number;
+    maximumIntervalMs: number;
+    loops: AdminPollingLoop[];
+  };
   database: {
     activeProvider: DatabaseProvider;
     activeConnectionString: string;

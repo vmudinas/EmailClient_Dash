@@ -1256,6 +1256,18 @@ export class ApiClient {
     });
   }
 
+  updatePollingSettings(input: {
+    key: string;
+    enabled?: boolean;
+    intervalMs?: number;
+    activeIntervalMs?: number;
+  }): Promise<AdminSettings> {
+    return this.request("/api/admin/settings/polling", {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    });
+  }
+
   updateAiSettings(input: AiSettingsPatch): Promise<AdminSettings> {
     return this.request("/api/admin/settings/ai", {
       method: "PATCH",
@@ -1643,8 +1655,34 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
   const news = record(root.news);
   const ai = record(root.ai);
   const usage = record(ai.usage);
+  const polling = record(root.polling);
 
   return {
+    // Absent on an older server; the UI falls back to built-in intervals rather than
+    // rendering an empty admin panel.
+    polling: root.polling === null || root.polling === undefined ? undefined : {
+      minimumIntervalMs: finiteNumber(polling.minimumIntervalMs) || 1_000,
+      maximumIntervalMs: finiteNumber(polling.maximumIntervalMs) || 3_600_000,
+      loops: Array.isArray(polling.loops)
+        ? (polling.loops as unknown[]).map((entry) => {
+            const loop = record(entry);
+            const activeInterval = finiteNumber(loop.activeIntervalMs);
+            const defaultActiveInterval = finiteNumber(loop.defaultActiveIntervalMs);
+            return {
+              key: text(loop.key),
+              label: text(loop.label),
+              description: text(loop.description),
+              enabled: loop.enabled === undefined ? true : Boolean(loop.enabled),
+              intervalMs: finiteNumber(loop.intervalMs),
+              defaultIntervalMs: finiteNumber(loop.defaultIntervalMs),
+              activeIntervalMs: activeInterval > 0 ? activeInterval : null,
+              defaultActiveIntervalMs: defaultActiveInterval > 0 ? defaultActiveInterval : null,
+              activeLabel: loop.activeLabel === null || loop.activeLabel === undefined ? null : text(loop.activeLabel),
+              customized: Boolean(loop.customized)
+            };
+          })
+        : []
+    },
     database: {
       ...database,
       activeProvider: text(database.activeProvider, "postgresql") as AdminSettings["database"]["activeProvider"],

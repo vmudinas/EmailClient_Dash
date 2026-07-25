@@ -99,6 +99,20 @@ public static class DatabaseSettingsEndpoints
             application.UpdateNews(request);
             return Results.Ok(await admin.ViewAsync(token));
         }).WithName("UpdateNewsSettings").WithTags("Admin settings");
+        app.MapMethods("/api/admin/settings/polling", ["PATCH"], async (JsonElement request, HttpContext context,
+            AppSettingsService application, AdminSettingsViewService admin, CancellationToken token) =>
+        {
+            if (!IsAdmin(context)) return Results.Forbid();
+            try
+            {
+                application.UpdatePolling(request);
+            }
+            catch (ArgumentException error)
+            {
+                return Results.BadRequest(new { error = error.Message });
+            }
+            return Results.Ok(await admin.ViewAsync(token));
+        }).WithName("UpdatePollingSettings").WithTags("Admin settings");
         app.MapMethods("/api/admin/settings/ai", ["PATCH"], async (JsonElement request, HttpContext context,
             AppSettingsService application, AdminSettingsViewService admin, CancellationToken token) =>
         {
