@@ -1278,6 +1278,20 @@ export interface LithuanianPractice {
   words: LithuanianWord[];
 }
 
+export interface LithuanianTranslateInput {
+  english: string;
+  kind: LithuanianEntryKind;
+}
+
+/**
+ * A suggested Lithuanian rendering of the English the learner typed. Empty when no trainer key is
+ * configured or the suggestion was unusable, which the form treats as "type it yourself" rather
+ * than as an error.
+ */
+export interface LithuanianTranslation {
+  lithuanian: string;
+}
+
 export interface AuthLoginResult {
   accessToken: string;
   session: AuthSessionInfo;
@@ -1402,6 +1416,8 @@ export interface AdminSettings {
     defaultModel: string;
     hintModel: string;
     defaultHintModel: string;
+    translationModel: string;
+    defaultTranslationModel: string;
     passMark: number;
     defaultPassMark: number;
     minimumPassMark: number;
@@ -2568,6 +2584,7 @@ export const lithuanianSettingsPatchSchema = z.object({
   clearApiKey: z.boolean().optional(),
   model: z.string().trim().min(1).max(100).optional(),
   hintModel: z.string().trim().min(1).max(100).optional(),
+  translationModel: z.string().trim().min(1).max(100).optional(),
   passMark: z.number().int().min(LITHUANIAN_MIN_PASS_MARK).max(LITHUANIAN_MAX_PASS_MARK).optional()
 }).strict().refine(
   (value) => Object.keys(value).length > 0,

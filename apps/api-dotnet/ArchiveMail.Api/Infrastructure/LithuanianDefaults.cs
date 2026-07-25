@@ -23,6 +23,14 @@ public static class LithuanianDefaults
     /// </summary>
     public const string HintModel = AiModelDefaults.OpenAi;
 
+    /// <summary>
+    /// Turns the English the learner typed into the Lithuanian he practises. Shares the hint
+    /// model's tier for the same reason -- this is dictionary work, not reasoning -- but is
+    /// configurable on its own, because a wrong translation is worse than a wrong hint: it becomes
+    /// the recorded target.
+    /// </summary>
+    public const string TranslationModel = AiModelDefaults.OpenAi;
+
     public const string ChatEndpoint = "https://api.openai.com/v1/chat/completions";
 
     /// <summary>

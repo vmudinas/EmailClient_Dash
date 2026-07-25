@@ -120,6 +120,8 @@ function client(overrides: Partial<Record<keyof ApiClient, unknown>> = {}): ApiC
   return {
     lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [word()] }),
     refreshLithuanianHints: vi.fn(),
+    // No suggestion by default, which is what an installation without a trainer key returns.
+    translateLithuanian: vi.fn().mockResolvedValue({ lithuanian: "" }),
     createLithuanianWord: vi.fn(),
     deleteLithuanianWord: vi.fn().mockResolvedValue(undefined),
     saveLithuanianRecording: vi.fn(),
@@ -414,6 +416,84 @@ describe("LithuanianTrainerView", () => {
       kind: "word"
     }));
     expect(await screen.findByText("ačiū")).toBeTruthy();
+  });
+
+  it("writes the Lithuanian for the English Lucas typed", async () => {
+    const translateLithuanian = vi.fn().mockResolvedValue({ lithuanian: "ačiū" });
+    const createLithuanianWord = vi.fn().mockResolvedValue(word({
+      id: "word-2",
+      lithuanian: "ačiū",
+      english: "thanks",
+      recordings: []
+    }));
+    render(
+      <LithuanianTrainerView
+        api={client({ translateLithuanian, createLithuanianWord })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.change(screen.getByLabelText(/English/), { target: { value: "thanks" } });
+
+    await waitFor(
+      () => expect(translateLithuanian).toHaveBeenCalledWith(
+        { english: "thanks", kind: "word" },
+        expect.anything()
+      ),
+      { timeout: 2_000 }
+    );
+    await waitFor(() => expect(
+      (screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value
+    ).toBe("ačiū"));
+
+    // The suggestion is a starting point, not a decision: it is saved only when Add is pressed.
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+    await waitFor(() => expect(createLithuanianWord).toHaveBeenCalledWith({
+      lithuanian: "ačiū",
+      english: "thanks",
+      kind: "word"
+    }));
+  });
+
+  it("never overwrites a Lithuanian word Lucas typed himself", async () => {
+    const translateLithuanian = vi.fn().mockResolvedValue({ lithuanian: "ačiū" });
+    render(
+      <LithuanianTrainerView
+        api={client({ translateLithuanian })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.change(screen.getByLabelText(/Lithuanian/), { target: { value: "dėkui" } });
+    fireEvent.change(screen.getByLabelText(/English/), { target: { value: "thanks" } });
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(translateLithuanian).not.toHaveBeenCalled();
+    expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("dėkui");
+  });
+
+  it("leaves the Lithuanian field typeable when no translation comes back", async () => {
+    const translateLithuanian = vi.fn().mockRejectedValue(new Error("no trainer key"));
+    render(
+      <LithuanianTrainerView
+        api={client({ translateLithuanian })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.change(screen.getByLabelText(/English/), { target: { value: "thanks" } });
+    await waitFor(() => expect(translateLithuanian).toHaveBeenCalled(), { timeout: 2_000 });
+
+    // A failed suggestion is not an error the learner is shown, and it does not block the form.
+    expect(screen.queryByText(/could not/i)).toBeNull();
+    fireEvent.change(screen.getByLabelText(/Lithuanian/), { target: { value: "dėkui" } });
+    expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("dėkui");
   });
 
   it("plays a saved recording through the audio element", async () => {

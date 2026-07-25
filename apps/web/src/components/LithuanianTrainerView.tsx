@@ -43,6 +43,13 @@ function errorText(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+/**
+ * How long typing has to pause before the English is sent for translation. Long enough that a
+ * word is not translated letter by letter, short enough that the Lithuanian is already there by
+ * the time the learner looks up from the keyboard.
+ */
+const TranslateDebounceMs = 600;
+
 function bestScore(recordings: LithuanianRecording[]): number | null {
   const scores = recordings.map((take) => take.score).filter((score): score is number => score !== null);
   return scores.length > 0 ? Math.max(...scores) : null;
@@ -71,6 +78,7 @@ export function LithuanianTrainerView({
   const [lithuanian, setLithuanian] = useState("");
   const [english, setEnglish] = useState("");
   const [kind, setKind] = useState<LithuanianEntryKind>("word");
+  const [translating, setTranslating] = useState(false);
   const [adding, setAdding] = useState(false);
   const [hintingId, setHintingId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -81,6 +89,8 @@ export function LithuanianTrainerView({
   const [voiceRevision, setVoiceRevision] = useState(0);
 
   const recorder = useRef(new PronunciationRecorder());
+  // True once Lucas has typed a Lithuanian word himself, which stops suggestions overwriting it.
+  const lithuanianEdited = useRef(false);
   const audio = useRef<HTMLAudioElement | null>(null);
   const objectUrls = useRef(new Map<string, string>());
   const audioUnlocked = useRef(false);
@@ -98,6 +108,40 @@ export function LithuanianTrainerView({
   const idleDays = daysSince(practice.lastAddedDay);
 
   useEffect(() => onVoicesChanged(() => setVoiceRevision((value) => value + 1)), []);
+
+  /**
+   * Lucas writes what he wants to say in English and the Lithuanian he will practise is filled in
+   * for him. It only ever writes into a field he has not typed in himself, so correcting the
+   * suggestion -- or ignoring it and writing the Lithuanian directly -- always wins. A failed or
+   * unavailable translation is silent: the field is still typeable, which is how the screen
+   * worked before this existed.
+   */
+  useEffect(() => {
+    if (lithuanianEdited.current) return;
+    const wanted = english.trim();
+    if (!wanted) {
+      setLithuanian("");
+      setTranslating(false);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setTranslating(true);
+      api.translateLithuanian({ english: wanted, kind }, controller.signal)
+        .then((result) => {
+          if (controller.signal.aborted || lithuanianEdited.current) return;
+          if (result.lithuanian) setLithuanian(result.lithuanian);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!controller.signal.aborted) setTranslating(false);
+        });
+    }, TranslateDebounceMs);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [api, english, kind]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -147,6 +191,7 @@ export function LithuanianTrainerView({
       setWords((current) => [created, ...current]);
       setLithuanian("");
       setEnglish("");
+      lithuanianEdited.current = false;
       announce(practice.dueToday
         ? `${created.lithuanian} added. Today's ${kind} is done.`
         : `${created.lithuanian} added.`);
@@ -340,12 +385,25 @@ export function LithuanianTrainerView({
           </div>
           <div className="trainer-add-fields">
             <label>
-              Lithuanian
+              <span className="trainer-field-label">
+                Lithuanian
+                {translating && (
+                  <span className="trainer-translating" role="status">
+                    <LoaderCircle className="spin" size={12} aria-hidden="true" /> translating
+                  </span>
+                )}
+              </span>
               <input
                 value={lithuanian}
-                onChange={(event) => setLithuanian(event.target.value)}
+                // Clearing the field by hand hands control back to the translator, so a suggestion
+                // can be thrown away and asked for again without retyping the English.
+                onChange={(event) => {
+                  lithuanianEdited.current = event.target.value.trim().length > 0;
+                  setLithuanian(event.target.value);
+                }}
                 placeholder={kind === "word" ? "labas" : "labas rytas"}
                 maxLength={kind === "word" ? 64 : 200}
+                aria-busy={translating}
                 autoComplete="off"
                 spellCheck={false}
                 required
@@ -373,8 +431,8 @@ export function LithuanianTrainerView({
           </div>
           <small>
             {kind === "word"
-              ? "One word on each side. The English side is the meaning — only Lithuanian is practised."
-              : `Up to ${LITHUANIAN_MAX_PHRASE_WORDS} words. Every Lithuanian word gets its own hint so the phrase is not one long block.`}
+              ? "Type the English and the Lithuanian is written for you — change it if you know a better word. Only the Lithuanian side is practised."
+              : `Type the English and the Lithuanian is written for you. Up to ${LITHUANIAN_MAX_PHRASE_WORDS} words. Every Lithuanian word gets its own hint so the phrase is not one long block.`}
           </small>
         </form>
 

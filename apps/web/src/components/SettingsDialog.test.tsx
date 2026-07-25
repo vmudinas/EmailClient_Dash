@@ -157,6 +157,7 @@ describe("SettingsDialog", () => {
       apiKey: "sk-test-key",
       model: "gpt-4o-transcribe",
       hintModel: "gpt-5-mini",
+      translationModel: "gpt-5-mini",
       passMark: 85
     }));
     // Cleared from the form so it is never re-submitted or left on screen.
@@ -183,6 +184,7 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
       model: "whisper-1",
       hintModel: "gpt-5-mini",
+      translationModel: "gpt-5-mini",
       passMark: 85
     }));
   });
@@ -210,6 +212,7 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
       model: "gpt-4o-transcribe",
       hintModel: "gpt-5-mini",
+      translationModel: "gpt-5-mini",
       passMark: 60
     }));
   });
@@ -1778,6 +1781,8 @@ const SETTINGS: AdminSettings = {
     defaultModel: "gpt-4o-transcribe",
     hintModel: "gpt-5-mini",
     defaultHintModel: "gpt-5-mini",
+    translationModel: "gpt-5-mini",
+    defaultTranslationModel: "gpt-5-mini",
     passMark: 85,
     defaultPassMark: 85,
     minimumPassMark: 50,
