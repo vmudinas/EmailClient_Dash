@@ -13,6 +13,17 @@ public sealed class SearchIndexSchemaTests
     private const string Schema = DatabaseInitializer.CoreSchemaSql;
 
     [Fact]
+    public void SchemaMigrationsDoNotRunOnNpgsqlsDefaultCommandTimeout()
+    {
+        // Replacing a GIN index rebuilds it over every existing row. On Npgsql's 30 second
+        // default that throws out of startup and crash-loops the container before it can
+        // serve, which is exactly how the first attempt at this fix took the app down.
+        Assert.True(
+            DatabaseInitializer.SchemaCommandTimeoutSeconds >= 300,
+            "Schema DDL needs a ceiling well above the 30s default to survive an index rebuild.");
+    }
+
+    [Fact]
     public void SearchExcerptCapsInputWellUnderThePostgresTsvectorByteLimit()
     {
         Assert.Contains("CREATE OR REPLACE FUNCTION archive_mail_search_excerpt", Schema, StringComparison.Ordinal);
