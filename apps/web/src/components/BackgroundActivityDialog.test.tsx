@@ -76,7 +76,7 @@ describe("BackgroundActivityDialog", () => {
         onUpdate={async () => {}}
       />
     );
-    expect(container).toBeEmptyDOMElement();
+    expect(container.innerHTML).toBe("");
   });
 
   it("shows each loop with its live status", () => {
@@ -89,14 +89,14 @@ describe("BackgroundActivityDialog", () => {
         onUpdate={async () => {}}
       />
     );
-    expect(screen.getByText("Import progress")).toBeInTheDocument();
-    expect(screen.getByText("412 ms")).toBeInTheDocument();
-    expect(screen.getByText("27")).toBeInTheDocument();
+    expect(screen.getByText("Import progress")).toBeTruthy();
+    expect(screen.getByText("412 ms")).toBeTruthy();
+    expect(screen.getByText("27")).toBeTruthy();
     // A paused loop reads as paused rather than as an idle one.
-    expect(screen.getByText("Paused")).toBeInTheDocument();
+    expect(screen.getByText("Paused")).toBeTruthy();
     // Failures are surfaced instead of being swallowed.
-    expect(screen.getByText(/Request failed \(502\)/)).toBeInTheDocument();
-    expect(screen.getByText(/2 failed/)).toBeInTheDocument();
+    expect(screen.getByText(/Request failed \(502\)/)).toBeTruthy();
+    expect(screen.getByText(/2 failed/)).toBeTruthy();
   });
 
   it("pauses a running loop", async () => {
@@ -173,7 +173,7 @@ describe("BackgroundActivityDialog", () => {
       />
     );
     fireEvent.click(screen.getByRole("button", { name: "Pause Import progress" }));
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Unknown polling loop"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Unknown polling loop"));
   });
 
   it("locks the controls for a non-admin viewer", () => {
@@ -187,7 +187,7 @@ describe("BackgroundActivityDialog", () => {
         readOnly
       />
     );
-    expect(screen.getByRole("button", { name: "Pause Import progress" })).toBeDisabled();
-    expect(screen.getByLabelText("AI review queue interval in seconds")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Pause Import progress" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByLabelText("AI review queue interval in seconds").hasAttribute("disabled")).toBe(true);
   });
 });
