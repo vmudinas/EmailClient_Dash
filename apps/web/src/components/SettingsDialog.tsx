@@ -94,6 +94,26 @@ const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", dee
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
 const MAILBOX_TASK_POLL_MS = 400;
 
+// Curated so the dropdown offers real choices before anyone clicks "Load current models" (which
+// needs a saved key and a round trip to DeepSeek). "Load" still fetches the live catalog and takes
+// over the list once used - this is only the starting point, not a ceiling on what can be selected.
+// No hardcoded pricing here: a stale dollar figure is worse than none, and DeepSeek's own pricing
+// page is the source of truth for that.
+const DEEPSEEK_MODEL_OPTIONS: AiModelOption[] = [
+  {
+    id: "deepseek-v4-flash",
+    label: "DeepSeek V4 Flash",
+    description: "Fastest and cheapest. A good default for high-volume message classification.",
+    pricing: null
+  },
+  {
+    id: "deepseek-v4-pro",
+    label: "DeepSeek V4 Pro",
+    description: "Stronger reasoning, higher cost. Better for drafts and harder classification calls.",
+    pricing: null
+  }
+];
+
 interface SettingsDialogProps {
   open: boolean;
   api: ApiClient | null;
@@ -2752,9 +2772,15 @@ function AiProviderCard({
     }
   };
 
-  const modelOptions: AiModelOption[] = models
-    ? (models.some((entry) => entry.id === model) ? models : [{ id: model, label: model, description: null, pricing: null }, ...models])
-    : [{ id: model, label: model, description: null, pricing: null }];
+  // Before the live list is loaded, DeepSeek gets curated options instead of a single frozen entry
+  // showing only whatever is already saved - otherwise there's no way to pick a different model
+  // without first clicking "Load", which itself needs a saved key.
+  const baseModelOptions = models ?? (provider === "deepseek" ? DEEPSEEK_MODEL_OPTIONS : []);
+  const modelOptions: AiModelOption[] = baseModelOptions.length === 0
+    ? [{ id: model, label: model, description: null, pricing: null }]
+    : baseModelOptions.some((entry) => entry.id === model)
+      ? baseModelOptions
+      : [{ id: model, label: model, description: null, pricing: null }, ...baseModelOptions];
   const selectedOption = modelOptions.find((entry) => entry.id === model) ?? null;
 
   return (
@@ -2802,9 +2828,9 @@ function AiProviderCard({
               </button>
             </div>
             {!info.apiKeyConfigured && <small className="settings-hint">Save an API key first, then load the live model list.</small>}
-            {selectedOption?.pricing && (
+            {(selectedOption?.description || selectedOption?.pricing) && (
               <small className="settings-hint">
-                {selectedOption.description ? `${selectedOption.description} ` : ""}{selectedOption.pricing}
+                {selectedOption.description ? `${selectedOption.description} ` : ""}{selectedOption.pricing ?? ""}
               </small>
             )}
           </label>

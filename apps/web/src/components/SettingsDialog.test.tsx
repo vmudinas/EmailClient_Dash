@@ -645,6 +645,65 @@ describe("SettingsDialog", () => {
     expect(screen.getByText(/\$0\.435 per 1M input tokens/)).toBeTruthy();
   });
 
+  it("offers DeepSeek V4 Pro in the model picker before the live list is ever loaded", async () => {
+    const settingsWithDeepSeekKey: AdminSettings = {
+      ...SETTINGS,
+      ai: {
+        ...SETTINGS.ai,
+        providers: {
+          ...SETTINGS.ai.providers,
+          deepseek: {
+            configured: true,
+            apiKeyConfigured: true,
+            savedApiKeyConfigured: true,
+            environmentApiKeyConfigured: false,
+            source: "admin",
+            model: "deepseek-v4-flash"
+          }
+        }
+      }
+    };
+    const listAiModels = vi.fn().mockResolvedValue([]);
+    const updateAiSettings = vi.fn().mockResolvedValue(settingsWithDeepSeekKey);
+    const api = {
+      adminSettings: vi.fn().mockResolvedValue(settingsWithDeepSeekKey),
+      listGmailConnections: vi.fn().mockResolvedValue([]),
+      listAiModels,
+      updateAiSettings,
+      listUsers: vi.fn().mockResolvedValue(USERS),
+      listAiSchedules: vi.fn().mockResolvedValue([]),
+      listResumes: vi.fn().mockResolvedValue([]),
+      audit: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+      downloadAudit: vi.fn()
+    } as unknown as ApiClient;
+
+    render(
+      <SettingsDialog
+        open
+        api={api}
+        session={SESSION}
+        onClose={vi.fn()}
+        onSignedOut={vi.fn()}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Database" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "AI" }));
+
+    // No click on "Load DeepSeek models" — this is the state most people see first.
+    expect(listAiModels).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("option", { name: "DeepSeek V4 Pro" })).toBeTruthy());
+    expect(screen.getByRole("option", { name: "DeepSeek V4 Flash" })).toBeTruthy();
+
+    const deepSeekModelField = screen.getByDisplayValue("DeepSeek V4 Flash");
+    fireEvent.change(deepSeekModelField, { target: { value: "deepseek-v4-pro" } });
+    fireEvent.click(deepSeekModelField.closest("form")!.querySelector("button.primary-button")!);
+    await waitFor(() => expect(updateAiSettings).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "deepseek",
+      model: "deepseek-v4-pro"
+    })));
+  });
+
   it("loads a Google Desktop OAuth JSON file and saves redacted admin settings", async () => {
     const configuredSettings: AdminSettings = {
       ...SETTINGS,
