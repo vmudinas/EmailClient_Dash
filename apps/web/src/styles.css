@@ -1717,67 +1717,155 @@ textarea:focus-visible {
 }
 
 .news-action-dialog {
-  width: min(460px, 100%);
+  display: flex;
+  width: min(510px, 100%);
+  max-height: calc(100dvh - 36px);
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  color: var(--text);
+  border-radius: 14px;
+  color: var(--ink);
   background: var(--surface);
   box-shadow: 0 22px 60px rgba(16, 24, 19, 0.28);
 }
 
 .news-action-dialog > header {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  padding: 18px 18px 12px;
+  gap: 12px;
+  padding: 18px 18px 10px;
+}
+
+.news-action-dialog > header > div {
+  min-width: 0;
 }
 
 .news-action-dialog > header span {
+  display: block;
+  overflow: hidden;
   color: var(--green);
   font-size: 10px;
   font-weight: 800;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .news-action-dialog h2 {
-  margin: 4px 0 0;
-  font-size: 20px;
+  margin: 5px 0 0;
+  font-size: 19px;
+  line-height: 1.25;
 }
 
+/*
+ * The headline is the content the choice is about, so it reads as body copy rather than a caption.
+ * It scrolls instead of being line-clamped: a clamp on a flex item leaks a partial extra line under
+ * the footer on short viewports, and a long headline should stay readable rather than be truncated.
+ */
 .news-action-dialog > p {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   margin: 0;
   padding: 0 18px 18px;
-  color: var(--muted);
-  font-size: 14px;
+  color: var(--ink);
+  font-size: 15px;
   line-height: 1.5;
+  overscroll-behavior: contain;
 }
 
 .news-action-dialog > footer {
   display: flex;
-  justify-content: flex-end;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 8px;
   padding: 14px 18px;
   border-top: 1px solid var(--line);
   background: var(--surface-soft);
 }
 
-@media (max-width: 560px) {
+/*
+ * Labels must never break mid-phrase, and the row must never wrap into a ragged second line that
+ * orphans the primary action. The dialog is sized so all three buttons fit on one row (they need
+ * ~437px); below the breakpoint below they become a full-width stack instead.
+ */
+.news-action-dialog > footer button {
+  white-space: nowrap;
+}
+
+.news-action-dialog > footer .news-action-remove {
+  order: -1;
+  margin-right: auto;
+}
+
+.news-action-dialog > footer .news-action-cancel {
+  order: 1;
+}
+
+.news-action-dialog > footer .news-action-open {
+  order: 2;
+}
+
+/* De-emphasised destructive action: it should read as available, not as the recommended choice. */
+.news-action-dialog > footer .news-action-remove {
+  border-color: transparent;
+  background: transparent;
+}
+
+.news-action-dialog > footer .news-action-remove:hover:not(:disabled) {
+  border-color: #d5a19d;
+  background: var(--red-soft);
+}
+
+@media (max-width: 620px) {
+  /* Bottom sheet: closer to the thumb, and each action gets a full-width tap target. */
   .news-action-backdrop {
     place-items: end center;
-    padding: 12px;
+    padding: 0;
+  }
+
+  .news-action-dialog {
+    width: 100%;
+    max-height: calc(100dvh - 48px);
+    border-width: 1px 0 0;
+    border-radius: 16px 16px 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    animation: news-action-sheet-in 180ms ease-out;
+  }
+
+  .news-action-dialog h2 {
+    font-size: 18px;
   }
 
   .news-action-dialog > footer {
     display: grid;
     grid-template-columns: 1fr;
+    gap: 8px;
   }
 
-  .news-action-dialog > footer button {
+  /* Stacked order follows the DOM: confirm, then destructive, then dismiss. */
+  .news-action-dialog > footer .news-action-open,
+  .news-action-dialog > footer .news-action-remove,
+  .news-action-dialog > footer .news-action-cancel {
+    order: 0;
     width: 100%;
+    min-height: 44px;
+    margin-right: 0;
   }
+
+  .news-action-dialog > footer .news-action-remove {
+    border-color: #d5a19d;
+    background: var(--red-soft);
+  }
+}
+
+@keyframes news-action-sheet-in {
+  from { transform: translateY(12px); }
+  to { transform: translateY(0); }
 }
 
 @keyframes news-ticker-scroll {
@@ -1785,7 +1873,8 @@ textarea:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .news-ticker-track {
+  .news-ticker-track,
+  .news-action-dialog {
     animation: none;
   }
 }

@@ -84,9 +84,13 @@ export function NewsTickerBar({ headlines, loading, error, secondsPerHeadline, o
             </header>
             <p>{selectedHeadline.title}</p>
             <footer>
-              <button type="button" className="primary-button" onClick={openHeadline}><ExternalLink size={16} /> Open article</button>
-              <button type="button" className="danger-button" onClick={removeHeadline}><Trash2 size={16} /> Remove from feed</button>
-              <button type="button" className="secondary-button" onClick={() => setSelectedHeadline(null)}>Cancel</button>
+              <button type="button" className="primary-button news-action-open" onClick={openHeadline} autoFocus>
+                <ExternalLink size={16} aria-hidden="true" /> <span>Open article</span>
+              </button>
+              <button type="button" className="danger-button news-action-remove" onClick={removeHeadline}>
+                <Trash2 size={16} aria-hidden="true" /> <span>Remove from feed</span>
+              </button>
+              <button type="button" className="secondary-button news-action-cancel" onClick={() => setSelectedHeadline(null)}>Cancel</button>
             </footer>
           </section>
         </div>
