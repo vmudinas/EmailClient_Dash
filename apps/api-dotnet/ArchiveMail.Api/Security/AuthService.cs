@@ -372,6 +372,7 @@ public sealed class AuthService(NpgsqlDataSource database)
         "admin" => "admin",
         "user" => "user",
         "renter" => "renter",
+        "lucas" => "lucas",
         _ => throw new ArgumentException("Choose a valid role")
     };
 
@@ -379,6 +380,8 @@ public sealed class AuthService(NpgsqlDataSource database)
     {
         if (role == "admin") return null;
         if (role == "renter") return ["properties"];
+        // Lucas opens the Lithuanian trainer, which is not one of the mail workspace screens.
+        if (role == "lucas") return [];
         if (screens is null) return null;
         var normalized = screens.Distinct(StringComparer.Ordinal).ToArray();
         if (normalized.Length > ScreenIds.Count || normalized.Any(screen => !ScreenIds.Contains(screen)))

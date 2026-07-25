@@ -5,6 +5,7 @@ using ArchiveMail.Api.Calendar;
 using ArchiveMail.Api.Property;
 using ArchiveMail.Api.Imports;
 using ArchiveMail.Api.Infrastructure;
+using ArchiveMail.Api.Learning;
 using ArchiveMail.Api.Mail;
 using ArchiveMail.Api.Security;
 using ArchiveMail.Api.Productivity;
@@ -42,6 +43,8 @@ builder.Services.AddSingleton<InboxTabRepository>();
 builder.Services.AddSingleton<ObservabilityRepository>();
 builder.Services.AddSingleton<TodoRepository>();
 builder.Services.AddSingleton<ProductivityRepository>();
+builder.Services.AddSingleton<LithuanianTranscriptionService>();
+builder.Services.AddSingleton<LithuanianRepository>();
 builder.Services.AddSingleton<GmailService>();
 builder.Services.AddSingleton<AiService>();
 builder.Services.AddSingleton<AskService>();
@@ -176,6 +179,7 @@ app.MapAiEndpoints();
 app.MapSmartRuleEndpoints();
 app.MapCalendarEndpoints();
 app.MapPropertyEndpoints();
+app.MapLithuanianEndpoints();
 app.MapAdminEndpoints();
 if (Directory.Exists(Path.Combine(app.Environment.ContentRootPath, "wwwroot")))
     // The SPA fallback serves index.html too, and it does not inherit UseStaticFiles'

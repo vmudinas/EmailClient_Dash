@@ -105,7 +105,27 @@ PostgreSQL can be configured by environment variables or through Admin settings.
 
 ## Authentication and integrations
 
-The first fresh database creates `admin` with temporary PIN `2332` and requires it to be changed. Use HTTPS outside a trusted local network.
+The first fresh database creates the `admin` account with a temporary PIN that must be changed on first use; the value is documented in [`deploy/README.md`](deploy/README.md) rather than shown in the sign-in screen. Use HTTPS outside a trusted local network.
+
+Accounts carry one of four roles. `admin` has full control, `user` gets a private mail and calendar workspace with per-screen permissions, `renter` is limited to its linked tenant portal, and `lucas` opens only the Lithuanian trainer described below.
+
+## Lithuanian trainer
+
+Accounts with the `lucas` role sign in to a single screen for practising Lithuanian vocabulary. A word pair is one Lithuanian word beside its English translation. Only the Lithuanian side is spoken and recorded — the English word states the meaning and is not something being learned. The browser speaks the word with `speechSynthesis` at `lt-LT`, and the learner records their own attempt with `MediaRecorder`.
+
+**Scoring.** The recording is uploaded and transcribed on the server with OpenAI speech-to-text (`gpt-4o-transcribe`, `language=lt`). `LithuanianScoring` then compares the transcript to the target word: both are lowercased, stripped of punctuation, and folded to plain letters (recognizers are inconsistent about `ą č ę ė į š ų ū ž`), then measured by Levenshtein distance as a percentage. **85% or higher passes.** The expected word is deliberately never sent as a prompt — that would bias the recognizer toward returning it and inflate every score.
+
+The browser also transcribes locally where it can, and that result is used only as a fallback when no key is configured or the API call fails. Either way the take is saved with its date; an unscored take is marked as such rather than discarded.
+
+What this measures is which word was recognised, not how closely the learner's voice matches a particular speaker — comparing a child's voice to a synthesized one as raw audio would produce a number with nothing behind it.
+
+**Configuration and privacy.** Admin settings has a **Lithuanian** section holding the trainer's own OpenAI key and model, stored encrypted in `app-settings.protected.json` alongside the other secrets. It is deliberately separate from the mail AI providers: practice recordings are uploaded to OpenAI, and removing this one key stops those uploads without affecting mail analysis. `LITHUANIAN_OPENAI_API_KEY` overrides the saved value. With no key configured, nothing is uploaded and takes are saved unscored.
+
+**Daily goal.** One new word a day. The screen leads with today's date and says whether the word is still owed, how long the current streak is, and how many days have passed since the last one. Days are the learner's local days, computed in the browser, because the stored timestamps are UTC and a UTC boundary would call yesterday's word today's.
+
+Recordings are written under `<data directory>/lithuanian-recordings` and capped at 8 MB each; `lithuanian_words` and `lithuanian_recordings` hold the metadata, transcript, score, and date. The screen is laid out mobile-first because it is mainly used on a phone. The microphone requires a secure context, so serve the app over HTTPS for recording to be available on a phone or laptop.
+
+The installation seeds a `lucas` account on startup when one does not already exist. Its PIN can be reset from Admin settings and Users like any other account.
 
 Gmail OAuth needs a Web application callback when deployed remotely:
 

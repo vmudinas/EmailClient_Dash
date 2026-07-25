@@ -10626,3 +10626,567 @@ textarea:focus-visible {
     align-self: flex-start;
   }
 }
+
+/* Lithuanian trainer: Lucas's only screen, and he uses it on a phone. Everything below is
+   written for a portrait handset first -- single column, thumb-sized controls, no hover-only
+   affordances -- and only widens at the breakpoints at the bottom of the block. */
+.trainer-screen {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  background: #f4f5f2;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.trainer-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: max(8px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 8px
+    max(12px, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.trainer-brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.trainer-brand div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.trainer-brand strong {
+  font-size: 15px;
+}
+
+.trainer-brand span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The only scroll container on the screen; momentum scrolling and a bottom inset keep the
+   last card clear of the home indicator. */
+.trainer-body {
+  width: 100%;
+  padding: 14px max(12px, env(safe-area-inset-left)) calc(28px + env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-right));
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The daily goal sits above everything: the date is the first thing read on the screen, and the
+   note says plainly whether a word is still owed. */
+.trainer-today {
+  position: relative;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.trainer-today.due {
+  border-color: #e3d3ae;
+  background: var(--amber-soft);
+}
+
+.trainer-today.done {
+  border-color: #a9cbba;
+  background: var(--green-soft);
+}
+
+.trainer-today-day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.trainer-today-day > svg {
+  flex: 0 0 auto;
+}
+
+.trainer-today.due .trainer-today-day > svg {
+  color: var(--amber);
+}
+
+.trainer-today.done .trainer-today-day > svg {
+  color: var(--green);
+}
+
+.trainer-today-day div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.trainer-today-day strong {
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+.trainer-today-day span {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trainer-today.due .trainer-today-day span {
+  color: var(--amber);
+}
+
+.trainer-today.done .trainer-today-day span {
+  color: var(--green-dark);
+}
+
+.trainer-today-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.trainer-streak {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.trainer-add {
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.trainer-add h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.trainer-add-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.trainer-add-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #515b54;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* 16px keeps iOS Safari from zooming the page when the field takes focus. */
+.trainer-add-fields input {
+  width: 100%;
+  height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: 16px;
+}
+
+.trainer-add-equals {
+  display: none;
+}
+
+.trainer-add-submit {
+  width: 100%;
+  height: 48px;
+}
+
+.trainer-add > small {
+  display: block;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.trainer-warning,
+.trainer-error,
+.trainer-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.trainer-warning > svg,
+.trainer-error > svg,
+.trainer-notice > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.trainer-warning {
+  border: 1px solid #e3d3ae;
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.trainer-error {
+  border: 1px solid #ddb2ae;
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.trainer-notice {
+  border: 1px solid #a9cbba;
+  color: var(--green-dark);
+  background: var(--green-soft);
+}
+
+.trainer-loading,
+.trainer-empty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  margin-top: 36px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.trainer-loading {
+  grid-auto-flow: column;
+  align-items: center;
+}
+
+.trainer-empty > svg {
+  color: var(--green);
+}
+
+.trainer-empty strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.trainer-empty p {
+  margin: 0;
+  padding: 0 12px;
+  text-align: center;
+}
+
+.trainer-words {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trainer-card {
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.trainer-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.trainer-card-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trainer-best {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.trainer-best.pass {
+  color: var(--green-dark);
+  background: var(--green-soft);
+}
+
+.trainer-best.fail {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.trainer-meaning {
+  margin: 10px 0 0;
+  padding: 0 2px;
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.trainer-meaning span {
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trainer-word {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.trainer-word-lt {
+  background: var(--green-soft);
+}
+
+.trainer-word-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.trainer-word-label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trainer-word-text strong {
+  font-size: 30px;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+/* Two thumb-sized targets side by side: comfortable one-handed on a 360px screen. */
+.trainer-word-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.trainer-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 48px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  color: #3d4741;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.trainer-action:active:not(:disabled) {
+  border-color: #8bb7a3;
+  background: var(--green-soft);
+}
+
+.trainer-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.trainer-action.recording {
+  border-color: #d5a19d;
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.trainer-takes {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+
+.trainer-takes li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 12px;
+}
+
+.trainer-takes time {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trainer-take-play {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--green);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.trainer-take-play:active:not(:disabled) {
+  background: var(--green-soft);
+}
+
+.trainer-take-play:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.trainer-take-score {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.trainer-take-score.pass {
+  color: var(--green-dark);
+  background: var(--green-soft);
+}
+
+.trainer-take-score.fail {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.trainer-take-score.unscored {
+  color: var(--muted);
+  background: var(--surface-soft);
+}
+
+.trainer-takes li > .icon-button {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  margin-left: auto;
+}
+
+.trainer-remove-word {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Tablet and up: the add form fits on one line and the word actions sit beside the word. */
+@media (min-width: 600px) {
+  .trainer-topbar {
+    padding-inline: 16px;
+  }
+
+  .trainer-body {
+    width: min(100%, 760px);
+    margin: 0 auto;
+    padding: 20px 16px 40px;
+  }
+
+  .trainer-add {
+    padding: 18px;
+  }
+
+  .trainer-add-fields {
+    grid-template-columns: 1fr auto 1fr auto;
+    align-items: end;
+  }
+
+  .trainer-add-equals {
+    display: block;
+    padding-bottom: 13px;
+    color: var(--faint);
+    font-size: 17px;
+  }
+
+  .trainer-add-submit {
+    width: auto;
+  }
+
+  .trainer-word {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .trainer-word-actions {
+    grid-template-columns: repeat(2, minmax(112px, auto));
+  }
+
+  .trainer-action:hover:not(:disabled) {
+    border-color: #8bb7a3;
+    color: var(--green-dark);
+  }
+
+  .trainer-take-play:hover:not(:disabled) {
+    background: var(--green-soft);
+  }
+}
+
+/* Landscape phone: the topbar and word type shrink so a card still fits above the fold. */
+@media (max-height: 460px) and (orientation: landscape) {
+  .trainer-word-text strong {
+    font-size: 22px;
+  }
+
+  .trainer-add {
+    padding: 12px;
+  }
+}

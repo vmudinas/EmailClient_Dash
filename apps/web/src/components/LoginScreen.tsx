@@ -52,7 +52,6 @@ export function LoginScreen({ busy, error, onLogin }: LoginScreenProps) {
           {busy ? <LoaderCircle className="spin" size={17} /> : <LogIn size={17} />}
           Sign in
         </button>
-        <small>First-run account: <code>admin</code> with PIN <code>2332</code>.</small>
       </form>
     </main>
   );

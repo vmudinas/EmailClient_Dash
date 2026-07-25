@@ -39,7 +39,7 @@ export const AI_AGENT_SKILLS: ReadonlyArray<{
 export type AiJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type AiJobTask = "analyze" | "draft_reply";
 export type AiPriority = "low" | "normal" | "high" | "urgent";
-export type AccountRole = "admin" | "user" | "renter";
+export type AccountRole = "admin" | "user" | "renter" | "lucas";
 export type SessionRole = AccountRole;
 export type DatabaseProvider = "postgresql" | "mssql";
 
@@ -1204,6 +1204,8 @@ export function userCanAccessScreen(
 ): boolean {
   if (user.role === "admin") return true;
   if (user.role === "renter") return screen === "properties";
+  // Lucas only opens the Lithuanian trainer, which is not one of the mail workspace screens.
+  if (user.role === "lucas") return false;
   return !user.allowedScreens || user.allowedScreens.includes(screen);
 }
 
@@ -1212,6 +1214,43 @@ export interface AuthSessionInfo {
   user: UserSummary;
   role: SessionRole;
   expiresAt: string;
+}
+
+/**
+ * Only Lithuanian is spoken and recorded: the English side is the translation, not something
+ * being learned.
+ */
+export const LITHUANIAN_LOCALE = "lt-LT";
+
+/** A take scoring at or above this percentage passes. */
+export const LITHUANIAN_PASS_MARK = 85;
+
+/** One word a day is the practice target. */
+export const LITHUANIAN_DAILY_WORD_GOAL = 1;
+
+export interface LithuanianRecording {
+  id: string;
+  wordId: string;
+  contentType: string;
+  sizeBytes: number;
+  durationMs: number;
+  /** What speech recognition heard, or null when the take could not be scored. */
+  transcript: string | null;
+  /** 0-100 match between what was heard and the target word; null when unscored. */
+  score: number | null;
+  /** score >= LITHUANIAN_PASS_MARK, or null when unscored. */
+  passed: boolean | null;
+  /** When Lucas recorded it, so practice can be tracked over time. */
+  recordedAt: string;
+}
+
+export interface LithuanianWord {
+  id: string;
+  lithuanian: string;
+  english: string;
+  createdAt: string;
+  /** Newest first. */
+  recordings: LithuanianRecording[];
 }
 
 export interface AuthLoginResult {
@@ -1327,6 +1366,17 @@ export interface AdminSettings {
   news: {
     enabledSources: NewsSourceId[];
     secondsPerHeadline: number;
+    settingsPath: string;
+    configurationError: string | null;
+  };
+  lithuanian: {
+    apiKeyConfigured: boolean;
+    environmentManaged: boolean;
+    source: "none" | "admin" | "environment";
+    model: string;
+    defaultModel: string;
+    /** How many accounts currently use the trainer. */
+    learnerCount: number;
     settingsPath: string;
     configurationError: string | null;
   };
@@ -2424,7 +2474,7 @@ const allowedScreensSchema = z.array(z.enum(USER_SCREEN_IDS))
 export const userCreateSchema = z.object({
   username: usernameSchema,
   displayName: z.string().trim().min(1).max(120),
-  role: z.enum(["admin", "user", "renter"]),
+  role: z.enum(["admin", "user", "renter", "lucas"]),
   pin: pinSchema,
   allowedScreens: allowedScreensSchema.nullable().optional()
 }).strict();
@@ -2433,7 +2483,7 @@ export type UserCreate = z.infer<typeof userCreateSchema>;
 
 export const userUpdateSchema = z.object({
   displayName: z.string().trim().min(1).max(120).optional(),
-  role: z.enum(["admin", "user", "renter"]).optional(),
+  role: z.enum(["admin", "user", "renter", "lucas"]).optional(),
   isActive: z.boolean().optional(),
   pin: pinSchema.optional(),
   allowedScreens: allowedScreensSchema.nullable().optional()
@@ -2443,6 +2493,28 @@ export const userUpdateSchema = z.object({
 );
 
 export type UserUpdate = z.infer<typeof userUpdateSchema>;
+
+// One word on each side keeps the practice card readable and the pronunciation unambiguous.
+const singleWordSchema = z.string().trim().min(1).max(64)
+  .refine((value) => !/\s/.test(value), "Enter a single word without spaces");
+
+export const lithuanianWordCreateSchema = z.object({
+  lithuanian: singleWordSchema,
+  english: singleWordSchema
+}).strict();
+
+export type LithuanianWordCreate = z.infer<typeof lithuanianWordCreateSchema>;
+
+export const lithuanianSettingsPatchSchema = z.object({
+  apiKey: z.string().trim().min(1).max(500).optional(),
+  clearApiKey: z.boolean().optional(),
+  model: z.string().trim().min(1).max(100).optional()
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one trainer setting is required"
+);
+
+export type LithuanianSettingsPatch = z.infer<typeof lithuanianSettingsPatchSchema>;
 
 export const databaseSettingsPatchSchema = z.object({
   provider: z.enum(["postgresql", "mssql"]),
