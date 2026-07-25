@@ -10,6 +10,7 @@ import {
 import {
   Archive,
   BrainCircuit,
+  Copy,
   Building2,
   CalendarDays,
   FileEdit,
@@ -29,6 +30,7 @@ import {
   RefreshCw,
   Search,
   Settings as SettingsIcon,
+  Sparkles,
   SlidersHorizontal,
   X
 } from "lucide-react";
@@ -47,6 +49,13 @@ import type {
   ImportJob,
   InboxCategory,
   InboxCategoryCounts,
+  AskAnswer,
+  AskFilters,
+  AskHistoryEntry,
+  DuplicateGroup,
+  DuplicateGroupDetail,
+  DuplicateGroupList,
+  DuplicateReviewStatus,
   InboxTabSettings,
   LocalMessageStatePatch,
   MessageActionSuggestion,
@@ -92,6 +101,8 @@ import { GuideDialog } from "./components/GuideDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
 import { TenantInvitationScreen } from "./components/TenantInvitationScreen.js";
 import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
+import { AskArchiveMailDialog } from "./components/AskArchiveMailDialog.js";
+import { DuplicateGroupsDialog } from "./components/DuplicateGroupsDialog.js";
 import { MessageActionDialog, type ReviewAction } from "./components/MessageActionDialog.js";
 import { StockTickerBar } from "./components/StockTickerBar.js";
 import { NewsTickerBar } from "./components/NewsTickerBar.js";
@@ -251,6 +262,19 @@ export function App() {
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
   const [reviewQueue, setReviewQueue] = useState<AiReviewQueue | null>(null);
   const [reviewQueueLoading, setReviewQueueLoading] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
+  const [askAnswer, setAskAnswer] = useState<AskAnswer | null>(null);
+  const [askHistory, setAskHistory] = useState<AskHistoryEntry[]>([]);
+  const [askBusy, setAskBusy] = useState(false);
+  const [askHistoryLoading, setAskHistoryLoading] = useState(false);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const [duplicateList, setDuplicateList] = useState<DuplicateGroupList | null>(null);
+  const [duplicateStatus, setDuplicateStatus] = useState<DuplicateReviewStatus>("pending");
+  const [duplicateExpanded, setDuplicateExpanded] = useState<DuplicateGroupDetail | null>(null);
+  const [duplicateExpandedId, setDuplicateExpandedId] = useState<string | null>(null);
+  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
+  const [duplicateScanning, setDuplicateScanning] = useState(false);
+  const [duplicateBusyId, setDuplicateBusyId] = useState<string | null>(null);
   const [reviewActionBusyId, setReviewActionBusyId] = useState<string | null>(null);
   const [reviewAllBusy, setReviewAllBusy] = useState(false);
   const [reviewPlanningAction, setReviewPlanningAction] = useState<{ messageId: string; action: ReviewAction } | null>(null);
@@ -1225,6 +1249,115 @@ export function App() {
     void refreshReviewQueue();
   };
 
+  const refreshAskHistory = useCallback(async () => {
+    if (!api || !aiScreenAllowed) return;
+    setAskHistoryLoading(true);
+    try {
+      setAskHistory(await api.listAskHistory());
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Question history could not be loaded");
+    } finally {
+      setAskHistoryLoading(false);
+    }
+  }, [api, aiScreenAllowed, showError]);
+
+  const askArchiveMail = async (question: string, filters: AskFilters) => {
+    if (!api) return;
+    setAskBusy(true);
+    try {
+      setAskAnswer(await api.askArchiveMail({ question, ...(Object.keys(filters).length ? { filters } : {}) }));
+      void refreshAskHistory();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The question could not be answered");
+    } finally {
+      setAskBusy(false);
+    }
+  };
+
+  const refreshDuplicates = useCallback(async (status: DuplicateReviewStatus) => {
+    if (!api || !aiScreenAllowed) return;
+    setDuplicatesLoading(true);
+    try {
+      setDuplicateList(await api.listDuplicateGroups(status));
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Duplicate groups could not be loaded");
+    } finally {
+      setDuplicatesLoading(false);
+    }
+  }, [api, aiScreenAllowed, showError]);
+
+  const openDuplicates = () => {
+    setDuplicatesOpen(true);
+    setDuplicateExpanded(null);
+    setDuplicateExpandedId(null);
+    void refreshDuplicates(duplicateStatus);
+  };
+
+  const toggleDuplicateGroup = async (group: DuplicateGroup) => {
+    if (!api) return;
+    if (duplicateExpandedId === group.id) {
+      setDuplicateExpandedId(null);
+      setDuplicateExpanded(null);
+      return;
+    }
+    setDuplicateExpandedId(group.id);
+    setDuplicateExpanded(null);
+    try {
+      setDuplicateExpanded(await api.getDuplicateGroup(group.id));
+    } catch (error) {
+      setDuplicateExpandedId(null);
+      showError(error instanceof Error ? error.message : "Duplicate group could not be loaded");
+    }
+  };
+
+  const scanDuplicates = async () => {
+    if (!api || readOnly) return;
+    setDuplicateScanning(true);
+    try {
+      const result = await api.scanDuplicates();
+      setDuplicateExpanded(null);
+      setDuplicateExpandedId(null);
+      await refreshDuplicates(duplicateStatus);
+      showError(result.groupsCreated === 0
+        ? "No duplicate copies were found."
+        : `Found ${result.groupsCreated} duplicate ${result.groupsCreated === 1 ? "group" : "groups"} covering ${result.duplicateMessages} messages.`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The duplicate scan could not run");
+    } finally {
+      setDuplicateScanning(false);
+    }
+  };
+
+  const reviewDuplicateGroup = async (group: DuplicateGroup, reviewStatus: DuplicateReviewStatus) => {
+    if (!api || readOnly) return;
+    if (reviewStatus === "dismissed"
+      && !window.confirm("Keep these copies separate? They will not be grouped as duplicates again.")) return;
+    setDuplicateBusyId(group.id);
+    try {
+      await api.updateDuplicateGroup(group.id, { reviewStatus });
+      setDuplicateExpanded(null);
+      setDuplicateExpandedId(null);
+      await refreshDuplicates(duplicateStatus);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The duplicate group could not be updated");
+    } finally {
+      setDuplicateBusyId(null);
+    }
+  };
+
+  const setDuplicatePreferred = async (group: DuplicateGroup, messageId: string) => {
+    if (!api || readOnly) return;
+    setDuplicateBusyId(group.id);
+    try {
+      setDuplicateExpanded(await api.updateDuplicateGroup(group.id, { preferredMessageId: messageId }));
+      await refreshDuplicates(duplicateStatus);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The preferred copy could not be changed");
+    } finally {
+      setDuplicateBusyId(null);
+    }
+  };
+
   const completeReviewFollowUp = async (followUpId: string, messageId: string) => {
     if (!api || readOnly) return;
     setReviewActionBusyId(followUpId);
@@ -2169,6 +2302,16 @@ export function App() {
             </button>
           )}
           {canAccessScreen("ai") && (
+            <button className="icon-button ask-trigger" onClick={() => setAskOpen(true)} title="Ask Archive Mail" aria-label="Ask Archive Mail">
+              <Sparkles size={18} />
+            </button>
+          )}
+          {canAccessScreen("ai") && (
+            <button className="icon-button duplicates-trigger" onClick={openDuplicates} title="Review duplicate messages" aria-label="Review duplicate messages">
+              <Copy size={18} />
+            </button>
+          )}
+          {canAccessScreen("ai") && (
             <button className="icon-button review-queue-trigger" onClick={openReviewQueue} title="Open AI review queue" aria-label="Open AI review queue">
               <BrainCircuit size={18} />
               {(reviewQueue?.totalItems ?? 0) > 0 && <span className="diagnostic-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
@@ -2385,6 +2528,8 @@ export function App() {
             </header>
             <div className="mobile-action-grid">
               {!readOnly && canAccessScreen("compose") && <button onClick={() => { setMobileMenuOpen(false); openDrafts(); }}><FileEdit size={20} /><span>Drafts</span></button>}
+              {canAccessScreen("ai") && <button onClick={() => { setMobileMenuOpen(false); setAskOpen(true); }}><Sparkles size={20} /><span>Ask mail</span></button>}
+              {canAccessScreen("ai") && <button onClick={() => { setMobileMenuOpen(false); openDuplicates(); }}><Copy size={20} /><span>Duplicates</span></button>}
               {canAccessScreen("ai") && <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>}
               {canUseMail && <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>}
               {!readOnly && canAccessScreen("import") && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
@@ -2502,6 +2647,48 @@ export function App() {
         onEdit={editSavedDraft}
         onSend={(draft) => void sendSavedDraft(draft)}
         onDelete={(draft) => void deleteSavedDraft(draft)}
+      />
+      <AskArchiveMailDialog
+        open={askOpen}
+        answer={askAnswer}
+        history={askHistory}
+        asking={askBusy}
+        historyLoading={askHistoryLoading}
+        onClose={() => setAskOpen(false)}
+        onAsk={(question, filters) => void askArchiveMail(question, filters)}
+        onOpenMessage={(messageId) => {
+          setAskOpen(false);
+          void openMessage({ id: messageId });
+        }}
+        onRefreshHistory={() => void refreshAskHistory()}
+      />
+      <DuplicateGroupsDialog
+        open={duplicatesOpen}
+        list={duplicateList}
+        status={duplicateStatus}
+        expanded={duplicateExpanded}
+        expandedId={duplicateExpandedId}
+        loading={duplicatesLoading}
+        scanning={duplicateScanning}
+        busyGroupId={duplicateBusyId}
+        readOnly={readOnly}
+        onClose={() => setDuplicatesOpen(false)}
+        onRefresh={() => void refreshDuplicates(duplicateStatus)}
+        onScan={() => void scanDuplicates()}
+        onChangeStatus={(status) => {
+          setDuplicateStatus(status);
+          setDuplicateExpanded(null);
+          setDuplicateExpandedId(null);
+          void refreshDuplicates(status);
+        }}
+        onToggleGroup={(group) => void toggleDuplicateGroup(group)}
+        onConfirm={(group) => void reviewDuplicateGroup(group, "confirmed")}
+        onDismiss={(group) => void reviewDuplicateGroup(group, "dismissed")}
+        onSetPreferred={(group, messageId) => void setDuplicatePreferred(group, messageId)}
+        onOpenMessage={(messageId) => {
+          setDuplicatesOpen(false);
+          void openMessage({ id: messageId });
+        }}
       />
       <AiReviewQueueDialog
         open={reviewQueueOpen}
