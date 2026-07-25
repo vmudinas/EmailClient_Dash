@@ -89,7 +89,7 @@ describe("LithuanianGameView", () => {
     expect(screen.getByText("New best score!")).toBeTruthy();
   });
 
-  it("does not accept a word spelled without its diacritics", async () => {
+  it("accepts a word typed without its accents, and shows how it is spelled", async () => {
     render(
       <LithuanianGameView
         api={client()}
@@ -103,7 +103,48 @@ describe("LithuanianGameView", () => {
     fireEvent.change(screen.getByLabelText("Spell it in Lithuanian"), { target: { value: "aciu" } });
     fireEvent.click(screen.getByRole("button", { name: "Check" }));
 
-    // The diacritics are the spelling the game is there to teach, so they are not forgiven.
+    // An English keyboard has no ū on it, so the accents are shown rather than charged for.
+    const verdict = screen.getByRole("status").textContent ?? "";
+    expect(verdict).toContain("Correct");
+    expect(verdict).toContain("ačiū");
+    expect(screen.getByLabelText("3 lives left")).toBeTruthy();
+  });
+
+  it("holds a corrected spelling on screen long enough to read", async () => {
+    render(
+      <LithuanianGameView
+        api={client()}
+        words={ONE}
+        bestScore={0}
+        onFinished={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("Spell it in Lithuanian"), { target: { value: "aciu" } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+
+    // Still up after the pause an ordinary verdict gets, because there is something to read.
+    await settle(1_000);
+    expect(screen.getByRole("status").textContent).toContain("ačiū");
+    await settle(1_000);
+    expect(screen.getByText("Game over")).toBeTruthy();
+  });
+
+  it("still refuses a word that is wrong past its accents", async () => {
+    render(
+      <LithuanianGameView
+        api={client()}
+        words={ONE}
+        bestScore={0}
+        onFinished={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("Spell it in Lithuanian"), { target: { value: "labas" } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+
     expect(screen.getByRole("status").textContent).toContain("It was ačiū");
   });
 

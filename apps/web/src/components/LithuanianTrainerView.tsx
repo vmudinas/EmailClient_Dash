@@ -520,23 +520,6 @@ export function LithuanianTrainerView({
       </header>
 
       <div className="trainer-body">
-        {!loading && words.length > 0 && (
-          <section className="trainer-play">
-            <div>
-              <strong>Play a round</strong>
-              <span>{highScore > 0 ? `Best ${highScore}` : "No score yet — go and set one"}</span>
-            </div>
-            <button
-              type="button"
-              className="primary-button"
-              onClick={startGame}
-              // Leaving mid-take would throw the recording away; scoring one is worth waiting for.
-              disabled={recordingWordId !== null || savingWordId !== null}
-            >
-              <Gamepad2 size={17} /> Play
-            </button>
-          </section>
-        )}
         {!loading && (
           <section className={`trainer-today ${practice.dueToday ? "due" : "done"}`} aria-live="polite">
             <div className="trainer-today-day">
@@ -850,6 +833,28 @@ export function LithuanianTrainerView({
           </ul>
         )}
       </div>
+      {/* Docked to the bottom of the screen rather than sitting above the word list: on a phone
+          the top corner is the far end of a thumb's reach, and this is the button worth reaching
+          for. Down here it is also still there after scrolling through a long list of words. */}
+      {!loading && words.length > 0 && (
+        <section className="trainer-play">
+          <div className="trainer-play-inner">
+            <div>
+              <strong>Play a round</strong>
+              <span>{highScore > 0 ? `Best ${highScore}` : "No score yet — go and set one"}</span>
+            </div>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={startGame}
+              // Leaving mid-take would throw the recording away; scoring one is worth waiting for.
+              disabled={recordingWordId !== null || savingWordId !== null}
+            >
+              <Gamepad2 size={17} /> Play
+            </button>
+          </div>
+        </section>
+      )}
       <audio ref={audio} hidden />
     </main>
   );

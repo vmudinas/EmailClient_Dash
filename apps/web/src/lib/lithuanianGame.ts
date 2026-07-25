@@ -54,11 +54,33 @@ function shuffle<T>(items: readonly T[], random: Random): T[] {
 }
 
 /**
- * Whether a typed answer counts. Case and surrounding space are forgiven; the diacritics are not,
- * because they are the spelling the game is there to teach.
+ * How well a typed answer matched: letter for letter, right but for the diacritics, or wrong.
  */
-export function answerMatches(typed: string, answer: string): boolean {
-  return typed.trim().toLocaleLowerCase("lt") === answer.trim().toLocaleLowerCase("lt");
+export type AnswerGrade = "exact" | "close" | "wrong";
+
+/** Case, surrounding space and the two ways a browser can encode an accent, all settled. */
+function tidy(value: string): string {
+  return value.trim().toLocaleLowerCase("lt").normalize("NFC");
+}
+
+/** The same word with its accents taken off, so `kate` and `katė` compare as one. */
+function bare(value: string): string {
+  return value.normalize("NFD").replace(/\p{Diacritic}/gu, "");
+}
+
+/**
+ * How close a typed answer is.
+ *
+ * Case and surrounding space are forgiven outright. A missing diacritic is forgiven too, and
+ * counts as a right answer: an English keyboard has no ė on it, and losing a life to the keyboard
+ * rather than to the word teaches nothing. It comes back as `close` rather than `exact` so the
+ * game can show the spelling that was meant -- which is the part worth learning.
+ */
+export function gradeAnswer(typed: string, answer: string): AnswerGrade {
+  const given = tidy(typed);
+  const wanted = tidy(answer);
+  if (given === wanted) return "exact";
+  return bare(given) === bare(wanted) ? "close" : "wrong";
 }
 
 /**

@@ -5,8 +5,8 @@ import {
   GAME_CHOICE_COUNT,
   GAME_MAX_MULTIPLIER,
   GAME_QUESTION_MS,
-  answerMatches,
   buildRound,
+  gradeAnswer,
   multiplierFor,
   pointsFor
 } from "./lithuanianGame.js";
@@ -39,14 +39,26 @@ function rolls(values: number[]) {
   return () => values[index++ % values.length]!;
 }
 
-describe("answerMatches", () => {
+describe("gradeAnswer", () => {
   it("forgives case and surrounding space", () => {
-    expect(answerMatches("  Ačiū ", "ačiū")).toBe(true);
+    expect(gradeAnswer("  Ačiū ", "ačiū")).toBe("exact");
   });
 
-  it("does not forgive a missing diacritic, which is the spelling being taught", () => {
-    expect(answerMatches("aciu", "ačiū")).toBe(false);
-    expect(answerMatches("aciū", "ačiū")).toBe(false);
+  it("reads a combining accent as the same letter as a precomposed one", () => {
+    // Which of the two a keyboard sends is the keyboard's business, not the learner's.
+    expect(gradeAnswer("katė", "katė")).toBe("exact");
+  });
+
+  it("counts a word typed without its accents, and marks it for correcting", () => {
+    expect(gradeAnswer("kate", "katė")).toBe("close");
+    expect(gradeAnswer("aciu", "ačiū")).toBe("close");
+    expect(gradeAnswer("Aciū", "ačiū")).toBe("close");
+  });
+
+  it("still refuses a word that is wrong past its accents", () => {
+    expect(gradeAnswer("katinas", "katė")).toBe("wrong");
+    expect(gradeAnswer("kat", "katė")).toBe("wrong");
+    expect(gradeAnswer("", "katė")).toBe("wrong");
   });
 });
 

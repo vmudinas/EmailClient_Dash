@@ -7,8 +7,8 @@ import {
   GAME_LIVES,
   GAME_QUESTION_MS,
   type GameQuestion,
-  answerMatches,
   buildRound,
+  gradeAnswer,
   multiplierFor,
   pointsFor
 } from "../lib/lithuanianGame.js";
@@ -19,10 +19,15 @@ const TickMs = 100;
 /** How long a right or wrong answer is shown before the next question. */
 const VerdictMs = 900;
 
+/** Longer, for a verdict carrying a spelling to read: the accents are the point of the pause. */
+const SpellingVerdictMs = 1_800;
+
 interface Verdict {
   correct: boolean;
   answer: string;
   points: number;
+  /** Set when the answer counted but was typed without its accents. */
+  corrected: boolean;
 }
 
 /**
@@ -100,10 +105,10 @@ export function LithuanianGameView({
     }
   }, [api, onFinished]);
 
-  const settle = useCallback((correct: boolean, remaining: number) => {
+  const settle = useCallback((correct: boolean, remaining: number, corrected = false) => {
     if (!question) return;
     const points = correct ? pointsFor(remaining, combo) : 0;
-    setVerdict({ correct, answer: question.answer, points });
+    setVerdict({ correct, answer: question.answer, points, corrected });
     if (correct) {
       setScore((current) => current + points);
       setCombo((current) => {
@@ -139,15 +144,15 @@ export function LithuanianGameView({
   // Moves on once the verdict has been read: to the next question, or to the end of the game when
   // the lives or the questions run out.
   useEffect(() => {
-    if (!answered) return;
+    if (!verdict) return;
     const timer = window.setTimeout(() => {
       setVerdict(null);
       setTyped("");
       if (lives <= 0 || index + 1 >= round.length) void finish();
       else setIndex((current) => current + 1);
-    }, VerdictMs);
+    }, verdict.corrected ? SpellingVerdictMs : VerdictMs);
     return () => window.clearTimeout(timer);
-  }, [answered, lives, index, round.length, finish]);
+  }, [verdict, lives, index, round.length, finish]);
 
   useEffect(() => {
     const urls = clips.current;
@@ -190,15 +195,18 @@ export function LithuanianGameView({
     }
   }, [api, spoken]);
 
+  // A picked choice is one of the strings the question was built from, so it is compared as it
+  // stands: forgiving an accent here would let a decoy that differs by one through.
   const answer = (choice: string) => {
     if (answered || !question) return;
-    settle(answerMatches(choice, question.answer), msLeft);
+    settle(choice === question.answer, msLeft);
   };
 
   const submitTyped = (event: FormEvent) => {
     event.preventDefault();
     if (answered || !question) return;
-    settle(answerMatches(typed, question.answer), msLeft);
+    const grade = gradeAnswer(typed, question.answer);
+    settle(grade !== "wrong", msLeft, grade === "close");
   };
 
   const clock = Math.max(0, Math.min(100, (msLeft / GAME_QUESTION_MS) * 100));
@@ -334,9 +342,12 @@ export function LithuanianGameView({
 
       {verdict && (
         <p className={`game-verdict ${verdict.correct ? "right" : "wrong"}`} role="status">
-          {verdict.correct
-            ? `Correct  +${verdict.points}`
-            : `It was ${verdict.answer}`}
+          {!verdict.correct
+            ? `It was ${verdict.answer}`
+            : verdict.corrected
+              // The point was made by counting it right; the accents are shown, not scolded about.
+              ? `Correct  +${verdict.points} · spelled ${verdict.answer}`
+              : `Correct  +${verdict.points}`}
         </p>
       )}
     </div>
