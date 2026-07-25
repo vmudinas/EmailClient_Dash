@@ -150,16 +150,14 @@ public sealed class AskService(
             WITH search_query AS (SELECT websearch_to_tsquery('simple', $2) AS value)
             SELECT m.id, m.subject, m.sender_address, COALESCE(m.received_at, m.sent_at, m.created_at) AS at,
                    m.body_text, COALESCE(m.content_sha256, m.id) AS fingerprint,
-                   ts_rank_cd(to_tsvector('simple', COALESCE(m.subject, '') || ' ' || COALESCE(m.sender_name, '') || ' ' ||
-                     COALESCE(m.sender_address, '') || ' ' || COALESCE(m.recipients_text, '') || ' ' ||
-                     COALESCE(m.body_text, '')), search_query.value) AS rank
+                   ts_rank_cd(archive_mail_message_search(m.subject, m.sender_name, m.sender_address,
+                     m.recipients_text, m.body_text), search_query.value) AS rank
             FROM messages m
             CROSS JOIN search_query
             JOIN archives a ON a.id = m.archive_id
             WHERE a.owner_user_id = $1
-              AND to_tsvector('simple', COALESCE(m.subject, '') || ' ' || COALESCE(m.sender_name, '') || ' ' ||
-                    COALESCE(m.sender_address, '') || ' ' || COALESCE(m.recipients_text, '') || ' ' ||
-                    COALESCE(m.body_text, '')) @@ search_query.value
+              AND archive_mail_message_search(m.subject, m.sender_name, m.sender_address,
+                    m.recipients_text, m.body_text) @@ search_query.value
             """);
         var index = 3;
         var extra = new List<object>();

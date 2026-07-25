@@ -332,23 +332,24 @@ public sealed class MailRepository(NpgsqlDataSource database)
             WITH search_query AS (SELECT websearch_to_tsquery('simple', @query) AS value),
             raw_hits AS (
               SELECT m.id AS message_id,
-                ts_rank_cd(to_tsvector('simple', COALESCE(m.subject, '') || ' ' || COALESCE(m.sender_name, '') || ' ' ||
-                  COALESCE(m.sender_address, '') || ' ' || COALESCE(m.recipients_text, '') || ' ' || COALESCE(m.body_text, '')),
-                  search_query.value) AS rank,
+                ts_rank_cd(archive_mail_message_search(m.subject, m.sender_name, m.sender_address,
+                  m.recipients_text, m.body_text), search_query.value) AS rank,
                 'message' AS matched_in, NULL::text AS attachment_id, NULL::text AS attachment_name,
-                ts_headline('simple', COALESCE(m.subject, '') || ' ' || COALESCE(m.body_text, ''), search_query.value,
+                ts_headline('simple', archive_mail_search_excerpt(
+                  COALESCE(m.subject, '') || ' ' || COALESCE(m.body_text, '')), search_query.value,
                   'StartSel=<mark>, StopSel=</mark>, MaxWords=24, MinWords=8') AS hit_snippet
               FROM messages m CROSS JOIN search_query
-              WHERE to_tsvector('simple', COALESCE(m.subject, '') || ' ' || COALESCE(m.sender_name, '') || ' ' ||
-                COALESCE(m.sender_address, '') || ' ' || COALESCE(m.recipients_text, '') || ' ' || COALESCE(m.body_text, '')) @@ search_query.value
+              WHERE archive_mail_message_search(m.subject, m.sender_name, m.sender_address,
+                m.recipients_text, m.body_text) @@ search_query.value
               UNION ALL
               SELECT a.message_id,
-                ts_rank_cd(to_tsvector('simple', COALESCE(a.filename, '') || ' ' || COALESCE(a.extracted_text, '')), search_query.value) * 0.8,
+                ts_rank_cd(archive_mail_attachment_search(a.filename, a.extracted_text), search_query.value) * 0.8,
                 'attachment', a.id, a.filename,
-                ts_headline('simple', COALESCE(a.filename, '') || ' ' || COALESCE(a.extracted_text, ''), search_query.value,
+                ts_headline('simple', archive_mail_search_excerpt(
+                  COALESCE(a.filename, '') || ' ' || COALESCE(a.extracted_text, '')), search_query.value,
                   'StartSel=<mark>, StopSel=</mark>, MaxWords=24, MinWords=8')
               FROM attachments a CROSS JOIN search_query
-              WHERE to_tsvector('simple', COALESCE(a.filename, '') || ' ' || COALESCE(a.extracted_text, '')) @@ search_query.value
+              WHERE archive_mail_attachment_search(a.filename, a.extracted_text) @@ search_query.value
             ), ranked AS (
               SELECT *, ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY rank DESC) AS hit_order FROM raw_hits
             )

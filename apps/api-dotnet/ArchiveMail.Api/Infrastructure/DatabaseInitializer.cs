@@ -214,10 +214,49 @@ public sealed class DatabaseInitializer(
           END IF;
         END
         $archive_mail$;
-        CREATE INDEX IF NOT EXISTS messages_postgres_search_idx ON messages USING GIN (to_tsvector('simple',
-          COALESCE(subject, '') || ' ' || COALESCE(sender_name, '') || ' ' || COALESCE(sender_address, '') || ' ' ||
-          COALESCE(recipients_text, '') || ' ' || COALESCE(body_text, '')
-        ));
+        -- Postgres refuses to build a tsvector from an input string over 1048575 bytes and
+        -- raises 54000, and a GIN expression index recomputes its expression on every
+        -- INSERT, so one oversized message body fails the whole import batch. These
+        -- helpers bound what gets indexed; the row still stores the full untruncated body,
+        -- only the search vector is capped.
+        -- left() counts characters while the limit is on bytes, and UTF-8 reaches 4 bytes
+        -- per character, so 131072 characters can never exceed 524288 bytes: inside the
+        -- input cap with room to spare for the separate 1MB cap on the vector itself.
+        -- Changing this limit requires rebuilding the GIN indexes below, because an
+        -- expression index keeps whatever the function returned when it was built.
+        -- The two indexed functions inline left() rather than calling the excerpt helper:
+        -- an unqualified call inside an indexed function would resolve through whatever
+        -- search_path the executing session happens to carry, and search silently breaking
+        -- is not worth saving one duplicated literal. archive_mail_search_excerpt exists
+        -- for the ts_headline call sites, which are not part of any index expression.
+        CREATE OR REPLACE FUNCTION archive_mail_search_excerpt(p_document TEXT)
+        RETURNS TEXT LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $archive_mail_search$
+          SELECT left(COALESCE(p_document, ''), 131072)
+        $archive_mail_search$;
+
+        CREATE OR REPLACE FUNCTION archive_mail_message_search(
+          p_subject TEXT, p_sender_name TEXT, p_sender_address TEXT,
+          p_recipients_text TEXT, p_body_text TEXT
+        ) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $archive_mail_search$
+          SELECT to_tsvector('simple', left(
+            COALESCE(p_subject, '') || ' ' || COALESCE(p_sender_name, '') || ' ' ||
+            COALESCE(p_sender_address, '') || ' ' || COALESCE(p_recipients_text, '') || ' ' ||
+            COALESCE(p_body_text, ''), 131072))
+        $archive_mail_search$;
+
+        CREATE OR REPLACE FUNCTION archive_mail_attachment_search(
+          p_filename TEXT, p_extracted_text TEXT
+        ) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $archive_mail_search$
+          SELECT to_tsvector('simple', left(
+            COALESCE(p_filename, '') || ' ' || COALESCE(p_extracted_text, ''), 131072))
+        $archive_mail_search$;
+
+        -- Replaces the unbounded to_tsvector(...) expression index. The legacy name is
+        -- dropped explicitly so this stays idempotent rather than rebuilding every start.
+        DROP INDEX IF EXISTS messages_postgres_search_idx;
+        CREATE INDEX IF NOT EXISTS messages_search_idx ON messages USING GIN (
+          archive_mail_message_search(subject, sender_name, sender_address, recipients_text, body_text)
+        );
 
         CREATE TABLE IF NOT EXISTS message_state (
           message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -248,8 +287,9 @@ public sealed class DatabaseInitializer(
           blob_sha256 TEXT NOT NULL REFERENCES blobs(sha256)
         );
         CREATE INDEX IF NOT EXISTS attachments_message_idx ON attachments(message_id);
-        CREATE INDEX IF NOT EXISTS attachments_postgres_search_idx ON attachments USING GIN (
-          to_tsvector('simple', COALESCE(filename, '') || ' ' || COALESCE(extracted_text, ''))
+        DROP INDEX IF EXISTS attachments_postgres_search_idx;
+        CREATE INDEX IF NOT EXISTS attachments_search_idx ON attachments USING GIN (
+          archive_mail_attachment_search(filename, extracted_text)
         );
 
         CREATE TABLE IF NOT EXISTS import_jobs (
