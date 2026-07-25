@@ -184,9 +184,23 @@ public sealed class DatabaseInitializer(
           inbox_category TEXT NOT NULL DEFAULT 'primary' CHECK(inbox_category IN (
             'primary', 'promotions', 'social', 'updates', 'bills', 'medical', 'mail_tracking'
           )),
+          content_sha256 TEXT,
+          raw_sha256 TEXT,
+          simhash BIGINT,
+          fingerprinted_at TEXT,
           created_at TEXT NOT NULL,
           UNIQUE(archive_id, source_key)
         );
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS content_sha256 TEXT;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS raw_sha256 TEXT;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS simhash BIGINT;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS fingerprinted_at TEXT;
+        CREATE INDEX IF NOT EXISTS messages_content_hash_idx ON messages(content_sha256)
+          WHERE content_sha256 IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS messages_internet_id_idx ON messages(archive_id, internet_message_id)
+          WHERE internet_message_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS messages_fingerprint_pending_idx ON messages(created_at)
+          WHERE fingerprinted_at IS NULL;
         CREATE INDEX IF NOT EXISTS messages_archive_date_idx ON messages(archive_id, received_at DESC, sent_at DESC);
         CREATE INDEX IF NOT EXISTS messages_folder_date_idx ON messages(folder_id, received_at DESC, sent_at DESC);
         CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_address);
@@ -651,6 +665,58 @@ public sealed class DatabaseInitializer(
           output_tokens BIGINT NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS ai_duplicate_groups (
+          id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          group_key TEXT NOT NULL,
+          preferred_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+          detection_tier TEXT NOT NULL CHECK(detection_tier IN ('exact_id', 'raw_hash', 'content_hash', 'near_duplicate')),
+          confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+          member_count BIGINT NOT NULL DEFAULT 0,
+          review_status TEXT NOT NULL DEFAULT 'pending' CHECK(review_status IN ('pending', 'confirmed', 'dismissed')),
+          reviewed_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_duplicate_groups_key_idx ON ai_duplicate_groups(owner_user_id, group_key);
+        CREATE INDEX IF NOT EXISTS ai_duplicate_groups_owner_idx
+          ON ai_duplicate_groups(owner_user_id, review_status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS ai_duplicate_members (
+          group_id TEXT NOT NULL REFERENCES ai_duplicate_groups(id) ON DELETE CASCADE,
+          message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          relation TEXT NOT NULL DEFAULT 'same_message' CHECK(relation IN (
+            'same_message', 'same_thread_copy', 'forwarded_copy'
+          )),
+          evidence_json TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(group_id, message_id)
+        );
+        CREATE INDEX IF NOT EXISTS ai_duplicate_members_message_idx ON ai_duplicate_members(message_id);
+
+        CREATE TABLE IF NOT EXISTS ai_not_duplicate_pairs (
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          left_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          right_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(owner_user_id, left_message_id, right_message_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_questions (
+          id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          question TEXT NOT NULL,
+          answer TEXT NOT NULL DEFAULT '',
+          citations_json TEXT NOT NULL DEFAULT '[]',
+          retrieved_ids_json TEXT NOT NULL DEFAULT '[]',
+          retrieval_mode TEXT NOT NULL DEFAULT 'fts',
+          provider TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          excerpt_count BIGINT NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS ai_questions_owner_idx ON ai_questions(owner_user_id, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS email_drafts (
           id TEXT PRIMARY KEY,

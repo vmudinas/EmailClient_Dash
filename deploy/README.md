@@ -237,6 +237,52 @@ proxy mode, binds the application port to `127.0.0.1`, and runs the existing
 deployment health check. The default URL is `https://vts.i234.me` when the
 argument is omitted.
 
+### "Deploy succeeded but I can't open the app" — NAT hairpin
+
+`ARCHIVE_MAIL_BIND_ADDRESS=127.0.0.1` (the default and recommended value) means
+port `3001` listens on the NAS loopback interface only. This is intentional:
+outside traffic is meant to arrive through the HTTPS reverse proxy, never by
+hitting the container port directly. Two consequences that look like failures
+but are not:
+
+- **`http://<nas-ip>:3001/` or `http://synology.local:3001/` refuses/hangs from
+  any other machine.** Correct — the port is not published to the LAN. Use the
+  reverse-proxy URL (`EMAIL_CLIENT_PUBLIC_URL`) instead.
+- **The deploy reports success but the public URL is unreachable *from your own
+  network*.** The deploy health check runs *on the NAS* against
+  `http://127.0.0.1:3001/api/health`, so it passes even when outside access is
+  broken. When your workstation and the NAS share one public IP (both behind the
+  same router), opening `https://<your-domain>` asks the router to route traffic
+  to your own WAN address and bounce it back inside — **NAT hairpin / loopback**.
+  Many routers don't support it: TLS connects, then the HTTP response never
+  returns. External clients (a phone on cellular) are unaffected.
+
+Confirm the diagnosis by reaching the NAS over the LAN with the real hostname —
+this should return `{"status":"ok",...}` even when the public URL hangs:
+
+```sh
+curl -k --resolve <your-domain>:443:<nas-lan-ip> https://<your-domain>/api/health
+```
+
+Fixes, cheapest first:
+
+1. **Per-machine hosts override (quick):** point the hostname at the LAN IP on
+   the affected workstation.
+
+   ```sh
+   echo "<nas-lan-ip> <your-domain>" | sudo tee -a /etc/hosts
+   ```
+
+2. **Split-horizon DNS (network-wide, preferred):** run the Synology **DNS
+   Server** package (or your router's local DNS) and add an A record resolving
+   `<your-domain>` to `<nas-lan-ip>` for clients inside the LAN. Every device at
+   home then reaches the NAS directly and skips the hairpin; external clients
+   keep resolving the public IP via public DNS.
+
+3. **Enable NAT loopback / hairpin NAT** on the router, if it offers the option.
+
+Only options 2 and 3 are network-wide; the hosts entry fixes a single machine.
+
 ## Gmail OAuth on a server
 
 The local desktop launch uses Google's loopback callback. A browser on another computer cannot return to the container through that callback. For the server deployment:

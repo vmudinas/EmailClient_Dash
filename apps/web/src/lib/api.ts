@@ -9,6 +9,14 @@ import type {
   AiReviewQueue,
   AiAnalysisReview,
   AiAnalysisReviewAllResult,
+  AskAnswer,
+  AskHistoryEntry,
+  AskRequest,
+  DuplicateGroupDetail,
+  DuplicateGroupList,
+  DuplicateGroupPatch,
+  DuplicateReviewStatus,
+  DuplicateScanResult,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleUpdate,
@@ -749,6 +757,34 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify(input)
     });
+  }
+
+  askArchiveMail(input: AskRequest): Promise<AskAnswer> {
+    return this.request("/api/ai/ask", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  listAskHistory(): Promise<AskHistoryEntry[]> {
+    return this.request("/api/ai/ask/history");
+  }
+
+  listDuplicateGroups(status?: DuplicateReviewStatus): Promise<DuplicateGroupList> {
+    const query = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.request(`/api/ai/duplicates${query}`);
+  }
+
+  getDuplicateGroup(groupId: string): Promise<DuplicateGroupDetail> {
+    return this.request(`/api/ai/duplicates/${encodeURIComponent(groupId)}`);
+  }
+
+  updateDuplicateGroup(groupId: string, patch: DuplicateGroupPatch): Promise<DuplicateGroupDetail> {
+    return this.request(`/api/ai/duplicates/${encodeURIComponent(groupId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+  }
+
+  scanDuplicates(): Promise<DuplicateScanResult> {
+    return this.request("/api/ai/duplicates/scan", { method: "POST" });
   }
 
   getAiJob(jobId: string): Promise<AiJob> {

@@ -55,6 +55,32 @@ describe("NewsTickerBar", () => {
     expect(track.style.animationDuration).toBe("24s");
   });
 
+  it("gives the story dialog a clear action hierarchy that survives narrow widths", () => {
+    const headline: NewsHeadline = {
+      id: "https://aj.test/1",
+      sourceId: "aljazeera",
+      sourceName: "Al Jazeera",
+      title: "A headline long enough that three side-by-side buttons would not fit on one row",
+      link: "https://aj.test/1",
+      publishedAt: null
+    };
+    render(<NewsTickerBar headlines={[headline]} loading={false} error="" secondsPerHeadline={8} onRefresh={vi.fn()} />);
+    fireEvent.click(screen.getByRole("link", { name: /A headline long enough/ }));
+
+    // The primary action is focused so keyboard and screen-reader users land on it.
+    const openArticle = screen.getByRole("button", { name: "Open article" });
+    expect(document.activeElement).toBe(openArticle);
+
+    // Each action carries its own class so the layout can order them per breakpoint: the destructive
+    // action to one side, cancel then confirm to the other, and a full-width stack on narrow screens.
+    expect(openArticle.className).toContain("news-action-open");
+    expect(screen.getByRole("button", { name: "Remove from feed" }).className).toContain("news-action-remove");
+    expect(screen.getByRole("button", { name: "Cancel" }).className).toContain("news-action-cancel");
+
+    // Decorative icons must not leak into the accessible name.
+    expect(openArticle.querySelectorAll("svg[aria-hidden=\"true\"]").length).toBe(1);
+  });
+
   it("removes a selected story from every ticker copy and remembers the dismissal", () => {
     const headline: NewsHeadline = {
       id: "https://bbc.test/remove-me",
