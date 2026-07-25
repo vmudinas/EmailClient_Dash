@@ -23,6 +23,30 @@ public sealed class AdminSettingsViewService(
         var stocks = application.StocksValue;
         var news = application.NewsValue;
         var ai = application.AiValue;
+        var polling = application.PollingValue;
+        // Merge the catalog with saved overrides so the admin screen gets labels, defaults
+        // and effective values in one payload and never has to hardcode the loop list.
+        var pollingLoops = PollingDefaults.Catalog.Select(definition =>
+        {
+            var configured = polling.For(definition.Key);
+            return new
+            {
+                key = definition.Key,
+                label = definition.Label,
+                description = definition.Description,
+                enabled = configured.Enabled,
+                intervalMs = configured.IntervalMs ?? definition.IntervalMs,
+                defaultIntervalMs = definition.IntervalMs,
+                activeIntervalMs = definition.ActiveIntervalMs is null
+                    ? (int?)null
+                    : configured.ActiveIntervalMs ?? definition.ActiveIntervalMs,
+                defaultActiveIntervalMs = definition.ActiveIntervalMs,
+                activeLabel = definition.ActiveLabel,
+                customized = configured.IntervalMs is not null
+                    || configured.ActiveIntervalMs is not null
+                    || !configured.Enabled
+            };
+        }).ToArray();
         var emptyUsage = new
         {
             todayRequests = 0,
@@ -43,6 +67,12 @@ public sealed class AdminSettingsViewService(
         };
         return new
         {
+            polling = new
+            {
+                minimumIntervalMs = PollingDefaults.MinimumIntervalMs,
+                maximumIntervalMs = PollingDefaults.MaximumIntervalMs,
+                loops = pollingLoops
+            },
             database = new
             {
                 database.ActiveProvider,

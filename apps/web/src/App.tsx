@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   Archive,
+  Activity,
   BrainCircuit,
   Copy,
   Building2,
@@ -91,6 +92,12 @@ import {
 } from "./components/Dialogs.js";
 import { ApiClient, resolveRuntimeConfig, type UploadProgress } from "./lib/api.js";
 import {
+  DEFAULT_POLLING_SETTINGS,
+  usePollingLoop,
+  usePollingRegistry,
+  type PollingSettings
+} from "./lib/polling.js";
+import {
   navigateGoogleAuthorizationPopup,
   openGoogleAuthorizationPopup,
   showGoogleAuthorizationError
@@ -164,6 +171,11 @@ const PropertyManagementView = lazy(async () => {
 const SettingsDialog = lazy(async () => {
   const module = await import("./components/SettingsDialog.js");
   return { default: module.SettingsDialog };
+});
+
+const BackgroundActivityDialog = lazy(async () => {
+  const module = await import("./components/BackgroundActivityDialog.js");
+  return { default: module.BackgroundActivityDialog };
 });
 
 function viewForPath(pathname = window.location.pathname): AppView {
@@ -305,6 +317,9 @@ export function App() {
 
   const readOnly = !session;
   const isAdmin = session?.role === "admin";
+  const [pollingSettings, setPollingSettings] = useState<PollingSettings>(DEFAULT_POLLING_SETTINGS);
+  const [backgroundActivityOpen, setBackgroundActivityOpen] = useState(false);
+  const { statuses: pollingStatuses, report: reportPolling } = usePollingRegistry();
   const isRenter = session?.user.role === "renter";
   const canUseMail = Boolean(session && !isRenter);
   const canAccessScreen = (screen: UserScreenId) => !session || userCanAccessScreen(session.user, screen);
@@ -426,17 +441,48 @@ export function App() {
     ));
   }, [refreshStockQuotes, refreshNewsHeadlines]);
 
+  // Only an admin can read the settings payload these live in. Everyone else keeps the
+  // built-in intervals from lib/polling.ts, so a renter session still polls sanely.
   useEffect(() => {
-    if (!api || !session || session.user.role === "renter") return;
-    const timer = window.setInterval(() => void refreshStockQuotes(api), 60_000);
-    return () => window.clearInterval(timer);
-  }, [api, session, refreshStockQuotes]);
+    if (!api || !isAdmin) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const settings = await api.adminSettings();
+        if (!cancelled && settings.polling) setPollingSettings(settings.polling);
+      } catch {
+        // A failure here only means the admin controls stay on built-in defaults.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [api, isAdmin]);
 
-  useEffect(() => {
-    if (!api || !session || session.user.role === "renter") return;
-    const timer = window.setInterval(() => void refreshNewsHeadlines(api), 10 * 60_000);
-    return () => window.clearInterval(timer);
-  }, [api, session, refreshNewsHeadlines]);
+  const updatePollingLoop = useCallback(async (
+    key: string,
+    patch: { enabled?: boolean; intervalMs?: number; activeIntervalMs?: number }
+  ) => {
+    if (!api) return;
+    const settings = await api.updatePollingSettings({ key, ...patch });
+    if (settings.polling) setPollingSettings(settings.polling);
+  }, [api]);
+
+  usePollingLoop({
+    key: "stockQuotes",
+    settings: pollingSettings,
+    report: reportPolling,
+    active: Boolean(api && session && session.user.role !== "renter"),
+    runImmediately: false,
+    run: () => api && refreshStockQuotes(api)
+  });
+
+  usePollingLoop({
+    key: "newsHeadlines",
+    settings: pollingSettings,
+    report: reportPolling,
+    active: Boolean(api && session && session.user.role !== "renter"),
+    runImmediately: false,
+    run: () => api && refreshNewsHeadlines(api)
+  });
 
   const connect = useCallback(async () => {
     setInitializing(true);
@@ -607,12 +653,14 @@ export function App() {
     void refreshDiagnostics();
   }, [refreshDiagnostics]);
 
-  useEffect(() => {
-    if (!api || readOnly) return;
-    void refreshJobs();
-    const interval = window.setInterval(() => void refreshJobs(), hasActiveImportJobs ? 1_500 : 15_000);
-    return () => window.clearInterval(interval);
-  }, [api, readOnly, refreshJobs, hasActiveImportJobs]);
+  usePollingLoop({
+    key: "importJobs",
+    settings: pollingSettings,
+    report: reportPolling,
+    active: Boolean(api) && !readOnly,
+    busy: hasActiveImportJobs,
+    run: refreshJobs
+  });
 
   useEffect(() => {
     if (!api || !selectedArchiveId) {
@@ -826,13 +874,13 @@ export function App() {
     };
   }, [refreshGmailConnections, showError]);
 
-  useEffect(() => {
-    const syncing = gmailConnections.some((connection) => connection.status === "syncing");
-    if (!gmailOpen && !syncing) return;
-    void refreshGmailConnections(gmailOpen);
-    const interval = window.setInterval(() => void refreshGmailConnections(false), 1_500);
-    return () => window.clearInterval(interval);
-  }, [gmailOpen, gmailConnections.some((connection) => connection.status === "syncing"), refreshGmailConnections]);
+  usePollingLoop({
+    key: "gmailConnections",
+    settings: pollingSettings,
+    report: reportPolling,
+    active: gmailOpen || gmailConnections.some((connection) => connection.status === "syncing"),
+    run: () => refreshGmailConnections(false)
+  });
 
   const refreshMailboxCounts = useCallback(async () => {
     if (!api) return;
@@ -1237,12 +1285,13 @@ export function App() {
     }
   }, [api, aiScreenAllowed, showError]);
 
-  useEffect(() => {
-    if (!api || !session || !aiScreenAllowed) return;
-    void refreshReviewQueue();
-    const interval = window.setInterval(() => void refreshReviewQueue(), 30_000);
-    return () => window.clearInterval(interval);
-  }, [api, session?.id, aiScreenAllowed, refreshReviewQueue]);
+  usePollingLoop({
+    key: "reviewQueue",
+    settings: pollingSettings,
+    report: reportPolling,
+    active: Boolean(api && session && aiScreenAllowed),
+    run: refreshReviewQueue
+  });
 
   const openReviewQueue = () => {
     setReviewQueueOpen(true);
@@ -2317,6 +2366,16 @@ export function App() {
               {(reviewQueue?.totalItems ?? 0) > 0 && <span className="diagnostic-count">{Math.min(99, reviewQueue!.totalItems)}</span>}
             </button>
           )}
+          {isAdmin && (
+            <button
+              className="icon-button"
+              onClick={() => setBackgroundActivityOpen(true)}
+              title="Background activity"
+              aria-label="Background activity"
+            >
+              <Activity size={18} />
+            </button>
+          )}
           {!readOnly && canAccessScreen("compose") && (
             <button className="icon-button compose-trigger" onClick={() => openCompose()} title="Compose email" aria-label="Compose email">
               <MailPlus size={18} />
@@ -2748,6 +2807,14 @@ export function App() {
       <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
       {!readOnly && (settingsOpen || settingsVisited) && (
         <Suspense fallback={settingsOpen ? <div className="dialog-backdrop"><div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings…</div></div> : null}>
+          <BackgroundActivityDialog
+            open={backgroundActivityOpen}
+            onClose={() => setBackgroundActivityOpen(false)}
+            settings={pollingSettings}
+            statuses={pollingStatuses}
+            onUpdate={updatePollingLoop}
+            readOnly={!isAdmin}
+          />
           <SettingsDialog
             open={settingsOpen}
             api={api}

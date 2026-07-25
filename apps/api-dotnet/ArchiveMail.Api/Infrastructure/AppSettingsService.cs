@@ -27,13 +27,23 @@ public sealed record PropertyIntegrationRuntimeSettings(
     string? AppleCashRecipient=null,string AppleCashNote="",
     string TwilioAccountSid="",string TwilioAuthToken="",string TwilioMessagingServiceSid="",string? GmailConnectionId=null);
 
+public sealed record PollingLoopSettings(bool Enabled = true, int? IntervalMs = null, int? ActiveIntervalMs = null);
+
+/// <summary>Per-loop overrides for <see cref="PollingDefaults.Catalog"/>, keyed by loop id.</summary>
+public sealed record PollingRuntimeSettings(IReadOnlyDictionary<string, PollingLoopSettings>? Loops = null)
+{
+    public PollingLoopSettings For(string key) =>
+        Loops is not null && Loops.TryGetValue(key, out var configured) ? configured : new();
+}
+
 public sealed record AppRuntimeSettings(
     GmailRuntimeSettings? Gmail = null,
     DraftRuntimeSettings? Drafts = null,
     StockRuntimeSettings? Stocks = null,
     NewsRuntimeSettings? News = null,
     AiRuntimeSettings? Ai = null,
-    PropertyIntegrationRuntimeSettings? PropertyIntegrations = null)
+    PropertyIntegrationRuntimeSettings? PropertyIntegrations = null,
+    PollingRuntimeSettings? Polling = null)
 {
     public GmailRuntimeSettings GmailValue => Gmail ?? new();
     public DraftRuntimeSettings DraftsValue => Drafts ?? new();
@@ -43,6 +53,7 @@ public sealed record AppRuntimeSettings(
         OpenAi: new("", AiModelDefaults.OpenAi),
         DeepSeek: new("", AiModelDefaults.DeepSeek));
     public PropertyIntegrationRuntimeSettings PropertyIntegrationsValue => PropertyIntegrations ?? new();
+    public PollingRuntimeSettings PollingValue => Polling ?? new();
 }
 
 public sealed class AppSettingsService
@@ -140,6 +151,39 @@ public sealed class AppSettingsService
                 EnabledSources = sources.Where(value => value is "cnn" or "bbc" or "aljazeera" or "foxnews").Distinct().ToArray(),
                 SecondsPerHeadline = Math.Clamp(Integer(input, "secondsPerHeadline") ?? current.SecondsPerHeadline, 2, 60)
             }};
+            Save(); return WithEnvironment(_settings);
+        }
+    }
+
+    /// <summary>
+    /// Merges one loop's overrides. Unknown keys are rejected rather than stored, so a typo
+    /// cannot silently accumulate dead settings that the admin screen never surfaces again.
+    /// </summary>
+    public AppRuntimeSettings UpdatePolling(JsonElement input)
+    {
+        var key = String(input, "key") ?? throw new ArgumentException("A polling loop key is required");
+        var definition = PollingDefaults.Find(key)
+            ?? throw new ArgumentException($"Unknown polling loop: {key}");
+        lock (_gate)
+        {
+            var current = _settings.PollingValue;
+            var existing = current.For(key);
+            var loops = current.Loops is null
+                ? new Dictionary<string, PollingLoopSettings>(StringComparer.Ordinal)
+                : new Dictionary<string, PollingLoopSettings>(current.Loops, StringComparer.Ordinal);
+
+            var interval = Integer(input, "intervalMs") ?? existing.IntervalMs;
+            var activeInterval = Integer(input, "activeIntervalMs") ?? existing.ActiveIntervalMs;
+            loops[key] = existing with
+            {
+                Enabled = Boolean(input, "enabled") ?? existing.Enabled,
+                IntervalMs = interval is null ? null : PollingDefaults.ClampInterval(interval.Value),
+                // Only the loops that actually declare a busy rate can carry one.
+                ActiveIntervalMs = definition.ActiveIntervalMs is null || activeInterval is null
+                    ? null
+                    : PollingDefaults.ClampInterval(activeInterval.Value)
+            };
+            _settings = _settings with { Polling = current with { Loops = loops } };
             Save(); return WithEnvironment(_settings);
         }
     }
