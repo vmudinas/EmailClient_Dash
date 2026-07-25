@@ -31,6 +31,7 @@ public sealed class PropertyPaymentGateway(
             "stripe"=>await CreateStripeCheckoutAsync(payment,returnOrigin,token),
             "paypal"=>await CreatePayPalOrderAsync(payment,returnOrigin,token),
             "zelle"=>await ZelleInstructionsAsync(payment,token),
+            "apple_cash"=>await AppleCashInstructionsAsync(payment,token),
             "manual"=>new{payment,action="instructions",url=(string?)null,instructions="Record the receipt or check reference, then mark this payment successful after the funds are verified."},
             _=>throw new ArgumentException($"Unsupported payment provider: {payment.Provider}")
         };
@@ -50,17 +51,31 @@ public sealed class PropertyPaymentGateway(
     public async Task<object> RefundAsync(string paymentId,string userId,long? requestedAmount,string reason,CancellationToken token)
     {
         var payment=await LoadOwnedAsync(paymentId,userId,token);
-        if(payment.Status!="succeeded")throw new InvalidOperationException("Only successful payments can be refunded");
-        var amount=requestedAmount??payment.AmountCents;
-        if(amount<=0||amount>payment.AmountCents)throw new ArgumentException("Refund amount exceeds the payment");
+        if(payment.Status is not ("succeeded" or "refunded"))throw new InvalidOperationException("Only successful payments can be refunded");
+        // Count what has already been refunded so repeated partial refunds cannot exceed the payment.
+        // Stripe and PayPal reject an over-refund themselves, but zelle/apple_cash/manual have no such backstop.
+        var alreadyRefunded=await RefundedTotalAsync(payment.Id,token);
+        var amount=PropertyPaymentRules.ValidateRefundAmount(requestedAmount,payment.AmountCents,alreadyRefunded);
         string providerRefundId;
         if(payment.Provider=="stripe")providerRefundId=await RefundStripeAsync(payment,amount,token);
         else if(payment.Provider=="paypal")providerRefundId=await RefundPayPalAsync(payment,amount,token);
         else providerRefundId=$"local-{Guid.NewGuid()}";
-        var updated=await UpdateAsync(payment,amount==payment.AmountCents?"refunded":"succeeded",payment.Method,
+        var fullyRefunded=PropertyPaymentRules.IsFullRefund(amount,payment.AmountCents,alreadyRefunded);
+        var updated=await UpdateAsync(payment,fullyRefunded?"refunded":"succeeded",payment.Method,
             payment.ProviderTransactionId,payment.ExternalId,payment.CheckoutUrl,payment.PaidAt,null,payment.Reference,token);
         await RecordRefundLedgerAsync(updated,amount,reason,providerRefundId,token);
-        return new{payment=updated,amountCents=amount,providerRefundId};
+        return new{payment=updated,amountCents=amount,providerRefundId,
+            refundedToDateCents=alreadyRefunded+amount,
+            remainingRefundableCents=PropertyPaymentRules.RemainingRefundable(payment.AmountCents,alreadyRefunded+amount)};
+    }
+
+    /// <summary>Total already refunded against a payment, read back from the ledger (refunds are negative).</summary>
+    private async Task<long> RefundedTotalAsync(string paymentId,CancellationToken token)
+    {
+        await using var command=database.CreateCommand(
+            "SELECT COALESCE(SUM(-amount_cents),0) FROM property_ledger_entries WHERE payment_id=$1 AND entry_type='refund'");
+        command.Parameters.AddWithValue(paymentId);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(token));
     }
 
     public JsonDocument VerifyStripeWebhook(byte[] rawBody,string? signatureHeader)
@@ -171,6 +186,22 @@ public sealed class PropertyPaymentGateway(
     private async Task<object> ZelleInstructionsAsync(PropertyPaymentRecord payment,CancellationToken token)
     {var config=settings.Current().PropertyIntegrationsValue;if(string.IsNullOrWhiteSpace(config.ZelleRecipient))throw new InvalidOperationException("Zelle recipient is not configured");var reference=payment.Reference??$"RENT-{payment.Id[..8].ToUpperInvariant()}";var updated=await UpdateAsync(payment,"pending",payment.Method,payment.ProviderTransactionId,payment.ExternalId,payment.CheckoutUrl,payment.PaidAt,null,reference,token);return new{payment=updated,action="instructions",url=(string?)null,instructions=$"Send {(payment.AmountCents/100m).ToString("C",CultureInfo.GetCultureInfo("en-US"))} to {config.ZelleRecipient}. Use {reference} in the memo. {config.ZelleNote}".Trim()};}
 
+    /// <summary>
+    /// Apple Cash is a person-to-person transfer sent from the tenant's Wallet or Messages. Apple exposes
+    /// no merchant API for receiving it, so this mirrors the Zelle flow: issue a memo reference the tenant
+    /// quotes when sending, and leave the payment pending until a manager confirms the funds arrived.
+    /// </summary>
+    private async Task<object> AppleCashInstructionsAsync(PropertyPaymentRecord payment,CancellationToken token)
+    {
+        var config=settings.Current().PropertyIntegrationsValue;
+        if(string.IsNullOrWhiteSpace(config.AppleCashRecipient))throw new InvalidOperationException("Apple Cash recipient is not configured");
+        var reference=payment.Reference??$"RENT-{payment.Id[..8].ToUpperInvariant()}";
+        var updated=await UpdateAsync(payment,"pending",payment.Method,payment.ProviderTransactionId,payment.ExternalId,payment.CheckoutUrl,payment.PaidAt,null,reference,token);
+        var amount=(payment.AmountCents/100m).ToString("C",CultureInfo.GetCultureInfo("en-US"));
+        return new{payment=updated,action="instructions",url=(string?)null,
+            instructions=$"Open Messages on your iPhone or iPad, start a conversation with {config.AppleCashRecipient}, tap Apple Cash, and send {amount}. Put {reference} in the message so the payment can be matched. {config.AppleCashNote}".Trim()};
+    }
+
     private async Task<string> RefundStripeAsync(PropertyPaymentRecord payment,long amount,CancellationToken token)
     {var secret=settings.Current().PropertyIntegrationsValue.StripeSecretKey;if(string.IsNullOrWhiteSpace(secret))throw new InvalidOperationException("Stripe is not configured");var transaction=payment.ProviderTransactionId;if(string.IsNullOrWhiteSpace(transaction)&&payment.ExternalId is not null){using var request=new HttpRequestMessage(HttpMethod.Get,$"https://api.stripe.com/v1/checkout/sessions/{Uri.EscapeDataString(payment.ExternalId)}");request.Headers.Authorization=new("Bearer",secret);using var response=await clients.CreateClient("external").SendAsync(request,token);using var session=await ReadProviderJsonAsync(response,"Stripe payment could not be loaded",token);transaction=StringOrObjectId(session.RootElement,"payment_intent");}if(string.IsNullOrWhiteSpace(transaction))throw new InvalidOperationException("Stripe payment transaction was not found");using var refund=new HttpRequestMessage(HttpMethod.Post,"https://api.stripe.com/v1/refunds"){Content=new FormUrlEncodedContent(new Dictionary<string,string>{{"payment_intent",transaction},{"amount",amount.ToString(CultureInfo.InvariantCulture)},{"metadata[property_payment_id]",payment.Id}})};refund.Headers.Authorization=new("Bearer",secret);refund.Headers.TryAddWithoutValidation("Idempotency-Key",$"property-refund-{payment.Id}-{amount}");using var result=await clients.CreateClient("external").SendAsync(refund,token);using var json=await ReadProviderJsonAsync(result,"Stripe refund failed",token);return RequiredText(json.RootElement,"id","Stripe did not return a refund ID");}
 
@@ -194,7 +225,21 @@ public sealed class PropertyPaymentGateway(
         var now=Now();await using var connection=await database.OpenConnectionAsync(token);await using var transaction=await connection.BeginTransactionAsync(token);
         await using(var ledger=new NpgsqlCommand("INSERT INTO property_ledger_entries(id,organization_id,property_id,lease_id,charge_id,payment_id,entry_type,amount_cents,description,effective_at,unique_key,created_at) SELECT $1,p.organization_id,$2,$3,$4,$5,'payment',$6,$7,$8,$9,$10 FROM managed_properties p WHERE p.id=$2 ON CONFLICT(unique_key) DO NOTHING",connection,transaction)){ledger.Parameters.AddWithValue(Guid.NewGuid().ToString());ledger.Parameters.AddWithValue(payment.PropertyId);Add(ledger,payment.LeaseId);Add(ledger,payment.ChargeId);ledger.Parameters.AddWithValue(payment.Id);ledger.Parameters.AddWithValue(payment.AmountCents);ledger.Parameters.AddWithValue($"Payment received - {payment.PropertyName}");ledger.Parameters.AddWithValue(payment.PaidAt??now);ledger.Parameters.AddWithValue($"payment:{payment.Id}");ledger.Parameters.AddWithValue(now);await ledger.ExecuteNonQueryAsync(token);}
         await using(var receipt=new NpgsqlCommand("INSERT INTO property_receipts(id,payment_id,receipt_number,amount_cents,currency,paid_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(payment_id) DO NOTHING",connection,transaction)){receipt.Parameters.AddWithValue(Guid.NewGuid().ToString());receipt.Parameters.AddWithValue(payment.Id);receipt.Parameters.AddWithValue($"AM-{DateTime.UtcNow:yyyyMMdd}-{payment.Id[..8].ToUpperInvariant()}");receipt.Parameters.AddWithValue(payment.AmountCents);receipt.Parameters.AddWithValue(payment.Currency);receipt.Parameters.AddWithValue(payment.PaidAt??now);receipt.Parameters.AddWithValue(now);await receipt.ExecuteNonQueryAsync(token);}
-        if(payment.ChargeId is not null){await using var allocation=new NpgsqlCommand("INSERT INTO property_payment_allocations(id,payment_id,charge_id,amount_cents,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(payment_id,charge_id) DO NOTHING",connection,transaction);allocation.Parameters.AddWithValue(Guid.NewGuid().ToString());allocation.Parameters.AddWithValue(payment.Id);allocation.Parameters.AddWithValue(payment.ChargeId);allocation.Parameters.AddWithValue(payment.AmountCents);allocation.Parameters.AddWithValue(now);await allocation.ExecuteNonQueryAsync(token);}
+        if(payment.ChargeId is not null)
+        {
+            // Never allocate more than the charge still owes, so an overpayment cannot make a charge
+            // look over-settled in the ledger.
+            long outstanding;
+            await using(var balance=new NpgsqlCommand("SELECT c.amount_cents-COALESCE((SELECT SUM(a.amount_cents) FROM property_payment_allocations a WHERE a.charge_id=c.id),0) FROM property_rent_charges c WHERE c.id=$1",connection,transaction))
+            {balance.Parameters.AddWithValue(payment.ChargeId);outstanding=Convert.ToInt64(await balance.ExecuteScalarAsync(token));}
+            var allocated=PropertyPaymentRules.AllocationCents(payment.AmountCents,outstanding);
+            if(allocated>0)
+            {
+                await using var allocation=new NpgsqlCommand("INSERT INTO property_payment_allocations(id,payment_id,charge_id,amount_cents,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(payment_id,charge_id) DO NOTHING",connection,transaction);
+                allocation.Parameters.AddWithValue(Guid.NewGuid().ToString());allocation.Parameters.AddWithValue(payment.Id);allocation.Parameters.AddWithValue(payment.ChargeId);allocation.Parameters.AddWithValue(allocated);allocation.Parameters.AddWithValue(now);
+                await allocation.ExecuteNonQueryAsync(token);
+            }
+        }
         await transaction.CommitAsync(token);
     }
     private async Task RecordRefundLedgerAsync(PropertyPaymentRecord payment,long amount,string reason,string refundId,CancellationToken token)

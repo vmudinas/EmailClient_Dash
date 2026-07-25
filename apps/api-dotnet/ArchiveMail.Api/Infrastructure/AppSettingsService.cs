@@ -24,6 +24,7 @@ public sealed record AiRuntimeSettings(
 public sealed record PropertyIntegrationRuntimeSettings(
     string StripeSecretKey="",string StripeWebhookSecret="",string PaypalClientId="",string PaypalClientSecret="",
     string PaypalWebhookId="",string PaypalEnvironment="sandbox",string? ZelleRecipient=null,string ZelleNote="",
+    string? AppleCashRecipient=null,string AppleCashNote="",
     string TwilioAccountSid="",string TwilioAuthToken="",string TwilioMessagingServiceSid="",string? GmailConnectionId=null);
 
 public sealed record AppRuntimeSettings(
@@ -205,8 +206,10 @@ public sealed class AppSettingsService
                 PaypalClientSecret=Boolean(input,"clearPaypalClientSecret")==true?"":String(input,"paypalClientSecret")??current.PaypalClientSecret,
                 PaypalWebhookId=String(input,"paypalWebhookId")??current.PaypalWebhookId,
                 PaypalEnvironment=String(input,"paypalEnvironment")??current.PaypalEnvironment,
-                ZelleRecipient=input.TryGetProperty("zelleRecipient",out var zelle)&&zelle.ValueKind==JsonValueKind.Null?null:String(input,"zelleRecipient")??current.ZelleRecipient,
+                ZelleRecipient=input.TryGetProperty("zelleRecipient",out var zelle)&&zelle.ValueKind==JsonValueKind.Null?null:Property.PropertyPaymentRules.NormalizeRecipient(String(input,"zelleRecipient"),"Zelle recipient")??current.ZelleRecipient,
                 ZelleNote=String(input,"zelleNote")??current.ZelleNote,
+                AppleCashRecipient=input.TryGetProperty("appleCashRecipient",out var appleCash)&&appleCash.ValueKind==JsonValueKind.Null?null:Property.PropertyPaymentRules.NormalizeRecipient(String(input,"appleCashRecipient"),"Apple Cash recipient")??current.AppleCashRecipient,
+                AppleCashNote=String(input,"appleCashNote")??current.AppleCashNote,
                 TwilioAccountSid=String(input,"twilioAccountSid")??current.TwilioAccountSid,
                 TwilioAuthToken=Boolean(input,"clearTwilioAuthToken")==true?"":String(input,"twilioAuthToken")??current.TwilioAuthToken,
                 TwilioMessagingServiceSid=String(input,"twilioMessagingServiceSid")??current.TwilioMessagingServiceSid,

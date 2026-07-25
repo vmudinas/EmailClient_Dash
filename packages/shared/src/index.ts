@@ -1390,7 +1390,7 @@ export const PROPERTY_LEASE_STATUS_IDS = ["draft", "upcoming", "active", "expire
 export type PropertyLeaseStatus = typeof PROPERTY_LEASE_STATUS_IDS[number];
 export const RENT_CHARGE_STATUS_IDS = ["open", "partially_paid", "paid", "overdue", "void"] as const;
 export type RentChargeStatus = typeof RENT_CHARGE_STATUS_IDS[number];
-export const PROPERTY_PAYMENT_PROVIDER_IDS = ["stripe", "paypal", "zelle", "manual"] as const;
+export const PROPERTY_PAYMENT_PROVIDER_IDS = ["stripe", "paypal", "zelle", "apple_cash", "manual"] as const;
 export type PropertyPaymentProvider = typeof PROPERTY_PAYMENT_PROVIDER_IDS[number];
 export const PROPERTY_PAYMENT_METHOD_IDS = [
   "card",
@@ -1400,6 +1400,7 @@ export const PROPERTY_PAYMENT_METHOD_IDS = [
   "paypal",
   "venmo",
   "zelle",
+  "apple_cash",
   "cash",
   "check",
   "other"
@@ -1532,6 +1533,16 @@ export interface PropertyPaymentConfiguration {
     methods: PropertyPaymentMethod[];
   };
   zelle: {
+    configured: boolean;
+    recipient: string | null;
+    note: string;
+  };
+  /**
+   * Apple Cash is person-to-person: Apple publishes no merchant API for receiving it, so this is an
+   * out-of-band instruction flow (tenant sends via Messages, manager confirms) — the same shape as Zelle.
+   * Apple *Pay* is different: it is a wallet settled through Stripe, listed under `stripe.methods`.
+   */
+  appleCash: {
     configured: boolean;
     recipient: string | null;
     note: string;
@@ -1768,6 +1779,8 @@ export interface PropertyIntegrationSettings {
   paypalEnvironment: "sandbox" | "live";
   paypalWebhookConfigured: boolean;
   zelleRecipient: string | null;
+  appleCashRecipient: string | null;
+  appleCashNote: string;
   twilioConfigured: boolean;
   twilioSource: "admin" | "environment" | "none";
   gmailConnectionId: string | null;
@@ -2038,6 +2051,8 @@ export const propertyIntegrationSettingsPatchSchema = z.object({
   clearPaypalClientSecret: z.boolean().default(false),
   zelleRecipient: z.string().trim().max(320).nullable().optional(),
   zelleNote: z.string().max(1_000).optional(),
+  appleCashRecipient: z.string().trim().max(320).nullable().optional(),
+  appleCashNote: z.string().max(1_000).optional(),
   twilioAccountSid: z.string().trim().min(1).max(240).optional(),
   twilioAuthToken: z.string().trim().min(1).max(1_000).optional(),
   twilioMessagingServiceSid: z.string().trim().min(1).max(240).optional(),
