@@ -283,6 +283,80 @@ Fixes, cheapest first:
 
 Only options 2 and 3 are network-wide; the hosts entry fixes a single machine.
 
+## Faster deploys via GitHub Container Registry
+
+A GitHub Actions workflow builds the same two images this repository builds
+locally (`deploy/Dockerfile.synology` and `deploy/Dockerfile.migrator`) and
+publishes them to GHCR on every push to `main`, tagged both `:latest` and with
+the git short-sha. The NAS can opt into pulling those prebuilt images instead
+of compiling them itself, which turns a 45+ minute on-NAS build into a pull.
+The default build-locally flow (`./deploy-to-synology.command`) is unaffected
+and remains the default for anyone who does not opt in.
+
+### One-time setup
+
+1. Deploy this change to the NAS once with the normal
+   `./deploy-to-synology.command` so the NAS gets the updated
+   `compose.yaml`, `synology-rebuild.sh`, and `pull-deploy.sh`.
+2. Make the GHCR packages public so the NAS can `docker pull` them without
+   credentials — GHCR packages default to private even when the source
+   repository is public. In the GitHub UI, open:
+
+   ```text
+   https://github.com/vmudinas/EmailClient_Dash/pkgs/container/emailclient_dash
+   https://github.com/vmudinas/EmailClient_Dash/pkgs/container/emailclient_dash-migrator
+   ```
+
+   and use **Package settings > Danger Zone > Change visibility** to set each
+   to Public. If either URL 404s because the workflow has not published an
+   image yet, use the repository's **Packages** tab instead once the first
+   build has run.
+3. Add the registry-mode variables to the NAS's `deploy/.env`. scp/SFTP is
+   disabled on this NAS, so append them over SSH instead of copying a file:
+
+   ```bash
+   ssh gliukaz@synology.local 'cat >> /volume1/docker/archive-mail/app/deploy/.env' <<'EOF'
+   ARCHIVE_MAIL_IMAGE_SOURCE=registry
+   ARCHIVE_MAIL_IMAGE=ghcr.io/vmudinas/emailclient_dash:latest
+   ARCHIVE_MAIL_MIGRATOR_IMAGE=ghcr.io/vmudinas/emailclient_dash-migrator:latest
+   EOF
+   ```
+
+   Adjust the host and path if they differ from your NAS.
+
+### Routine deploys
+
+Once source changes are pushed to `main`, the Actions workflow builds and
+publishes new images automatically — but that only means an image exists in
+the registry, not that it is running anywhere. As with everything else this
+guide has been careful about, **CI publishing an image is not a deployment.**
+Run the explicit, deliberate step to actually roll it out:
+
+```bash
+./pull-deploy.command
+```
+
+This connects to the NAS, confirms `ARCHIVE_MAIL_IMAGE_SOURCE=registry` is
+set in its `deploy/.env`, and triggers the same passwordless root rebuild
+script `push-synology.sh` uses — except the rebuild script now pulls the
+published images instead of building them. There is no local npm build, no
+test run, and no repository upload, so it is fast. If registry mode is not
+configured on the NAS yet, it fails fast with a pointer back to the one-time
+setup above instead of silently doing a full local rebuild.
+
+### Rollback
+
+Images are tagged with both `:latest` and the git short-sha the workflow
+built from. If a bad `:latest` ships, pin the previous known-good sha
+temporarily in `deploy/.env`:
+
+```dotenv
+ARCHIVE_MAIL_IMAGE=ghcr.io/vmudinas/emailclient_dash:<sha>
+ARCHIVE_MAIL_MIGRATOR_IMAGE=ghcr.io/vmudinas/emailclient_dash-migrator:<sha>
+```
+
+and run `./pull-deploy.command` again.
+
 ## Gmail OAuth on a server
 
 The local desktop launch uses Google's loopback callback. A browser on another computer cannot return to the container through that callback. For the server deployment:

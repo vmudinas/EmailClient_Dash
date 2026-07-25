@@ -48,10 +48,15 @@ compose() {
   "$DOCKER_BIN" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-echo "Building the Archive Mail images..."
-# Reuse the expensive OS/package layers. Source COPY layers and the test/publish
-# gates are invalidated whenever the uploaded repository changes.
-compose build archive-mail postgres-migrate
+if [ "${ARCHIVE_MAIL_IMAGE_SOURCE:-build}" = "registry" ]; then
+  echo "Pulling the Archive Mail images from the registry..."
+  compose pull archive-mail postgres-migrate
+else
+  echo "Building the Archive Mail images..."
+  # Reuse the expensive OS/package layers. Source COPY layers and the test/publish
+  # gates are invalidated whenever the uploaded repository changes.
+  compose build archive-mail postgres-migrate
+fi
 
 echo "Removing the stale container and project network..."
 compose down --remove-orphans
