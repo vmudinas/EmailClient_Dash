@@ -8,34 +8,43 @@ public sealed class DatabaseInitializer(
     IConfiguration configuration,
     ILogger<DatabaseInitializer> logger)
 {
+    // Schema DDL can include a GIN index build over hundreds of thousands of rows, which
+    // runs well past Npgsql's 30 second CommandTimeout default. A timeout here throws out
+    // of startup and crash-loops the container before it ever serves, so migrations get a
+    // generous ceiling -- the same reasoning behind ImportBatchWriter's raised timeout.
+    internal const int SchemaCommandTimeoutSeconds = 600;
+
+    private static NpgsqlCommand SchemaCommand(string sql, NpgsqlConnection connection) =>
+        new(sql, connection) { CommandTimeout = SchemaCommandTimeoutSeconds };
+
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         var schema = PostgresSettings.ResolveSchema(configuration);
         var quotedSchema = $"\"{schema.Replace("\"", "\"\"")}\"";
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using (var bootstrap = new NpgsqlCommand(
+        await using (var bootstrap = SchemaCommand(
             $"CREATE SCHEMA IF NOT EXISTS {quotedSchema}; SET search_path TO {quotedSchema}, public;",
             connection))
         {
             await bootstrap.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var command = new NpgsqlCommand(CoreSchemaSql, connection))
+        await using (var command = SchemaCommand(CoreSchemaSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
-        await using (var command = new NpgsqlCommand(ConnectedServicesSchemaSql, connection))
+        await using (var command = SchemaCommand(ConnectedServicesSchemaSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
-        await using (var command = new NpgsqlCommand(PropertySchemaSql, connection))
+        await using (var command = SchemaCommand(PropertySchemaSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
 
         var schemaContract = DatabaseSchemaContract.FromSql(
             CoreSchemaSql,
             ConnectedServicesSchemaSql,
             PropertySchemaSql);
-        await using (var command = new NpgsqlCommand(schemaContract.DefaultRepairSql, connection))
+        await using (var command = SchemaCommand(schemaContract.DefaultRepairSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
 
         await EnsureDefaultAdministratorAsync(connection, cancellationToken);
-        await using (var command = new NpgsqlCommand(LegacyOwnershipRepairSql, connection))
+        await using (var command = SchemaCommand(LegacyOwnershipRepairSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
         await schemaContract.ValidateAsync(connection, schema, cancellationToken);
         logger.LogInformation("C# PostgreSQL schema is ready in {Schema}", schema);
