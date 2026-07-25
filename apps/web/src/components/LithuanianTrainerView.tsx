@@ -27,6 +27,7 @@ import {
 import type { ApiClient } from "../lib/api.js";
 import { formatDate, formatDateTime } from "../lib/format.js";
 import { daysSince, practiceStatus } from "../lib/practiceDays.js";
+import { spellOut, specialLetters } from "../lib/lithuanianLetters.js";
 import {
   PronunciationRecorder,
   SILENT_CLIP,
@@ -50,6 +51,28 @@ function errorText(error: unknown, fallback: string): string {
  * the time the learner looks up from the keyboard.
  */
 const TranslateDebounceMs = 600;
+
+/**
+ * A Lithuanian word with the letters English does not have marked.
+ *
+ * The marking is decoration: splitting a word into per-letter elements makes some screen readers
+ * spell it out, so a word that has such letters carries the whole word alongside for assistive
+ * tech. A word English could spell needs neither, and is left as plain text.
+ */
+function SpelledWord({ text }: { text: string }) {
+  const runs = spellOut(text);
+  if (runs.every((run) => run.note === null)) return <>{text}</>;
+  return (
+    <>
+      <span className="visually-hidden">{text}</span>
+      <span aria-hidden="true">
+        {runs.map((run, index) => run.note === null
+          ? <span key={index}>{run.text}</span>
+          : <em key={index} className="trainer-letter">{run.text}</em>)}
+      </span>
+    </>
+  );
+}
 
 function bestScore(recordings: LithuanianRecording[]): number | null {
   const scores = recordings.map((take) => take.score).filter((score): score is number => score !== null);
@@ -560,7 +583,7 @@ export function LithuanianTrainerView({
                   <div className="trainer-word trainer-word-lt">
                     <div className="trainer-word-text">
                       <span className="trainer-word-label">Lithuanian</span>
-                      <strong lang={LITHUANIAN_LOCALE}>{word.lithuanian}</strong>
+                      <strong lang={LITHUANIAN_LOCALE}><SpelledWord text={word.lithuanian} /></strong>
                     </div>
                     <div className="trainer-word-actions">
                       <button
@@ -592,6 +615,17 @@ export function LithuanianTrainerView({
                   </div>
 
                   <p className="trainer-meaning"><span>Means</span> {word.english}</p>
+
+                  {specialLetters(word.lithuanian).length > 0 && (
+                    <ul className="trainer-letters" aria-label="Letters English does not have">
+                      {specialLetters(word.lithuanian).map((letter) => (
+                        <li key={letter.text}>
+                          <em className="trainer-letter" lang={LITHUANIAN_LOCALE}>{letter.text}</em>
+                          <span>{letter.note}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
 
                   {word.kind === "phrase" && (
                     word.hints.length > 0 ? (

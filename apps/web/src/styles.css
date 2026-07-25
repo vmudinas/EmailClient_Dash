@@ -10828,6 +10828,38 @@ textarea:focus-visible {
   text-transform: none;
 }
 
+/* The letters Lithuanian has and English does not, marked inside the word itself. Underlined as
+   well as coloured so the mark does not depend on colour alone. */
+.trainer-letter {
+  font-style: normal;
+  color: var(--accent, #4b7f52);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+.trainer-letters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trainer-letters li {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.trainer-letters .trainer-letter {
+  font-size: 15px;
+  font-weight: 700;
+}
+
 .trainer-phrase-offers {
   display: flex;
   flex-wrap: wrap;
