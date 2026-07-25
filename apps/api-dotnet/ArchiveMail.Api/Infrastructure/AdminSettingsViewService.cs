@@ -127,6 +127,12 @@ public sealed class AdminSettingsViewService(
                         : "admin",
                 model = lithuanian.Model,
                 defaultModel = LithuanianDefaults.TranscriptionModel,
+                hintModel = lithuanian.HintModel,
+                defaultHintModel = LithuanianDefaults.HintModel,
+                passMark = lithuanian.PassMark,
+                defaultPassMark = LithuanianDefaults.PassMark,
+                minimumPassMark = LithuanianDefaults.MinimumPassMark,
+                maximumPassMark = LithuanianDefaults.MaximumPassMark,
                 learnerCount = users.Count(user => user.Role == "lucas"),
                 settingsPath = appSettings.SettingsPath,
                 configurationError = (string?)null

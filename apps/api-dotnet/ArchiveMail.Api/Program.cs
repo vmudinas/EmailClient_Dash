@@ -44,6 +44,7 @@ builder.Services.AddSingleton<ObservabilityRepository>();
 builder.Services.AddSingleton<TodoRepository>();
 builder.Services.AddSingleton<ProductivityRepository>();
 builder.Services.AddSingleton<LithuanianTranscriptionService>();
+builder.Services.AddSingleton<LithuanianHintService>();
 builder.Services.AddSingleton<LithuanianRepository>();
 builder.Services.AddSingleton<GmailService>();
 builder.Services.AddSingleton<AiService>();

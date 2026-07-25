@@ -17,6 +17,24 @@ public static class LithuanianEndpoints
             return Results.Ok(await repository.ListAsync(session.User.Id, token));
         }).WithName("ListLithuanianWords").Produces<IReadOnlyList<LithuanianWordDto>>();
 
+        // The pass mark travels with the list so the screen never hardcodes a percentage an
+        // administrator has since changed.
+        group.MapGet("/practice", async (HttpContext context, LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            return Results.Ok(await repository.PracticeAsync(session.User.Id, token));
+        }).WithName("GetLithuanianPractice").Produces<LithuanianPracticeDto>();
+
+        group.MapPost("/words/{wordId}/hints", async (string wordId, HttpContext context,
+            LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            try { return Results.Ok(await repository.RefreshHintsAsync(wordId, session.User.Id, token)); }
+            catch (Exception error) { return Error(error); }
+        }).WithName("RefreshLithuanianHints").Produces<LithuanianWordDto>();
+
         group.MapPost("/words", async (LithuanianWordCreateRequest request, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
         {

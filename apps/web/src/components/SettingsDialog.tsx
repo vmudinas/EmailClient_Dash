@@ -82,7 +82,7 @@ import {
   AI_AGENT_SKILLS,
   AI_AGENT_SKILL_IDS,
   AI_PROVIDER_IDS,
-  LITHUANIAN_PASS_MARK,
+
   NEWS_SOURCE_IDS,
   NEWS_SOURCE_LABELS,
   USER_SCREENS
@@ -2467,17 +2467,34 @@ function LithuanianSettingsPanel({
   const trainer = settings.lithuanian;
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState(trainer.model || trainer.defaultModel);
+  const [hintModel, setHintModel] = useState(trainer.hintModel || trainer.defaultHintModel);
+  const [passMark, setPassMark] = useState(String(trainer.passMark));
 
-  useEffect(() => setModel(trainer.model || trainer.defaultModel), [trainer.model, trainer.defaultModel]);
+  useEffect(() => {
+    setModel(trainer.model || trainer.defaultModel);
+    setHintModel(trainer.hintModel || trainer.defaultHintModel);
+    setPassMark(String(trainer.passMark));
+  }, [trainer.model, trainer.defaultModel, trainer.hintModel, trainer.defaultHintModel, trainer.passMark]);
+
+  const parsedPassMark = Number.parseInt(passMark, 10);
+  const passMarkValid = Number.isInteger(parsedPassMark)
+    && parsedPassMark >= trainer.minimumPassMark
+    && parsedPassMark <= trainer.maximumPassMark;
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
+    if (!passMarkValid) {
+      onError(`The pass mark must be between ${trainer.minimumPassMark} and ${trainer.maximumPassMark}.`);
+      return;
+    }
     onBusy(true);
     onError("");
     try {
       onSettings(await api.updateLithuanianSettings({
         ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-        model: model.trim() || trainer.defaultModel
+        model: model.trim() || trainer.defaultModel,
+        hintModel: hintModel.trim() || trainer.defaultHintModel,
+        passMark: parsedPassMark
       }));
       setApiKey("");
       onNotice("Lithuanian trainer settings saved.");
@@ -2507,7 +2524,7 @@ function LithuanianSettingsPanel({
       <h3>Lithuanian trainer</h3>
       <p>
         Learner accounts record themselves saying a Lithuanian word. The recording is transcribed
-        with OpenAI speech-to-text and scored against the word; {LITHUANIAN_PASS_MARK}% or higher passes.
+        with OpenAI speech-to-text and scored against the word; {trainer.passMark}% or higher passes.
         {" "}{trainer.learnerCount === 0
           ? "No learner accounts exist yet — create one under Users with the Lithuanian learner role."
           : `${trainer.learnerCount} learner ${trainer.learnerCount === 1 ? "account uses" : "accounts use"} this.`}
@@ -2549,6 +2566,35 @@ function LithuanianSettingsPanel({
           />
         </label>
         <small>Default {trainer.defaultModel}. Change this if OpenAI retires or renames the model.</small>
+        <label>
+          Hint model
+          <input
+            value={hintModel}
+            onChange={(event) => setHintModel(event.target.value)}
+            placeholder={trainer.defaultHintModel}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={busy}
+          />
+        </label>
+        <small>Writes the word-by-word breakdown for phrases. Default {trainer.defaultHintModel}.</small>
+        <label>
+          Pass mark (%)
+          <input
+            type="number"
+            inputMode="numeric"
+            min={trainer.minimumPassMark}
+            max={trainer.maximumPassMark}
+            value={passMark}
+            onChange={(event) => setPassMark(event.target.value)}
+            disabled={busy}
+          />
+        </label>
+        <small>
+          A take at or above this scores a pass. {trainer.minimumPassMark}–{trainer.maximumPassMark}, default {trainer.defaultPassMark}.
+          Lower it while a learner is starting out; single isolated words are the hardest case for
+          speech recognition. Existing recordings are re-judged against the new mark.
+        </small>
         <div className="settings-button-row">
           <button className="primary-button compact" disabled={busy}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save

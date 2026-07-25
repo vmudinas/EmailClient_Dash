@@ -9,7 +9,9 @@ function word(overrides: Partial<LithuanianWord> = {}): LithuanianWord {
     id: "word-1",
     lithuanian: "labas",
     english: "hello",
+    kind: "word",
     createdAt: new Date().toISOString(),
+    hints: [],
     recordings: [
       {
         id: "take-1",
@@ -116,7 +118,8 @@ function installRecorder() {
 
 function client(overrides: Partial<Record<keyof ApiClient, unknown>> = {}): ApiClient {
   return {
-    lithuanianWords: vi.fn().mockResolvedValue([word()]),
+    lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [word()] }),
+    refreshLithuanianHints: vi.fn(),
     createLithuanianWord: vi.fn(),
     deleteLithuanianWord: vi.fn().mockResolvedValue(undefined),
     saveLithuanianRecording: vi.fn(),
@@ -250,7 +253,7 @@ describe("LithuanianTrainerView", () => {
   it("says a word is owed when none was added today, and shows the streak", async () => {
     render(
       <LithuanianTrainerView
-        api={client({ lithuanianWords: vi.fn().mockResolvedValue([word({ createdAt: YESTERDAY })]) })}
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [word({ createdAt: YESTERDAY })] }) })}
         displayName="Lucas"
         onSignOut={vi.fn()}
       />
@@ -271,13 +274,121 @@ describe("LithuanianTrainerView", () => {
     const stale = new Date(Date.now() - 5 * 86_400_000).toISOString();
     render(
       <LithuanianTrainerView
-        api={client({ lithuanianWords: vi.fn().mockResolvedValue([word({ createdAt: stale })]) })}
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [word({ createdAt: stale })] }) })}
         displayName="Lucas"
         onSignOut={vi.fn()}
       />
     );
 
     expect(await screen.findByText(/5 days since the last word/)).toBeTruthy();
+  });
+
+  it("lets the learner choose a phrase and explains it word by word", async () => {
+    const phrase = word({
+      id: "phrase-1",
+      lithuanian: "labas rytas",
+      english: "good morning",
+      kind: "phrase",
+      recordings: [],
+      hints: [
+        { word: "labas", meaning: "hello", tip: "The a is short, like in cat." },
+        { word: "rytas", meaning: "morning", tip: "Roll the r a little." }
+      ]
+    });
+    render(
+      <LithuanianTrainerView
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [phrase] }) })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas rytas");
+
+    // "Phrase" is also the label of the add-form toggle, so match the card's tag specifically.
+    expect(screen.getAllByText("Phrase").some((element) => element.tagName === "SPAN")).toBe(true);
+    expect(screen.getByText("The a is short, like in cat.")).toBeTruthy();
+    expect(screen.getByText("Roll the r a little.")).toBeTruthy();
+
+    // Each word of the phrase can be heard on its own, which is the point of the breakdown.
+    fireEvent.click(screen.getByRole("button", { name: "Listen to rytas on its own" }));
+    expect(speech.spoken).toEqual([{ text: "rytas", lang: "lt-LT" }]);
+  });
+
+  it("sends the chosen kind when adding a phrase", async () => {
+    const createLithuanianWord = vi.fn().mockResolvedValue(word({
+      id: "phrase-2",
+      lithuanian: "labas rytas",
+      english: "good morning",
+      kind: "phrase",
+      hints: [],
+      recordings: []
+    }));
+    render(
+      <LithuanianTrainerView api={client({ createLithuanianWord })} displayName="Lucas" onSignOut={vi.fn()} />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.click(screen.getByRole("button", { name: "Phrase" }));
+    fireEvent.change(screen.getByLabelText("Lithuanian"), { target: { value: "labas rytas" } });
+    fireEvent.change(screen.getByLabelText("English"), { target: { value: "good morning" } });
+    fireEvent.click(screen.getByRole("button", { name: /Add/ }));
+
+    await waitFor(() => expect(createLithuanianWord).toHaveBeenCalledWith({
+      lithuanian: "labas rytas",
+      english: "good morning",
+      kind: "phrase"
+    }));
+  });
+
+  it("offers to build the breakdown for a phrase that has no hints yet", async () => {
+    const bare = word({ id: "phrase-3", lithuanian: "labas rytas", kind: "phrase", hints: [], recordings: [] });
+    const refreshLithuanianHints = vi.fn().mockResolvedValue({
+      ...bare,
+      hints: [{ word: "labas", meaning: "hello", tip: "Short a." }]
+    });
+    render(
+      <LithuanianTrainerView
+        api={client({
+          lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [bare] }),
+          refreshLithuanianHints
+        })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas rytas");
+
+    fireEvent.click(screen.getByRole("button", { name: /Explain word by word/ }));
+
+    await waitFor(() => expect(refreshLithuanianHints).toHaveBeenCalledWith("phrase-3"));
+    expect(await screen.findByText("Short a.")).toBeTruthy();
+  });
+
+  it("judges takes against the pass mark the server reports, not a hardcoded 85", async () => {
+    // An administrator lowered the bar to 60, so a 70% take is a pass.
+    const seventy = word({
+      recordings: [{
+        id: "take-9",
+        wordId: "word-1",
+        contentType: "audio/webm",
+        sizeBytes: 5,
+        durationMs: 900,
+        transcript: "labai",
+        score: 70,
+        passed: true,
+        recordedAt: "2026-07-25T08:00:00.000Z"
+      }]
+    });
+    render(
+      <LithuanianTrainerView
+        api={client({ lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 60, words: [seventy] }) })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByText("70% pass")).toBeTruthy();
+    expect(screen.getByText("Best 70%")).toBeTruthy();
   });
 
   it("adds a word pair", async () => {
@@ -297,7 +408,11 @@ describe("LithuanianTrainerView", () => {
     fireEvent.change(screen.getByLabelText("English"), { target: { value: "thanks" } });
     fireEvent.click(screen.getByRole("button", { name: /Add/ }));
 
-    await waitFor(() => expect(createLithuanianWord).toHaveBeenCalledWith({ lithuanian: "ačiū", english: "thanks" }));
+    await waitFor(() => expect(createLithuanianWord).toHaveBeenCalledWith({
+      lithuanian: "ačiū",
+      english: "thanks",
+      kind: "word"
+    }));
     expect(await screen.findByText("ačiū")).toBeTruthy();
   });
 

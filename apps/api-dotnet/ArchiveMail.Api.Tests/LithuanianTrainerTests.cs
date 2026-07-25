@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ArchiveMail.Api.Infrastructure;
 using ArchiveMail.Api.Learning;
 using Xunit;
@@ -12,7 +13,7 @@ public sealed class LithuanianTrainerTests
     [InlineData("ąžuolas", "ąžuolas")]
     public void AcceptsASingleWordAndTrimsIt(string input, string expected)
     {
-        Assert.Equal(expected, LithuanianRepository.ValidateWord(input, "Lithuanian"));
+        Assert.Equal(expected, LithuanianRepository.ValidateEntry(input, "word", "Lithuanian"));
     }
 
     [Theory]
@@ -21,15 +22,58 @@ public sealed class LithuanianTrainerTests
     [InlineData(null)]
     [InlineData("labas rytas")]
     [InlineData("labas\trytas")]
-    public void RejectsEmptyAndMultiWordEntries(string? input)
+    public void RejectsEmptyAndMultiWordEntriesInWordMode(string? input)
     {
-        Assert.Throws<ArgumentException>(() => LithuanianRepository.ValidateWord(input, "Lithuanian"));
+        Assert.Throws<ArgumentException>(() => LithuanianRepository.ValidateEntry(input, "word", "Lithuanian"));
     }
 
     [Fact]
     public void RejectsAnOverlongWord()
     {
-        Assert.Throws<ArgumentException>(() => LithuanianRepository.ValidateWord(new string('a', 65), "English"));
+        Assert.Throws<ArgumentException>(
+            () => LithuanianRepository.ValidateEntry(new string('a', 65), "word", "English"));
+    }
+
+    [Theory]
+    [InlineData("labas rytas", "labas rytas")]
+    // Ragged spacing from a phone keyboard collapses so the same phrase is never stored twice.
+    [InlineData("  labas   rytas  ", "labas rytas")]
+    [InlineData("labas\trytas", "labas rytas")]
+    [InlineData("labas", "labas")]
+    public void AcceptsAPhraseAndCollapsesItsSpacing(string input, string expected)
+    {
+        Assert.Equal(expected, LithuanianRepository.ValidateEntry(input, "phrase", "Lithuanian"));
+    }
+
+    [Fact]
+    public void RejectsAPhraseBeyondTheWordLimit()
+    {
+        var tooMany = string.Join(' ', Enumerable.Repeat("labas", LithuanianDefaults.MaxPhraseWords + 1));
+
+        Assert.Throws<ArgumentException>(() => LithuanianRepository.ValidateEntry(tooMany, "phrase", "Lithuanian"));
+    }
+
+    [Fact]
+    public void RejectsAPhraseBeyondTheLengthLimit()
+    {
+        Assert.Throws<ArgumentException>(() => LithuanianRepository.ValidateEntry(
+            new string('a', LithuanianDefaults.MaxPhraseLength + 1), "phrase", "Lithuanian"));
+    }
+
+    [Theory]
+    [InlineData(null, "word")]
+    [InlineData("", "word")]
+    [InlineData("word", "word")]
+    [InlineData("PHRASE", "phrase")]
+    public void DefaultsToASingleWordWhenNoKindIsGiven(string? input, string expected)
+    {
+        Assert.Equal(expected, LithuanianRepository.ValidateKind(input));
+    }
+
+    [Fact]
+    public void RejectsAnUnknownKind()
+    {
+        Assert.Throws<ArgumentException>(() => LithuanianRepository.ValidateKind("sentence"));
     }
 
     [Theory]
@@ -115,21 +159,104 @@ public sealed class LithuanianTrainerTests
     }
 
     [Theory]
-    [InlineData(100, true)]
-    [InlineData(86, true)]
-    [InlineData(85, true)]
-    [InlineData(84, false)]
-    [InlineData(0, false)]
-    public void PassesAtEightyFivePercent(int score, bool passed)
+    [InlineData(100, 85, true)]
+    [InlineData(85, 85, true)]
+    [InlineData(84, 85, false)]
+    // An administrator can lower the bar while a learner is starting out.
+    [InlineData(70, 60, true)]
+    [InlineData(70, 90, false)]
+    public void PassesAtWhicheverMarkIsConfigured(int score, int passMark, bool passed)
     {
-        Assert.Equal(passed, LithuanianScoring.Passed(score));
+        Assert.Equal(passed, LithuanianScoring.Passed(score, passMark));
     }
 
     [Fact]
-    public void PassMarkMatchesTheSharedConstant()
+    public void DefaultPassMarkMatchesTheSharedConstant()
     {
         // packages/shared/src/index.ts exports LITHUANIAN_PASS_MARK = 85 for the UI copy.
-        Assert.Equal(85, LithuanianScoring.PassMark);
+        Assert.Equal(85, LithuanianDefaults.PassMark);
+        Assert.Equal(50, LithuanianDefaults.MinimumPassMark);
+        Assert.Equal(100, LithuanianDefaults.MaximumPassMark);
+    }
+
+    [Fact]
+    public void SettingsClampThePassMarkIntoRange()
+    {
+        var settings = new AppSettingsService(Configuration());
+
+        Assert.Equal(60, Save(settings, 60).PassMark);
+        Assert.Equal(LithuanianDefaults.MaximumPassMark, Save(settings, 500).PassMark);
+        Assert.Equal(LithuanianDefaults.MinimumPassMark, Save(settings, 1).PassMark);
+    }
+
+    /// <summary>
+    /// A settings file written before the pass mark existed deserialises it as 0, which would pass
+    /// every take rather than none.
+    /// </summary>
+    [Fact]
+    public void AMissingPassMarkFallsBackToTheDefaultRatherThanZero()
+    {
+        var settings = new AppRuntimeSettings(Lithuanian: new LithuanianRuntimeSettings(PassMark: 0));
+
+        Assert.Equal(0, settings.LithuanianValue.PassMark);
+        Assert.False(LithuanianScoring.Passed(0, LithuanianDefaults.PassMark));
+    }
+
+    private static LithuanianRuntimeSettings Save(AppSettingsService settings, int passMark) =>
+        settings.UpdateLithuanian(JsonSerializer.SerializeToElement(new { passMark })).LithuanianValue;
+
+    private static ActiveDatabaseConfiguration Configuration()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"archive-mail-lt-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        return new ActiveDatabaseConfiguration(
+            DatabaseProviderIds.PostgreSql, "Host=localhost", "test", directory,
+            Path.Combine(directory, "settings.json"), false);
+    }
+
+    [Theory]
+    // Spaces separate words so a phrase is compared word for word. Without them "labas rytas"
+    // and "labasrytas" would be identical and a run-together attempt would score as perfect.
+    [InlineData("labas rytas", "labas rytas", 100)]
+    [InlineData("Labas, rytas!", "labas rytas", 100)]
+    [InlineData("labasrytas", "labas rytas", 91)]
+    [InlineData("labas", "labas rytas", 45)]
+    public void ScoresAPhraseWordForWord(string heard, string target, int expected)
+    {
+        Assert.Equal(expected, LithuanianScoring.Score(heard, target));
+    }
+
+    [Fact]
+    public void HintParsingSurvivesAMalformedReply()
+    {
+        // A bad reply costs the hints, never the phrase the learner just added.
+        Assert.Empty(LithuanianHintService.Parse("not json"));
+        Assert.Empty(LithuanianHintService.Parse("""{"hints":"nope"}"""));
+        Assert.Empty(LithuanianHintService.Parse(null));
+        Assert.Empty(LithuanianHintService.Parse("""{"hints":[{"meaning":"hello"}]}"""));
+    }
+
+    [Fact]
+    public void HintParsingKeepsTheWordsItCanRead()
+    {
+        var hints = LithuanianHintService.Parse(
+            """{"hints":[{"word":"labas","meaning":"hello","tip":"Short a."},{"word":"rytas","meaning":"morning","tip":""}]}""");
+
+        Assert.Equal(2, hints.Count);
+        Assert.Equal("labas", hints[0].Word);
+        Assert.Equal("hello", hints[0].Meaning);
+        Assert.Equal("morning", hints[1].Meaning);
+    }
+
+    [Fact]
+    public void HintParsingIsBoundedSoOneReplyCannotFillTheRow()
+    {
+        var padded = string.Join(',', Enumerable.Range(0, 40)
+            .Select(index => $$"""{"word":"w{{index}}","meaning":"m","tip":"t"}"""));
+
+        Assert.Equal(
+            LithuanianDefaults.MaxPhraseWords,
+            LithuanianHintService.Parse($$"""{"hints":[{{padded}}]}""").Count);
     }
 
     [Fact]

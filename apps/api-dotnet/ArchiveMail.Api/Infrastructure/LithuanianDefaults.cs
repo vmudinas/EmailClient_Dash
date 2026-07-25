@@ -16,4 +16,27 @@ public static class LithuanianDefaults
 
     /// <summary>Environment override, checked ahead of the saved key like the other providers.</summary>
     public const string ApiKeyVariable = "LITHUANIAN_OPENAI_API_KEY";
+
+    /// <summary>
+    /// Writes the per-word breakdown for a phrase. A small chat model is enough: the task is a
+    /// dictionary gloss plus a short pronunciation note, not reasoning.
+    /// </summary>
+    public const string HintModel = AiModelDefaults.OpenAi;
+
+    public const string ChatEndpoint = "https://api.openai.com/v1/chat/completions";
+
+    /// <summary>
+    /// Percentage a take must reach to pass. Adjustable per installation, because how strict this
+    /// should be depends on the learner -- an eight-year-old's first weeks are not the same bar as
+    /// a fluent speaker polishing an accent.
+    /// </summary>
+    public const int PassMark = 85;
+
+    public const int MinimumPassMark = 50;
+    public const int MaximumPassMark = 100;
+
+    /// <summary>Longest phrase accepted, in characters and in words.</summary>
+    public const int MaxPhraseLength = 200;
+    public const int MaxPhraseWords = 12;
+    public const int MaxWordLength = 64;
 }

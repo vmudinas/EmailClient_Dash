@@ -55,6 +55,7 @@ import type {
   InboxTabReclassifyResult,
   InboxTabSettings,
   InboxTabSettingsUpdate,
+  LithuanianPractice,
   LithuanianRecording,
   LithuanianSettingsPatch,
   LithuanianWord,
@@ -147,6 +148,11 @@ import type {
   UserUpdate,
   DatabaseSettingsPatch,
   DatabaseConnectionTestResult
+} from "@email-client/shared";
+import {
+  LITHUANIAN_MAX_PASS_MARK,
+  LITHUANIAN_MIN_PASS_MARK,
+  LITHUANIAN_PASS_MARK
 } from "@email-client/shared";
 
 export interface UploadProgress {
@@ -272,8 +278,12 @@ export class ApiClient {
     return normalizeAdminSettings(await this.request("/api/admin/settings/lithuanian/key", { method: "DELETE" }));
   }
 
-  lithuanianWords(): Promise<LithuanianWord[]> {
-    return this.request("/api/lithuanian/words");
+  lithuanianPractice(): Promise<LithuanianPractice> {
+    return this.request("/api/lithuanian/practice");
+  }
+
+  refreshLithuanianHints(wordId: string): Promise<LithuanianWord> {
+    return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}/hints`, { method: "POST" });
   }
 
   createLithuanianWord(input: LithuanianWordCreate): Promise<LithuanianWord> {
@@ -1799,6 +1809,12 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
       source: text(lithuanian.source, "none") as AdminSettings["lithuanian"]["source"],
       model: text(lithuanian.model),
       defaultModel: text(lithuanian.defaultModel),
+      hintModel: text(lithuanian.hintModel),
+      defaultHintModel: text(lithuanian.defaultHintModel),
+      passMark: finiteNumber(lithuanian.passMark, LITHUANIAN_PASS_MARK),
+      defaultPassMark: finiteNumber(lithuanian.defaultPassMark, LITHUANIAN_PASS_MARK),
+      minimumPassMark: finiteNumber(lithuanian.minimumPassMark, LITHUANIAN_MIN_PASS_MARK),
+      maximumPassMark: finiteNumber(lithuanian.maximumPassMark, LITHUANIAN_MAX_PASS_MARK),
       learnerCount: finiteNumber(lithuanian.learnerCount),
       settingsPath: text(lithuanian.settingsPath),
       configurationError: nullableText(lithuanian.configurationError)

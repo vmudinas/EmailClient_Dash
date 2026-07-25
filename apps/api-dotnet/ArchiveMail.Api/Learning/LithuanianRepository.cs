@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ArchiveMail.Api.Infrastructure;
 using ArchiveMail.Api.Mail;
 using Npgsql;
@@ -19,10 +20,16 @@ public sealed record LithuanianWordDto(
     string Id,
     string Lithuanian,
     string English,
+    /// <summary>"word" or "phrase" -- the learner chooses which they are adding.</summary>
+    string Kind,
     string CreatedAt,
+    /// <summary>Per-word breakdown of a phrase. Always empty for a single word.</summary>
+    IReadOnlyList<LithuanianHint> Hints,
     IReadOnlyList<LithuanianRecordingDto> Recordings);
 
-public sealed record LithuanianWordCreateRequest(string Lithuanian, string English);
+public sealed record LithuanianWordCreateRequest(string Lithuanian, string English, string? Kind);
+
+public sealed record LithuanianPracticeDto(int PassMark, IReadOnlyList<LithuanianWordDto> Words);
 
 /// <summary>
 /// Word pairs and pronunciation recordings for the Lithuanian practice screen. Only the
@@ -34,8 +41,14 @@ public sealed record LithuanianWordCreateRequest(string Lithuanian, string Engli
 public sealed class LithuanianRepository(
     NpgsqlDataSource database,
     ActiveDatabaseConfiguration active,
-    LithuanianTranscriptionService transcription)
+    AppSettingsService settings,
+    LithuanianTranscriptionService transcription,
+    LithuanianHintService hints)
 {
+    private static readonly JsonSerializerOptions HintJson = new(JsonSerializerDefaults.Web);
+
+    public int PassMark => settings.Current().LithuanianValue.PassMark;
+
     internal const long MaxRecordingBytes = 8 * 1024 * 1024;
     internal const string StorageFolder = "lithuanian-recordings";
 
@@ -56,8 +69,9 @@ public sealed class LithuanianRepository(
 
     public async Task<IReadOnlyList<LithuanianWordDto>> ListAsync(string owner, CancellationToken token)
     {
+        var passMark = PassMark;
         const string sql = """
-            SELECT w.id, w.lithuanian, w.english, w.created_at,
+            SELECT w.id, w.lithuanian, w.english, w.kind, w.hints_json, w.created_at,
                    r.id, r.content_type, r.size_bytes, r.duration_ms, r.transcript, r.score, r.recorded_at
             FROM lithuanian_words w
             LEFT JOIN lithuanian_recordings r ON r.word_id = w.id
@@ -68,27 +82,39 @@ public sealed class LithuanianRepository(
         command.Parameters.AddWithValue("owner", owner);
         await using var reader = await command.ExecuteReaderAsync(token);
         var order = new List<string>();
-        var words = new Dictionary<string, (string Lithuanian, string English, string CreatedAt, List<LithuanianRecordingDto> Recordings)>();
+        var words = new Dictionary<string, (string Lithuanian, string English, string Kind, IReadOnlyList<LithuanianHint> Hints, string CreatedAt, List<LithuanianRecordingDto> Recordings)>();
         while (await reader.ReadAsync(token))
         {
             var wordId = reader.GetString(0);
             if (!words.TryGetValue(wordId, out var word))
             {
-                word = (reader.GetString(1), reader.GetString(2), reader.GetString(3), []);
+                word = (
+                    reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                    ParseHints(reader.IsDBNull(4) ? null : reader.GetString(4)),
+                    reader.GetString(5), []);
                 words[wordId] = word;
                 order.Add(wordId);
             }
-            if (reader.IsDBNull(4)) continue;
-            var score = reader.IsDBNull(9) ? (int?)null : (int)reader.GetInt64(9);
+            if (reader.IsDBNull(6)) continue;
+            var score = reader.IsDBNull(11) ? (int?)null : (int)reader.GetInt64(11);
             word.Recordings.Add(new LithuanianRecordingDto(
-                reader.GetString(4), wordId, reader.GetString(5), reader.GetInt64(6), reader.GetInt64(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8),
-                score, score is null ? null : LithuanianScoring.Passed(score.Value),
-                reader.GetString(10)));
+                reader.GetString(6), wordId, reader.GetString(7), reader.GetInt64(8), reader.GetInt64(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                score, score is null ? null : LithuanianScoring.Passed(score.Value, passMark),
+                reader.GetString(12)));
         }
         return order
-            .Select(id => new LithuanianWordDto(id, words[id].Lithuanian, words[id].English, words[id].CreatedAt, words[id].Recordings))
+            .Select(id => new LithuanianWordDto(
+                id, words[id].Lithuanian, words[id].English, words[id].Kind,
+                words[id].CreatedAt, words[id].Hints, words[id].Recordings))
             .ToArray();
+    }
+
+    private static IReadOnlyList<LithuanianHint> ParseHints(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try { return JsonSerializer.Deserialize<LithuanianHint[]>(json, HintJson) ?? []; }
+        catch (JsonException) { return []; }
     }
 
     public async Task<LithuanianWordDto> CreateWordAsync(
@@ -96,24 +122,75 @@ public sealed class LithuanianRepository(
         string owner,
         CancellationToken token)
     {
-        var lithuanian = ValidateWord(request.Lithuanian, "Lithuanian");
-        var english = ValidateWord(request.English, "English");
+        var kind = ValidateKind(request.Kind);
+        var lithuanian = ValidateEntry(request.Lithuanian, kind, "Lithuanian");
+        var english = ValidateEntry(request.English, kind, "English");
+
+        // A phrase is broken down word by word so it does not arrive as an opaque block. Best
+        // effort: no key, or a model that misbehaves, costs the hints and not the phrase.
+        var breakdown = kind == "phrase"
+            ? await hints.GenerateAsync(lithuanian, english, token)
+            : [];
+
         var id = Guid.NewGuid().ToString();
         var now = DateTimeOffset.UtcNow.ToString("O");
         const string sql = """
-            INSERT INTO lithuanian_words(id, owner_user_id, lithuanian, english, created_at, updated_at)
-            VALUES(@id, @owner, @lithuanian, @english, @now, @now)
+            INSERT INTO lithuanian_words(
+              id, owner_user_id, lithuanian, english, kind, hints_json, created_at, updated_at)
+            VALUES(@id, @owner, @lithuanian, @english, @kind, @hints, @now, @now)
             """;
         await using var command = database.CreateCommand(sql);
         command.Parameters.AddWithValue("id", id);
         command.Parameters.AddWithValue("owner", owner);
         command.Parameters.AddWithValue("lithuanian", lithuanian);
         command.Parameters.AddWithValue("english", english);
+        command.Parameters.AddWithValue("kind", kind);
+        AddNullable(command, "hints",
+            breakdown.Count == 0 ? null : JsonSerializer.Serialize(breakdown, HintJson),
+            NpgsqlTypes.NpgsqlDbType.Text);
         command.Parameters.AddWithValue("now", now);
         try { await command.ExecuteNonQueryAsync(token); }
         catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation)
-        { throw new ArgumentException("That word pair is already on the list"); }
-        return new LithuanianWordDto(id, lithuanian, english, now, []);
+        { throw new ArgumentException($"That {kind} is already on the list"); }
+        return new LithuanianWordDto(id, lithuanian, english, kind, now, breakdown, []);
+    }
+
+    /// <summary>
+    /// Rebuilds the per-word breakdown, for a phrase added before a key was configured or when the
+    /// first attempt came back empty.
+    /// </summary>
+    public async Task<LithuanianWordDto> RefreshHintsAsync(string wordId, string owner, CancellationToken token)
+    {
+        const string selectSql = """
+            SELECT lithuanian, english, kind FROM lithuanian_words
+            WHERE id = @id AND owner_user_id = @owner
+            """;
+        await using var select = database.CreateCommand(selectSql);
+        select.Parameters.AddWithValue("id", wordId);
+        select.Parameters.AddWithValue("owner", owner);
+        string lithuanian, english, kind;
+        await using (var reader = await select.ExecuteReaderAsync(token))
+        {
+            if (!await reader.ReadAsync(token)) throw new MailNotFoundException("Word not found");
+            lithuanian = reader.GetString(0);
+            english = reader.GetString(1);
+            kind = reader.GetString(2);
+        }
+        if (kind != "phrase") throw new ArgumentException("Only a phrase has a word-by-word breakdown");
+
+        var breakdown = await hints.GenerateAsync(lithuanian, english, token);
+        if (breakdown.Count == 0)
+            throw new ArgumentException("Hints are unavailable. Check the Lithuanian trainer key in Admin settings.");
+
+        await using var update = database.CreateCommand(
+            "UPDATE lithuanian_words SET hints_json = @hints, updated_at = @now WHERE id = @id AND owner_user_id = @owner");
+        update.Parameters.AddWithValue("hints", JsonSerializer.Serialize(breakdown, HintJson));
+        update.Parameters.AddWithValue("now", DateTimeOffset.UtcNow.ToString("O"));
+        update.Parameters.AddWithValue("id", wordId);
+        update.Parameters.AddWithValue("owner", owner);
+        await update.ExecuteNonQueryAsync(token);
+
+        return (await ListAsync(owner, token)).First(word => word.Id == wordId);
     }
 
     public async Task DeleteWordAsync(string wordId, string owner, CancellationToken token)
@@ -199,7 +276,7 @@ public sealed class LithuanianRepository(
         return new LithuanianRecordingDto(
             id, wordId, normalizedType, bytes, duration,
             heard.Length == 0 ? null : heard,
-            score, score is null ? null : LithuanianScoring.Passed(score.Value),
+            score, score is null ? null : LithuanianScoring.Passed(score.Value, PassMark),
             recordedAt);
     }
 
@@ -234,6 +311,9 @@ public sealed class LithuanianRepository(
         if (await command.ExecuteNonQueryAsync(token) == 0) throw new MailNotFoundException("Recording not found");
         foreach (var key in keys) await DeleteUnreferencedFileAsync(key, token);
     }
+
+    public async Task<LithuanianPracticeDto> PracticeAsync(string owner, CancellationToken token) =>
+        new(PassMark, await ListAsync(owner, token));
 
     private async Task<string> WordTextAsync(string wordId, string owner, CancellationToken token)
     {
@@ -293,13 +373,39 @@ public sealed class LithuanianRepository(
         return total;
     }
 
-    internal static string ValidateWord(string? value, string label)
+    internal static string ValidateKind(string? value) => value?.Trim().ToLowerInvariant() switch
     {
-        var word = value?.Trim() ?? "";
-        if (word.Length is < 1 or > 64) throw new ArgumentException($"Enter one {label} word");
-        if (word.Any(char.IsWhiteSpace)) throw new ArgumentException($"Enter a single {label} word without spaces");
-        return word;
+        null or "" or "word" => "word",
+        "phrase" => "phrase",
+        _ => throw new ArgumentException("Choose a word or a phrase")
+    };
+
+    /// <summary>
+    /// A single word rejects spaces; a phrase allows them and is bounded by word count as well as
+    /// length, so "phrase" cannot become a way to store a paragraph.
+    /// </summary>
+    internal static string ValidateEntry(string? value, string kind, string label)
+    {
+        var entry = Collapse(value);
+        if (kind == "word")
+        {
+            if (entry.Length is < 1 or > LithuanianDefaults.MaxWordLength)
+                throw new ArgumentException($"Enter one {label} word");
+            if (entry.Contains(' '))
+                throw new ArgumentException($"Enter a single {label} word, or switch to a phrase");
+            return entry;
+        }
+
+        if (entry.Length is < 1 or > LithuanianDefaults.MaxPhraseLength)
+            throw new ArgumentException($"Enter a {label} phrase of up to {LithuanianDefaults.MaxPhraseLength} characters");
+        if (entry.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > LithuanianDefaults.MaxPhraseWords)
+            throw new ArgumentException($"Keep the {label} phrase to {LithuanianDefaults.MaxPhraseWords} words or fewer");
+        return entry;
     }
+
+    /// <summary>Trims and reduces internal runs of whitespace to one space.</summary>
+    private static string Collapse(string? value) =>
+        string.Join(' ', (value ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     internal static string ValidateContentType(string? value)
     {
