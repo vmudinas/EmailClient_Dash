@@ -108,7 +108,7 @@ describe("MessageReader AI analysis", () => {
         },
         todo: null,
         provider: "deepseek",
-        model: "deepseek-chat"
+        model: "deepseek-v4-flash"
       }),
       createCalendarEventFromMessage: vi.fn().mockResolvedValue({
         id: "event-1",

@@ -39,7 +39,7 @@ public sealed class AiProviderTests
         var result = await AiProviderClient.AnalyzeAsync(
             new HttpClient(handler),
             "deepseek",
-            "deepseek-chat",
+            "deepseek-v4-flash",
             "test-key",
             "Subject: Integration test",
             CancellationToken.None);
@@ -47,7 +47,7 @@ public sealed class AiProviderTests
         Assert.Equal("Mock summary", result.GetProperty("summary").GetString());
         Assert.Equal("https://api.deepseek.com/chat/completions", handler.RequestUri);
         Assert.Equal("Bearer test-key", handler.Authorization);
-        Assert.Contains("\"model\":\"deepseek-chat\"", handler.RequestBody, StringComparison.Ordinal);
+        Assert.Contains("\"model\":\"deepseek-v4-flash\"", handler.RequestBody, StringComparison.Ordinal);
         Assert.Contains("\"response_format\":{\"type\":\"json_object\"}", handler.RequestBody, StringComparison.Ordinal);
     }
 

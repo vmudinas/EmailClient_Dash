@@ -39,8 +39,8 @@ public sealed record AppRuntimeSettings(
     public StockRuntimeSettings StocksValue => Stocks ?? new(["SPY", "QQQ"], 8);
     public NewsRuntimeSettings NewsValue => News ?? new(["cnn", "bbc", "aljazeera", "foxnews"], 8);
     public AiRuntimeSettings AiValue => Ai ?? new(
-        OpenAi: new("", "gpt-5-mini"),
-        DeepSeek: new("", "deepseek-chat"));
+        OpenAi: new("", AiModelDefaults.OpenAi),
+        DeepSeek: new("", AiModelDefaults.DeepSeek));
     public PropertyIntegrationRuntimeSettings PropertyIntegrationsValue => PropertyIntegrations ?? new();
 }
 
@@ -150,8 +150,8 @@ public sealed class AppSettingsService
             var current = _settings.AiValue;
             var providerId = String(input, "provider") ?? current.ActiveProvider;
             var provider = providerId == "deepseek"
-                ? current.DeepSeek ?? new("", "deepseek-chat")
-                : current.OpenAi ?? new("", "gpt-5-mini");
+                ? current.DeepSeek ?? new("", AiModelDefaults.DeepSeek)
+                : current.OpenAi ?? new("", AiModelDefaults.OpenAi);
             provider = provider with
             {
                 ApiKey = String(input, "apiKey") ?? provider.ApiKey,
@@ -187,8 +187,8 @@ public sealed class AppSettingsService
         {
             var current = _settings.AiValue;
             _settings = _settings with { Ai = provider == "deepseek"
-                ? current with { DeepSeek = (current.DeepSeek ?? new("", "deepseek-chat")) with { ApiKey = "" } }
-                : current with { OpenAi = (current.OpenAi ?? new("", "gpt-5-mini")) with { ApiKey = "" } } };
+                ? current with { DeepSeek = (current.DeepSeek ?? new("", AiModelDefaults.DeepSeek)) with { ApiKey = "" } }
+                : current with { OpenAi = (current.OpenAi ?? new("", AiModelDefaults.OpenAi)) with { ApiKey = "" } } };
             Save(); return WithEnvironment(_settings);
         }
     }
@@ -283,13 +283,16 @@ public sealed class AppSettingsService
         var ai = source.AiValue;
         ai = ai with
         {
-            OpenAi = (ai.OpenAi ?? new("", "gpt-5-mini")) with
+            OpenAi = (ai.OpenAi ?? new("", AiModelDefaults.OpenAi)) with
             {
                 ApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")?.Trim() is { Length: > 0 } openAiKey ? openAiKey : ai.OpenAi?.ApiKey ?? ""
             },
-            DeepSeek = (ai.DeepSeek ?? new("", "deepseek-chat")) with
+            DeepSeek = (ai.DeepSeek ?? new("", AiModelDefaults.DeepSeek)) with
             {
-                ApiKey = Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY")?.Trim() is { Length: > 0 } deepSeekKey ? deepSeekKey : ai.DeepSeek?.ApiKey ?? ""
+                ApiKey = Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY")?.Trim() is { Length: > 0 } deepSeekKey ? deepSeekKey : ai.DeepSeek?.ApiKey ?? "",
+                // An archive configured before DeepSeek retired a model name would otherwise fail every
+                // single AI job with a 400 until an administrator noticed and edited the setting by hand.
+                Model = AiModelDefaults.NormalizeDeepSeekModel(ai.DeepSeek?.Model)
             }
         };
         var property=source.PropertyIntegrationsValue with {

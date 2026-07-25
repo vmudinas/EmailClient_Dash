@@ -24,7 +24,7 @@ const SUGGESTION: MessageActionSuggestion = {
     text: "Respond to manager"
   },
   provider: "deepseek",
-  model: "deepseek-chat"
+  model: "deepseek-v4-flash"
 };
 
 describe("MessageActionDialog", () => {

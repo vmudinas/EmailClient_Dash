@@ -1007,7 +1007,7 @@ describe("SettingsDialog", () => {
       mode: "all",
       intervalMinutes: 60,
       provider: "deepseek",
-      model: "deepseek-chat",
+      model: "deepseek-v4-flash",
       skills: ["summarize", "categorize", "prioritize"],
       prompt: "Process the inbox.",
       enabled: true,
