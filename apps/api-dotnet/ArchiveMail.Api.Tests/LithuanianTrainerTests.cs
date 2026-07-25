@@ -336,6 +336,40 @@ public sealed class LithuanianTrainerTests
     }
 
     [Fact]
+    public void PhraseSuggestionsAreBoundedAndDeduplicated()
+    {
+        var suggestions = LithuanianPhraseService.Parse(
+            """{"phrases":["good morning","Good Morning","morning coffee","every morning","one more","and another"]}""");
+
+        // Case-insensitive duplicates are one offer, and the list is capped so the row stays
+        // readable on a phone.
+        Assert.Equal(LithuanianDefaults.MaxPhraseSuggestions, suggestions.Phrases.Count);
+        Assert.Equal("good morning", suggestions.Phrases[0]);
+        Assert.Equal("morning coffee", suggestions.Phrases[1]);
+    }
+
+    [Fact]
+    public void PhraseSuggestionsDropWhatSavingWouldReject()
+    {
+        var tooManyWords = string.Join(' ', Enumerable.Range(0, LithuanianDefaults.MaxPhraseWords + 1)
+            .Select(index => $"w{index}"));
+
+        var suggestions = LithuanianPhraseService.Parse(
+            $$"""{"phrases":["{{tooManyWords}}","  good   morning  ",42,""]}""");
+
+        Assert.Single(suggestions.Phrases);
+        Assert.Equal("good morning", suggestions.Phrases[0]);
+    }
+
+    [Fact]
+    public void PhraseSuggestionsSurviveAMalformedReply()
+    {
+        Assert.Empty(LithuanianPhraseService.Parse("not json").Phrases);
+        Assert.Empty(LithuanianPhraseService.Parse(null).Phrases);
+        Assert.Empty(LithuanianPhraseService.Parse("""{"phrases":"nope"}""").Phrases);
+    }
+
+    [Fact]
     public void CapsAnOverlongTranscriptInsteadOfStoringIt()
     {
         var transcript = LithuanianScoring.NormalizeTranscript(new string('a', 500));

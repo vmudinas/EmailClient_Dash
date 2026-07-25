@@ -47,6 +47,16 @@ public static class LithuanianEndpoints
             return Results.Ok(await translation.TranslateAsync(request.English ?? "", kind, token));
         }).WithName("TranslateLithuanian").Produces<LithuanianTranslation>();
 
+        // Offers phrases built around the word being typed. Suggestions are an offer, so an empty
+        // list is a normal answer rather than an error.
+        group.MapPost("/phrases", async (LithuanianPhraseRequest request, HttpContext context,
+            LithuanianPhraseService phrases, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            return Results.Ok(await phrases.SuggestAsync(request.English ?? "", token));
+        }).WithName("SuggestLithuanianPhrases").Produces<LithuanianPhraseSuggestions>();
+
         group.MapPost("/words", async (LithuanianWordCreateRequest request, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
         {

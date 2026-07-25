@@ -57,6 +57,7 @@ import type {
   InboxTabSettingsUpdate,
   LithuanianPractice,
   LithuanianRecording,
+  LithuanianPhraseSuggestions,
   LithuanianSettingsPatch,
   LithuanianTranslateInput,
   LithuanianTranslation,
@@ -294,6 +295,14 @@ export class ApiClient {
 
   translateLithuanian(input: LithuanianTranslateInput, signal?: AbortSignal): Promise<LithuanianTranslation> {
     return this.request("/api/lithuanian/translate", { method: "POST", body: JSON.stringify(input), signal });
+  }
+
+  suggestLithuanianPhrases(english: string, signal?: AbortSignal): Promise<LithuanianPhraseSuggestions> {
+    return this.request("/api/lithuanian/phrases", {
+      method: "POST",
+      body: JSON.stringify({ english }),
+      signal
+    });
   }
 
   deleteLithuanianWord(wordId: string): Promise<void> {

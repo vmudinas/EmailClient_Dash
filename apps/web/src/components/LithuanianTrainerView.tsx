@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import {
   LITHUANIAN_LOCALE,
+  LITHUANIAN_MAX_PHRASE_SUGGESTIONS,
   LITHUANIAN_MAX_PHRASE_WORDS,
   LITHUANIAN_PASS_MARK,
   type LithuanianEntryKind,
@@ -79,6 +80,7 @@ export function LithuanianTrainerView({
   const [english, setEnglish] = useState("");
   const [kind, setKind] = useState<LithuanianEntryKind>("word");
   const [translating, setTranslating] = useState(false);
+  const [phrases, setPhrases] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const [hintingId, setHintingId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -150,6 +152,31 @@ export function LithuanianTrainerView({
     };
   }, [api, english, kind, lithuanian]);
 
+  /**
+   * Offers phrases built around the single word being typed, so one word can grow into something
+   * Lucas could actually say. Only offered while adding a word -- once he is writing a phrase the
+   * offer would be competing with what he is already typing.
+   */
+  useEffect(() => {
+    const wanted = english.trim();
+    if (kind !== "word" || wanted.split(/\s+/).length !== 1 || wanted.length < 2) {
+      setPhrases([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api.suggestLithuanianPhrases(wanted, controller.signal)
+        .then((result) => {
+          if (!controller.signal.aborted) setPhrases(result.phrases.slice(0, LITHUANIAN_MAX_PHRASE_SUGGESTIONS));
+        })
+        .catch(() => {});
+    }, TranslateDebounceMs);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [api, english, kind]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -189,6 +216,18 @@ export function LithuanianTrainerView({
     if (!lithuanianEdited.current) setLithuanian("");
   };
 
+  /**
+   * Takes up one of the offered phrases. The English is replaced and the Lithuanian is cleared so
+   * the translator writes the phrase rather than leaving the single word's translation behind.
+   */
+  const choosePhrase = (offer: string) => {
+    setKind("phrase");
+    setEnglish(offer);
+    setPhrases([]);
+    lithuanianEdited.current = false;
+    setLithuanian("");
+  };
+
   const addWord = async (event: FormEvent) => {
     event.preventDefault();
     const nextLithuanian = lithuanian.trim();
@@ -205,6 +244,7 @@ export function LithuanianTrainerView({
       setWords((current) => [created, ...current]);
       setLithuanian("");
       setEnglish("");
+      setPhrases([]);
       lithuanianEdited.current = false;
       announce(practice.dueToday
         ? `${created.lithuanian} added. Today's ${kind} is done.`
@@ -399,6 +439,19 @@ export function LithuanianTrainerView({
           </div>
           <div className="trainer-add-fields">
             <label>
+              English
+              <input
+                value={english}
+                onChange={(event) => setEnglish(event.target.value)}
+                placeholder={kind === "word" ? "hello" : "good morning"}
+                maxLength={kind === "word" ? 64 : 200}
+                autoComplete="off"
+                spellCheck={false}
+                required
+              />
+            </label>
+            <span className="trainer-add-equals" aria-hidden="true">=</span>
+            <label>
               <span className="trainer-field-label">
                 Lithuanian
                 {translating && (
@@ -423,19 +476,6 @@ export function LithuanianTrainerView({
                 required
               />
             </label>
-            <span className="trainer-add-equals" aria-hidden="true">=</span>
-            <label>
-              English
-              <input
-                value={english}
-                onChange={(event) => setEnglish(event.target.value)}
-                placeholder={kind === "word" ? "hello" : "good morning"}
-                maxLength={kind === "word" ? 64 : 200}
-                autoComplete="off"
-                spellCheck={false}
-                required
-              />
-            </label>
             <button
               className="primary-button trainer-add-submit"
               disabled={adding || !lithuanian.trim() || !english.trim()}
@@ -443,6 +483,21 @@ export function LithuanianTrainerView({
               {adding ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Add
             </button>
           </div>
+          {phrases.length > 0 && (
+            <div className="trainer-phrase-offers">
+              <span className="trainer-phrase-lead">Say more with it:</span>
+              {phrases.map((offer) => (
+                <button
+                  key={offer}
+                  type="button"
+                  className="trainer-phrase-offer"
+                  onClick={() => choosePhrase(offer)}
+                >
+                  {offer}
+                </button>
+              ))}
+            </div>
+          )}
           <small>
             {kind === "word"
               ? "Type the English and the Lithuanian is written for you — change it if you know a better word. Only the Lithuanian side is practised."

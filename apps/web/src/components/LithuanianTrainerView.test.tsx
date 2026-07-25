@@ -122,6 +122,7 @@ function client(overrides: Partial<Record<keyof ApiClient, unknown>> = {}): ApiC
     refreshLithuanianHints: vi.fn(),
     // No suggestion by default, which is what an installation without a trainer key returns.
     translateLithuanian: vi.fn().mockResolvedValue({ lithuanian: "" }),
+    suggestLithuanianPhrases: vi.fn().mockResolvedValue({ phrases: [] }),
     createLithuanianWord: vi.fn(),
     deleteLithuanianWord: vi.fn().mockResolvedValue(undefined),
     saveLithuanianRecording: vi.fn(),
@@ -474,6 +475,54 @@ describe("LithuanianTrainerView", () => {
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(translateLithuanian).not.toHaveBeenCalled();
     expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("dėkui");
+  });
+
+  it("offers phrases around the word being typed and takes one up", async () => {
+    const suggestLithuanianPhrases = vi.fn().mockResolvedValue({
+      phrases: ["good morning", "morning coffee"]
+    });
+    const translateLithuanian = vi.fn()
+      .mockResolvedValueOnce({ lithuanian: "rytas" })
+      .mockResolvedValueOnce({ lithuanian: "labas rytas" });
+    render(
+      <LithuanianTrainerView
+        api={client({ suggestLithuanianPhrases, translateLithuanian })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.change(screen.getByLabelText(/English/), { target: { value: "morning" } });
+    const offer = await screen.findByRole("button", { name: "good morning" }, { timeout: 2_000 });
+
+    // Taking up an offer switches to a phrase and retranslates, rather than leaving the single
+    // word's Lithuanian behind under a phrase's English.
+    fireEvent.click(offer);
+    expect((screen.getByLabelText(/English/) as HTMLInputElement).value).toBe("good morning");
+    expect(screen.getByRole("button", { name: "Phrase" }).getAttribute("aria-pressed")).toBe("true");
+    await waitFor(
+      () => expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("labas rytas"),
+      { timeout: 2_000 }
+    );
+  });
+
+  it("does not offer phrases once a phrase is what is being typed", async () => {
+    const suggestLithuanianPhrases = vi.fn().mockResolvedValue({ phrases: ["good morning"] });
+    render(
+      <LithuanianTrainerView
+        api={client({ suggestLithuanianPhrases })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.click(screen.getByRole("button", { name: "Phrase" }));
+    fireEvent.change(screen.getByLabelText(/English/), { target: { value: "morning" } });
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(suggestLithuanianPhrases).not.toHaveBeenCalled();
   });
 
   it("asks for a fresh suggestion when the Lithuanian field is cleared", async () => {

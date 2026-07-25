@@ -10828,6 +10828,34 @@ textarea:focus-visible {
   text-transform: none;
 }
 
+.trainer-phrase-offers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.trainer-phrase-lead {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.trainer-phrase-offer {
+  padding: 6px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.trainer-phrase-offer:hover {
+  border-color: var(--accent, #4b7f52);
+}
+
 .trainer-add-equals {
   display: none;
 }

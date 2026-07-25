@@ -1232,6 +1232,25 @@ export type LithuanianEntryKind = "word" | "phrase";
 
 export const LITHUANIAN_MAX_PHRASE_WORDS = 12;
 export const LITHUANIAN_MAX_PHRASE_LENGTH = 200;
+
+/** How many phrases are offered around the word being typed. */
+export const LITHUANIAN_MAX_PHRASE_SUGGESTIONS = 4;
+
+/**
+ * The letters Lithuanian has and English does not. Shown marked on a saved word so the spelling
+ * that differs from English is the part that stands out.
+ */
+export const LITHUANIAN_SPECIAL_LETTERS: Readonly<Record<string, string>> = {
+  ą: "nasal a — longer than a plain a",
+  č: "ch, as in chair",
+  ę: "wide e — like the a in cat",
+  ė: "narrow e — like the a in gate",
+  į: "long ee",
+  š: "sh, as in shoe",
+  ų: "long oo",
+  ū: "long oo",
+  ž: "zh, like the s in measure"
+};
 export const LITHUANIAN_MAX_WORD_LENGTH = 64;
 
 /** One word of a phrase, explained. Empty for single-word entries. */
@@ -1281,6 +1300,11 @@ export interface LithuanianPractice {
 export interface LithuanianTranslateInput {
   english: string;
   kind: LithuanianEntryKind;
+}
+
+/** Everyday English phrases built around the word being typed. Empty is a normal answer. */
+export interface LithuanianPhraseSuggestions {
+  phrases: string[];
 }
 
 /**

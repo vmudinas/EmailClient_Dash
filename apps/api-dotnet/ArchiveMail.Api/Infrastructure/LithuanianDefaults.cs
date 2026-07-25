@@ -43,6 +43,12 @@ public static class LithuanianDefaults
     public const int MinimumPassMark = 50;
     public const int MaximumPassMark = 100;
 
+    /// <summary>
+    /// How many phrases are offered around the word being typed. Four fits on one row on a phone
+    /// and is few enough to read without the offer becoming a decision of its own.
+    /// </summary>
+    public const int MaxPhraseSuggestions = 4;
+
     /// <summary>Longest phrase accepted, in characters and in words.</summary>
     public const int MaxPhraseLength = 200;
     public const int MaxPhraseWords = 12;
