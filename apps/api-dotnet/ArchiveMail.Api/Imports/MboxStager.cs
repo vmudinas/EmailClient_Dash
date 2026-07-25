@@ -8,7 +8,8 @@ public sealed class MboxStager(IOptions<ImportOptions> options, ILogger<MboxStag
 {
     private readonly ImportOptions _options = options.Value;
 
-    public async Task<StagedArchive> EnsureStagedAsync(ImportJobRecord job, CancellationToken cancellationToken)
+    public async Task<StagedArchive> EnsureStagedAsync(
+        ImportJobRecord job, CancellationToken cancellationToken, Action<long>? onBytesRead = null)
     {
         var stagingRoot = Path.GetFullPath(Path.Combine(_options.DataDirectory, "import-staging"));
         var stagingPath = Path.GetFullPath(job.StagingPath ?? Path.Combine(stagingRoot, job.Public.Id));
@@ -41,6 +42,19 @@ public sealed class MboxStager(IOptions<ImportOptions> options, ILogger<MboxStag
                     target, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                     128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
                 await message.WriteToAsync(output, cancellationToken);
+
+                if (onBytesRead is not null && index % 50 == 0)
+                {
+                    try
+                    {
+                        onBytesRead(input.Position);
+                    }
+                    catch (Exception exception)
+                    {
+                        // Progress reporting must never affect the import outcome.
+                        logger.LogDebug(exception, "MBOX progress callback failed for job {JobId}", job.Public.Id);
+                    }
+                }
             }
             await File.WriteAllTextAsync(completionMarker, DateTimeOffset.UtcNow.ToString("O"), cancellationToken);
         }
@@ -63,11 +77,12 @@ public sealed class MboxStager(IOptions<ImportOptions> options, ILogger<MboxStag
 
 public sealed class ArchiveStager(PstStager pst, MboxStager mbox)
 {
-    public Task<StagedArchive> EnsureStagedAsync(ImportJobRecord job, CancellationToken cancellationToken) =>
+    public Task<StagedArchive> EnsureStagedAsync(
+        ImportJobRecord job, CancellationToken cancellationToken, Action<long>? onBytesRead = null) =>
         job.Public.SourceType.ToLowerInvariant() switch
         {
-            "pst" => pst.EnsureStagedAsync(job, cancellationToken),
-            "mbox" => mbox.EnsureStagedAsync(job, cancellationToken),
+            "pst" => pst.EnsureStagedAsync(job, cancellationToken, onBytesRead),
+            "mbox" => mbox.EnsureStagedAsync(job, cancellationToken, onBytesRead),
             _ => throw new NotSupportedException($"Unsupported archive type: {job.Public.SourceType}")
         };
 }

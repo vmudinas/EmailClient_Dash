@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatImportEta,
   importEmailCountLabel,
+  importPhaseLabel,
   importProgressPercent,
   updateImportEta
 } from "./import-progress.js";
@@ -30,6 +31,34 @@ describe("import progress presentation", () => {
       totalItems: null
     }))).toBe(55);
     expect(importProgressPercent(job({ status: "completed" }))).toBe(100);
+  });
+
+  it("shows a scanning placeholder before extraction has reported any progress", () => {
+    const notStarted = job({
+      phase: "fingerprinting",
+      processedBytes: 0,
+      totalBytes: 0
+    });
+    expect(importPhaseLabel(notStarted)).toBe("Scanning and counting");
+    expect(importEmailCountLabel(notStarted)).toBe("Counting total emails");
+
+    const totalKnownButNotStarted = job({
+      phase: "fingerprinting",
+      processedBytes: 0,
+      totalBytes: 61_236_701_184
+    });
+    expect(importPhaseLabel(totalKnownButNotStarted)).toBe("Scanning and counting");
+    expect(importEmailCountLabel(totalKnownButNotStarted)).toBe("Counting total emails");
+  });
+
+  it("reports live byte progress once extraction starts moving", () => {
+    const extracting = job({
+      phase: "fingerprinting",
+      processedBytes: 3_865_470_566,
+      totalBytes: 61_236_701_184
+    });
+    expect(importPhaseLabel(extracting)).toBe("Extracting messages");
+    expect(importEmailCountLabel(extracting)).toBe("3.6 GB of 57 GB read");
   });
 
   it("estimates completion from observed message throughput", () => {

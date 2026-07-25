@@ -1,4 +1,5 @@
 import type { ImportJob } from "@email-client/shared";
+import { formatBytes } from "./format.js";
 
 export interface ImportEtaSample {
   phase: ImportJob["phase"];
@@ -40,7 +41,9 @@ export function importPhaseLabel(job: ImportJob): string {
   if (job.status === "completed_with_errors") return "Completed with issues";
   if (job.status === "completed") return "Import complete";
   if (job.status === "queued") return "Waiting to start";
-  if (job.phase === "fingerprinting") return "Scanning and counting";
+  if (job.phase === "fingerprinting") {
+    return job.processedBytes > 0 ? "Extracting messages" : "Scanning and counting";
+  }
   if (job.phase === "parsing") {
     return job.totalItems === null ? "Counting emails" : "Importing emails";
   }
@@ -53,7 +56,12 @@ export function importEmailCountLabel(job: ImportJob): string {
   if (job.totalItems !== null) {
     return `${job.processedItems.toLocaleString()} of ${job.totalItems.toLocaleString()} emails`;
   }
-  if (job.phase === "fingerprinting") return "Counting total emails";
+  if (job.phase === "fingerprinting") {
+    if (job.totalBytes > 0 && job.processedBytes > 0) {
+      return `${formatBytes(job.processedBytes)} of ${formatBytes(job.totalBytes)} read`;
+    }
+    return "Counting total emails";
+  }
   return `${job.processedItems.toLocaleString()} emails processed`;
 }
 
