@@ -110,6 +110,7 @@ export function LithuanianTrainerView({
   const [phrases, setPhrases] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const [hintingId, setHintingId] = useState<string | null>(null);
+  const [sayingId, setSayingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [recordingWordId, setRecordingWordId] = useState<string | null>(null);
@@ -304,6 +305,39 @@ export function LithuanianTrainerView({
     }
   };
 
+  /**
+   * Says a word that has no recording yet: one added before a key was configured, or one that
+   * predates the server saying them at all. Without this those words would be stuck on the
+   * device's own voice forever.
+   */
+  const regeneratePronunciation = async (word: LithuanianWord) => {
+    setSayingId(word.id);
+    setError("");
+    try {
+      const updated = await api.refreshLithuanianPronunciation(word.id);
+      setWords((current) => current.map((item) => item.id === word.id ? updated : item));
+      announce(`${word.lithuanian} can now be played properly.`);
+    } catch (reason) {
+      setError(errorText(reason, "The spoken version could not be made"));
+    } finally {
+      setSayingId(null);
+    }
+  };
+
+  /**
+   * Opens the game.
+   *
+   * The trainer stays mounted behind it, so its unmount cleanup does not run: a take in progress
+   * has to be stopped here, or the microphone would keep recording -- with no stop button on
+   * screen -- for the whole game.
+   */
+  const startGame = () => {
+    recorder.current.cancel();
+    setRecordingWordId(null);
+    stopSpeaking();
+    setPlaying(true);
+  };
+
   const removeWord = async (word: LithuanianWord) => {
     if (!window.confirm(`Remove ${word.lithuanian} and its recordings?`)) return;
     setBusyId(word.id);
@@ -492,7 +526,13 @@ export function LithuanianTrainerView({
               <strong>Play a round</strong>
               <span>{highScore > 0 ? `Best ${highScore}` : "No score yet — go and set one"}</span>
             </div>
-            <button type="button" className="primary-button" onClick={() => setPlaying(true)}>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={startGame}
+              // Leaving mid-take would throw the recording away; scoring one is worth waiting for.
+              disabled={recordingWordId !== null || savingWordId !== null}
+            >
               <Gamepad2 size={17} /> Play
             </button>
           </section>
@@ -743,6 +783,21 @@ export function LithuanianTrainerView({
                           : <><Lightbulb size={15} /> Explain word by word</>}
                       </button>
                     )
+                  )}
+
+                  {/* A word added before the server could say them, or before a key was
+                      configured, is stuck on this device's voice until it is said once. */}
+                  {!word.hasPronunciation && (
+                    <button
+                      type="button"
+                      className="text-button trainer-say-build"
+                      onClick={() => void regeneratePronunciation(word)}
+                      disabled={sayingId === word.id}
+                    >
+                      {sayingId === word.id
+                        ? <><LoaderCircle className="spin" size={15} /> Saying it</>
+                        : <><Volume2 size={15} /> Say it properly on every device</>}
+                    </button>
                   )}
 
                   {word.recordings.length > 0 && (

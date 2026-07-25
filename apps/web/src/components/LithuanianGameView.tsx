@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Flame, Heart, LoaderCircle, Trophy, Volume2, X } from "lucide-react";
 import { LITHUANIAN_LOCALE, type LithuanianWord } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
-import { speak, stopSpeaking } from "../lib/pronunciation.js";
+import { SILENT_CLIP, speak, stopSpeaking } from "../lib/pronunciation.js";
 import {
   GAME_LIVES,
   GAME_QUESTION_MS,
@@ -62,6 +62,14 @@ export function LithuanianGameView({
   const [saving, setSaving] = useState(false);
   const [best, setBest] = useState(bestScore);
   const [record, setRecord] = useState(false);
+
+  const player = useRef<HTMLAudioElement | null>(null);
+  const clips = useRef(new Map<string, string>());
+  const audioUnlocked = useRef(false);
+  const spoken = useMemo(
+    () => new Map(words.map((entry) => [entry.id, entry.hasPronunciation])),
+    [words]
+  );
 
   const question = round[index] ?? null;
   const answered = verdict !== null;
@@ -141,7 +149,46 @@ export function LithuanianGameView({
     return () => window.clearTimeout(timer);
   }, [answered, lives, index, round.length, finish]);
 
-  useEffect(() => stopSpeaking, []);
+  useEffect(() => {
+    const urls = clips.current;
+    return () => {
+      stopSpeaking();
+      urls.forEach((url) => URL.revokeObjectURL(url));
+      urls.clear();
+    };
+  }, []);
+
+  /**
+   * Says the word being asked about, preferring the server's recording for the same reason the
+   * word list does: the browser's own voice only says Lithuanian properly on a device that has a
+   * Lithuanian voice installed. Playing synthesis here would put back exactly the wrong-language
+   * pronunciation the cached audio exists to avoid.
+   */
+  const say = useCallback(async (question: GameQuestion) => {
+    if (!spoken.get(question.wordId)) {
+      speak(question.lithuanian, LITHUANIAN_LOCALE);
+      return;
+    }
+    const element = player.current;
+    let url = clips.current.get(question.wordId);
+    // Claims playback permission while the tap is still live, as the word list does.
+    if (element && !url && !audioUnlocked.current) {
+      audioUnlocked.current = true;
+      element.src = SILENT_CLIP;
+      void Promise.resolve(element.play()).catch(() => { audioUnlocked.current = false; });
+    }
+    try {
+      if (!url) {
+        url = URL.createObjectURL(await api.lithuanianPronunciationBlob(question.wordId));
+        clips.current.set(question.wordId, url);
+      }
+      if (!element) return;
+      element.src = url;
+      await element.play();
+    } catch {
+      speak(question.lithuanian, LITHUANIAN_LOCALE);
+    }
+  }, [api, spoken]);
 
   const answer = (choice: string) => {
     if (answered || !question) return;
@@ -190,6 +237,8 @@ export function LithuanianGameView({
 
   return (
     <div className="game" role="dialog" aria-label="Practice game">
+      {/* One element reused for every clip: browsers grant playback permission per element. */}
+      <audio ref={player} hidden />
       <header className="game-bar">
         <button type="button" className="game-quit" onClick={onClose} aria-label="Leave the game">
           <X size={18} />
@@ -236,7 +285,7 @@ export function LithuanianGameView({
           <button
             type="button"
             className="game-listen"
-            onClick={() => speak(question!.lithuanian, LITHUANIAN_LOCALE)}
+            onClick={() => void say(question!)}
             aria-label={`Listen to ${question!.lithuanian}`}
           >
             <Volume2 size={16} /> Listen

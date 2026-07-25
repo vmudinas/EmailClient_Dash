@@ -39,6 +39,23 @@ beforeEach(() => {
   vi.useFakeTimers();
   // One word means every question is typed, which keeps a round deterministic.
   vi.spyOn(Math, "random").mockReturnValue(0.5);
+  Object.defineProperty(window, "SpeechSynthesisUtterance", {
+    configurable: true,
+    value: class { lang = ""; rate = 1; voice: unknown = null; constructor(readonly text: string) {} }
+  });
+  Object.defineProperty(window, "speechSynthesis", {
+    configurable: true,
+    value: {
+      getVoices: () => [{ lang: "lt-LT", name: "Lietuvių" }],
+      speak: vi.fn(),
+      cancel: vi.fn(),
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    }
+  });
+  window.HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined);
+  URL.createObjectURL = vi.fn(() => "blob:said");
+  URL.revokeObjectURL = vi.fn();
 });
 
 afterEach(() => {
@@ -149,6 +166,69 @@ describe("LithuanianGameView", () => {
 
     // It is a game, not a record to defend: a failed save costs the high score, not the result.
     expect(screen.getByText("Game over")).toBeTruthy();
+  });
+
+  it("plays the server's recording rather than the device voice", async () => {
+    // 0.1 rolls a "what does this mean?" question, which is the one with a Listen button.
+    vi.spyOn(Math, "random").mockReturnValue(0.1);
+    // Every word is cached, so the assertion does not depend on which one is drawn first.
+    const spoken = [
+      ONE[0]!,
+      word("2", "labas", "hello"),
+      word("3", "rytas", "morning"),
+      word("4", "duona", "bread"),
+      word("5", "katė", "cat")
+    ].map((entry) => ({ ...entry, hasPronunciation: true }));
+    const lithuanianPronunciationBlob = vi.fn()
+      .mockResolvedValue(new Blob(["said"], { type: "audio/mpeg" }));
+    render(
+      <LithuanianGameView
+        api={client({ lithuanianPronunciationBlob })}
+        words={spoken}
+        bestScore={0}
+        onFinished={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    const listen = screen.getAllByRole("button", { name: /^Listen to / })[0]!;
+    await act(async () => {
+      fireEvent.click(listen);
+      await Promise.resolve();
+    });
+
+    // Falling back to synthesis here would put back the wrong-language pronunciation the cached
+    // audio exists to avoid.
+    expect(lithuanianPronunciationBlob).toHaveBeenCalled();
+    expect(speechSynthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it("uses the device voice for a word the server has not said", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.1);
+    const lithuanianPronunciationBlob = vi.fn();
+    render(
+      <LithuanianGameView
+        api={client({ lithuanianPronunciationBlob })}
+        words={[
+          ONE[0]!,
+          word("2", "labas", "hello"),
+          word("3", "rytas", "morning"),
+          word("4", "duona", "bread"),
+          word("5", "katė", "cat")
+        ]}
+        bestScore={0}
+        onFinished={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: /^Listen to / })[0]!);
+      await Promise.resolve();
+    });
+
+    expect(lithuanianPronunciationBlob).not.toHaveBeenCalled();
+    expect(speechSynthesis.speak).toHaveBeenCalled();
   });
 
   it("says there is nothing to play with before any word is added", () => {

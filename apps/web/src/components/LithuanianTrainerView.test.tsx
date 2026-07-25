@@ -627,6 +627,61 @@ describe("LithuanianTrainerView", () => {
     expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("dėkui");
   });
 
+  it("will not start the game while the microphone is live", async () => {
+    render(<LithuanianTrainerView api={client()} displayName="Lucas" onSignOut={vi.fn()} />);
+    await screen.findByText("labas");
+
+    fireEvent.click(screen.getByRole("button", { name: "Record labas" }));
+    await waitFor(() => expect(recognitionInstance).not.toBeNull());
+
+    // The trainer stays mounted behind the game, so its cleanup would not stop the recorder:
+    // starting a game mid-take would leave the microphone running with no stop button on screen.
+    expect(screen.getByRole("button", { name: "Play" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("offers to say a word the server has never said, and keeps the result", async () => {
+    const bare = word({ id: "word-9", lithuanian: "ačiū", english: "thanks", recordings: [] });
+    const refreshLithuanianPronunciation = vi.fn()
+      .mockResolvedValue({ ...bare, hasPronunciation: true });
+    render(
+      <LithuanianTrainerView
+        api={client({
+          lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, bestScore: 0, words: [bare] }),
+          refreshLithuanianPronunciation
+        })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("ačiū");
+
+    fireEvent.click(screen.getByRole("button", { name: /Say it properly/ }));
+
+    await waitFor(() => expect(refreshLithuanianPronunciation).toHaveBeenCalledWith("word-9"));
+    // Once said, the offer is gone -- a word added before a key was configured is not stuck on
+    // the device voice forever.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Say it properly/ })).toBeNull());
+  });
+
+  it("does not offer to say a word the server has already said", async () => {
+    render(
+      <LithuanianTrainerView
+        api={client({
+          lithuanianPractice: vi.fn().mockResolvedValue({
+            passMark: 85,
+            bestScore: 0,
+            words: [word({ hasPronunciation: true })]
+          })
+        })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    expect(screen.queryByRole("button", { name: /Say it properly/ })).toBeNull();
+  });
+
   it("plays a saved recording through the audio element", async () => {
     const lithuanianRecordingBlob = vi.fn().mockResolvedValue(new Blob(["audio"], { type: "audio/webm" }));
     render(
