@@ -50,6 +50,9 @@ remote() {
   ssh $SSH_IDENTITY_ARGS -S "$CONTROL_PATH" "$NAS_HOST" "$@"
 }
 
+. "$SCRIPT_DIR/extraction-guard.sh"
+guard_in_flight_extraction
+
 echo "Checking that the NAS is configured for registry-based deploys..."
 env_file="$NAS_APP_DIR/deploy/.env"
 image_source=$(remote "grep -E '^ARCHIVE_MAIL_IMAGE_SOURCE=' '$env_file' 2>/dev/null | tail -n 1 | cut -d= -f2-" 2>/dev/null || true)
