@@ -291,6 +291,36 @@ public sealed class LithuanianTrainerTests
     }
 
     [Fact]
+    public void TranslationParsingCountsEveryWhitespaceSeparator()
+    {
+        // Splitting on the space alone would let a newline-separated answer through the
+        // single-word guard as one token, and would undercount the words in a phrase.
+        Assert.Empty(
+            LithuanianTranslationService.Parse("""{"lithuanian":"ačiū\nexplanation"}""", "word").Lithuanian);
+        Assert.Empty(
+            LithuanianTranslationService.Parse("""{"lithuanian":"ačiū\tlabai"}""", "word").Lithuanian);
+        Assert.Empty(
+            LithuanianTranslationService.Parse("""{"lithuanian":"ačiū labai"}""", "word").Lithuanian);
+
+        var tooMany = string.Join('\n', Enumerable.Range(0, LithuanianDefaults.MaxPhraseWords + 1)
+            .Select(index => $"w{index}"));
+        Assert.Empty(
+            LithuanianTranslationService.Parse($$"""{"lithuanian":"{{tooMany}}"}""", "phrase").Lithuanian);
+    }
+
+    [Fact]
+    public void TranslationParsingCollapsesSpacingTheWaySavingDoes()
+    {
+        // The suggested text has to survive a round trip through the create endpoint unchanged.
+        Assert.Equal(
+            "labas rytas",
+            LithuanianTranslationService.Parse("""{"lithuanian":"labas   rytas"}""", "phrase").Lithuanian);
+        Assert.Equal(
+            "labas rytas",
+            LithuanianTranslationService.Parse("""{"lithuanian":"\n labas \t rytas \n"}""", "phrase").Lithuanian);
+    }
+
+    [Fact]
     public void TranslationParsingEnforcesTheSameLimitsAsSaving()
     {
         // Anything the create endpoint would reject is dropped here, so an auto-filled value can

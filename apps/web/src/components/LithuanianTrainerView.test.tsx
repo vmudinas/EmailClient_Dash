@@ -476,6 +476,35 @@ describe("LithuanianTrainerView", () => {
     expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("dėkui");
   });
 
+  it("asks for a fresh suggestion when the Lithuanian field is cleared", async () => {
+    const translateLithuanian = vi.fn()
+      .mockResolvedValueOnce({ lithuanian: "ačiū" })
+      .mockResolvedValueOnce({ lithuanian: "dėkui" });
+    render(
+      <LithuanianTrainerView
+        api={client({ translateLithuanian })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.change(screen.getByLabelText(/English/), { target: { value: "thanks" } });
+    await waitFor(
+      () => expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("ačiū"),
+      { timeout: 2_000 }
+    );
+
+    // Throwing the suggestion away has to ask for another one without the English being retyped,
+    // otherwise the field stays empty and Add stays disabled.
+    fireEvent.change(screen.getByLabelText(/Lithuanian/), { target: { value: "" } });
+    await waitFor(
+      () => expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("dėkui"),
+      { timeout: 2_000 }
+    );
+    expect(translateLithuanian).toHaveBeenCalledTimes(2);
+  });
+
   it("leaves the Lithuanian field typeable when no translation comes back", async () => {
     const translateLithuanian = vi.fn().mockRejectedValue(new Error("no trainer key"));
     render(

@@ -109,13 +109,15 @@ public sealed class LithuanianTranslationService(
             if (!parsed.RootElement.TryGetProperty("lithuanian", out var value)
                 || value.ValueKind != JsonValueKind.String) return new LithuanianTranslation("");
 
-            var text = value.GetString()?.Trim() ?? "";
-            if (text.Length == 0) return new LithuanianTranslation("");
+            // Split on every whitespace character rather than the space alone, and rejoin exactly
+            // as saving does. Splitting on " " would let "ačiū\nexplanation" through the
+            // single-word guard as one token, and would undercount the words in a phrase.
+            var words = (value.GetString() ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length == 0) return new LithuanianTranslation("");
+            var text = string.Join(' ', words);
 
             var limit = kind == "phrase" ? LithuanianDefaults.MaxPhraseLength : LithuanianDefaults.MaxWordLength;
             if (text.Length > limit) return new LithuanianTranslation("");
-
-            var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (kind == "phrase" && words.Length > LithuanianDefaults.MaxPhraseWords)
                 return new LithuanianTranslation("");
             if (kind != "phrase" && words.Length > 1) return new LithuanianTranslation("");

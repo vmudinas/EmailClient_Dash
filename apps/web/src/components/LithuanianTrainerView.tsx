@@ -117,10 +117,17 @@ export function LithuanianTrainerView({
    * worked before this existed.
    */
   useEffect(() => {
-    if (lithuanianEdited.current) return;
     const wanted = english.trim();
     if (!wanted) {
-      setLithuanian("");
+      // Only an unwanted suggestion is withdrawn; a word typed by hand outlives the English.
+      if (!lithuanianEdited.current) setLithuanian("");
+      setTranslating(false);
+      return;
+    }
+    // A word already in the box -- typed or suggested -- is never replaced. Emptying the box is
+    // what asks for a fresh suggestion, which is why `lithuanian` belongs in the dependencies:
+    // without it, clearing the field would leave it blank until the English was retyped.
+    if (lithuanian.trim()) {
       setTranslating(false);
       return;
     }
@@ -129,7 +136,7 @@ export function LithuanianTrainerView({
       setTranslating(true);
       api.translateLithuanian({ english: wanted, kind }, controller.signal)
         .then((result) => {
-          if (controller.signal.aborted || lithuanianEdited.current) return;
+          if (controller.signal.aborted) return;
           if (result.lithuanian) setLithuanian(result.lithuanian);
         })
         .catch(() => {})
@@ -141,7 +148,7 @@ export function LithuanianTrainerView({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [api, english, kind]);
+  }, [api, english, kind, lithuanian]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -173,6 +180,13 @@ export function LithuanianTrainerView({
   const announce = (message: string) => {
     setNotice(message);
     window.setTimeout(() => setNotice((current) => current === message ? "" : current), 5_000);
+  };
+
+  // Switching between a word and a phrase withdraws a suggestion made for the other one so a
+  // fresh one is asked for. A word typed by hand is left alone.
+  const chooseKind = (next: LithuanianEntryKind) => {
+    setKind(next);
+    if (!lithuanianEdited.current) setLithuanian("");
   };
 
   const addWord = async (event: FormEvent) => {
@@ -369,7 +383,7 @@ export function LithuanianTrainerView({
             <button
               type="button"
               className={kind === "word" ? "selected" : ""}
-              onClick={() => setKind("word")}
+              onClick={() => chooseKind("word")}
               aria-pressed={kind === "word"}
             >
               Single word
@@ -377,7 +391,7 @@ export function LithuanianTrainerView({
             <button
               type="button"
               className={kind === "phrase" ? "selected" : ""}
-              onClick={() => setKind("phrase")}
+              onClick={() => chooseKind("phrase")}
               aria-pressed={kind === "phrase"}
             >
               Phrase
