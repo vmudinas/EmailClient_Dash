@@ -2,7 +2,7 @@ name: archive-mail
 
 services:
   archive-mail:
-    image: archive-mail:${ARCHIVE_MAIL_IMAGE_TAG:-local}
+    image: ${ARCHIVE_MAIL_IMAGE:-archive-mail:${ARCHIVE_MAIL_IMAGE_TAG:-local}}
     build:
       context: ..
       dockerfile: "${ARCHIVE_MAIL_DOCKERFILE:-deploy/Dockerfile}"
@@ -76,7 +76,7 @@ services:
         max-file: "3"
 
   postgres-migrate:
-    image: archive-mail-migrator:${ARCHIVE_MAIL_IMAGE_TAG:-local}
+    image: ${ARCHIVE_MAIL_MIGRATOR_IMAGE:-archive-mail-migrator:${ARCHIVE_MAIL_IMAGE_TAG:-local}}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.migrator
