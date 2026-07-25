@@ -35,6 +35,18 @@ public static class LithuanianEndpoints
             catch (Exception error) { return Error(error); }
         }).WithName("RefreshLithuanianHints").Produces<LithuanianWordDto>();
 
+        // Suggests the Lithuanian for the English the learner has typed, before anything is saved.
+        // An empty translation is a normal answer -- no key configured, or the model returned
+        // something unusable -- and the form falls back to typing the Lithuanian by hand.
+        group.MapPost("/translate", async (LithuanianTranslateRequest request, HttpContext context,
+            LithuanianTranslationService translation, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            var kind = request.Kind == "phrase" ? "phrase" : "word";
+            return Results.Ok(await translation.TranslateAsync(request.English ?? "", kind, token));
+        }).WithName("TranslateLithuanian").Produces<LithuanianTranslation>();
+
         group.MapPost("/words", async (LithuanianWordCreateRequest request, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
         {

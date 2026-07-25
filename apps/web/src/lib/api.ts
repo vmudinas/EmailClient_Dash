@@ -58,6 +58,8 @@ import type {
   LithuanianPractice,
   LithuanianRecording,
   LithuanianSettingsPatch,
+  LithuanianTranslateInput,
+  LithuanianTranslation,
   LithuanianWord,
   LithuanianWordCreate,
   LocalMessageState,
@@ -288,6 +290,10 @@ export class ApiClient {
 
   createLithuanianWord(input: LithuanianWordCreate): Promise<LithuanianWord> {
     return this.request("/api/lithuanian/words", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  translateLithuanian(input: LithuanianTranslateInput, signal?: AbortSignal): Promise<LithuanianTranslation> {
+    return this.request("/api/lithuanian/translate", { method: "POST", body: JSON.stringify(input), signal });
   }
 
   deleteLithuanianWord(wordId: string): Promise<void> {
@@ -1811,6 +1817,8 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
       defaultModel: text(lithuanian.defaultModel),
       hintModel: text(lithuanian.hintModel),
       defaultHintModel: text(lithuanian.defaultHintModel),
+      translationModel: text(lithuanian.translationModel),
+      defaultTranslationModel: text(lithuanian.defaultTranslationModel),
       passMark: finiteNumber(lithuanian.passMark, LITHUANIAN_PASS_MARK),
       defaultPassMark: finiteNumber(lithuanian.defaultPassMark, LITHUANIAN_PASS_MARK),
       minimumPassMark: finiteNumber(lithuanian.minimumPassMark, LITHUANIAN_MIN_PASS_MARK),

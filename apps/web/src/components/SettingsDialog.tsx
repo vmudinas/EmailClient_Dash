@@ -2468,13 +2468,20 @@ function LithuanianSettingsPanel({
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState(trainer.model || trainer.defaultModel);
   const [hintModel, setHintModel] = useState(trainer.hintModel || trainer.defaultHintModel);
+  const [translationModel, setTranslationModel] = useState(
+    trainer.translationModel || trainer.defaultTranslationModel
+  );
   const [passMark, setPassMark] = useState(String(trainer.passMark));
 
   useEffect(() => {
     setModel(trainer.model || trainer.defaultModel);
     setHintModel(trainer.hintModel || trainer.defaultHintModel);
+    setTranslationModel(trainer.translationModel || trainer.defaultTranslationModel);
     setPassMark(String(trainer.passMark));
-  }, [trainer.model, trainer.defaultModel, trainer.hintModel, trainer.defaultHintModel, trainer.passMark]);
+  }, [
+    trainer.model, trainer.defaultModel, trainer.hintModel, trainer.defaultHintModel,
+    trainer.translationModel, trainer.defaultTranslationModel, trainer.passMark
+  ]);
 
   const parsedPassMark = Number.parseInt(passMark, 10);
   const passMarkValid = Number.isInteger(parsedPassMark)
@@ -2494,6 +2501,7 @@ function LithuanianSettingsPanel({
         ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
         model: model.trim() || trainer.defaultModel,
         hintModel: hintModel.trim() || trainer.defaultHintModel,
+        translationModel: translationModel.trim() || trainer.defaultTranslationModel,
         passMark: parsedPassMark
       }));
       setApiKey("");
@@ -2578,6 +2586,21 @@ function LithuanianSettingsPanel({
           />
         </label>
         <small>Writes the word-by-word breakdown for phrases. Default {trainer.defaultHintModel}.</small>
+        <label>
+          Translation model
+          <input
+            value={translationModel}
+            onChange={(event) => setTranslationModel(event.target.value)}
+            placeholder={trainer.defaultTranslationModel}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={busy}
+          />
+        </label>
+        <small>
+          Turns the English Lucas types into the Lithuanian he practises.
+          Default {trainer.defaultTranslationModel}.
+        </small>
         <label>
           Pass mark (%)
           <input

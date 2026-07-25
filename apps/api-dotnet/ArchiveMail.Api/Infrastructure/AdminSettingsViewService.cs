@@ -129,6 +129,8 @@ public sealed class AdminSettingsViewService(
                 defaultModel = LithuanianDefaults.TranscriptionModel,
                 hintModel = lithuanian.HintModel,
                 defaultHintModel = LithuanianDefaults.HintModel,
+                translationModel = lithuanian.TranslationModel,
+                defaultTranslationModel = LithuanianDefaults.TranslationModel,
                 passMark = lithuanian.PassMark,
                 defaultPassMark = LithuanianDefaults.PassMark,
                 minimumPassMark = LithuanianDefaults.MinimumPassMark,

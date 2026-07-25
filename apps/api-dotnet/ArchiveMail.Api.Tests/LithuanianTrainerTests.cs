@@ -260,6 +260,82 @@ public sealed class LithuanianTrainerTests
     }
 
     [Fact]
+    public void TranslationParsingSurvivesAMalformedReply()
+    {
+        // No suggestion is a normal answer: the learner types the Lithuanian himself.
+        Assert.Empty(LithuanianTranslationService.Parse("not json", "word").Lithuanian);
+        Assert.Empty(LithuanianTranslationService.Parse(null, "word").Lithuanian);
+        Assert.Empty(LithuanianTranslationService.Parse("""{"lithuanian":123}""", "word").Lithuanian);
+        Assert.Empty(LithuanianTranslationService.Parse("""{"other":"ačiū"}""", "word").Lithuanian);
+        Assert.Empty(LithuanianTranslationService.Parse("""{"lithuanian":"   "}""", "word").Lithuanian);
+    }
+
+    [Theory]
+    [InlineData("""{"lithuanian":"ačiū"}""", "ačiū")]
+    [InlineData("""{"lithuanian":"  ačiū  "}""", "ačiū")]
+    public void TranslationParsingTrimsWhatItCanRead(string content, string expected)
+    {
+        Assert.Equal(expected, LithuanianTranslationService.Parse(content, "word").Lithuanian);
+    }
+
+    [Fact]
+    public void TranslationParsingRejectsASentenceWhereAWordWasAsked()
+    {
+        // A single word is what gets recorded and scored, so an explanatory answer is dropped
+        // rather than becoming an unpronounceable practice target.
+        Assert.Empty(
+            LithuanianTranslationService.Parse("""{"lithuanian":"ačiū labai draugas"}""", "word").Lithuanian);
+        Assert.Equal(
+            "labas rytas",
+            LithuanianTranslationService.Parse("""{"lithuanian":"labas rytas"}""", "phrase").Lithuanian);
+    }
+
+    [Fact]
+    public void TranslationParsingCountsEveryWhitespaceSeparator()
+    {
+        // Splitting on the space alone would let a newline-separated answer through the
+        // single-word guard as one token, and would undercount the words in a phrase.
+        Assert.Empty(
+            LithuanianTranslationService.Parse("""{"lithuanian":"ačiū\nexplanation"}""", "word").Lithuanian);
+        Assert.Empty(
+            LithuanianTranslationService.Parse("""{"lithuanian":"ačiū\tlabai"}""", "word").Lithuanian);
+        Assert.Empty(
+            LithuanianTranslationService.Parse("""{"lithuanian":"ačiū labai"}""", "word").Lithuanian);
+
+        var tooMany = string.Join('\n', Enumerable.Range(0, LithuanianDefaults.MaxPhraseWords + 1)
+            .Select(index => $"w{index}"));
+        Assert.Empty(
+            LithuanianTranslationService.Parse($$"""{"lithuanian":"{{tooMany}}"}""", "phrase").Lithuanian);
+    }
+
+    [Fact]
+    public void TranslationParsingCollapsesSpacingTheWaySavingDoes()
+    {
+        // The suggested text has to survive a round trip through the create endpoint unchanged.
+        Assert.Equal(
+            "labas rytas",
+            LithuanianTranslationService.Parse("""{"lithuanian":"labas   rytas"}""", "phrase").Lithuanian);
+        Assert.Equal(
+            "labas rytas",
+            LithuanianTranslationService.Parse("""{"lithuanian":"\n labas \t rytas \n"}""", "phrase").Lithuanian);
+    }
+
+    [Fact]
+    public void TranslationParsingEnforcesTheSameLimitsAsSaving()
+    {
+        // Anything the create endpoint would reject is dropped here, so an auto-filled value can
+        // never fail on save.
+        var longWord = new string('a', LithuanianDefaults.MaxWordLength + 1);
+        Assert.Empty(
+            LithuanianTranslationService.Parse($$"""{"lithuanian":"{{longWord}}"}""", "word").Lithuanian);
+
+        var tooManyWords = string.Join(' ', Enumerable.Range(0, LithuanianDefaults.MaxPhraseWords + 1)
+            .Select(index => $"w{index}"));
+        Assert.Empty(
+            LithuanianTranslationService.Parse($$"""{"lithuanian":"{{tooManyWords}}"}""", "phrase").Lithuanian);
+    }
+
+    [Fact]
     public void CapsAnOverlongTranscriptInsteadOfStoringIt()
     {
         var transcript = LithuanianScoring.NormalizeTranscript(new string('a', 500));

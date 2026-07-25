@@ -10810,6 +10810,24 @@ textarea:focus-visible {
   font-size: 16px;
 }
 
+/* Keeps the "translating" note on the label's own line so the input never shifts down when a
+   suggestion is being fetched. */
+.trainer-field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 13px;
+}
+
+.trainer-translating {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: none;
+}
+
 .trainer-add-equals {
   display: none;
 }

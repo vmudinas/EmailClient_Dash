@@ -30,6 +30,7 @@ public sealed record LithuanianRuntimeSettings(
     string ApiKey = "",
     string Model = LithuanianDefaults.TranscriptionModel,
     string HintModel = LithuanianDefaults.HintModel,
+    string TranslationModel = LithuanianDefaults.TranslationModel,
     int PassMark = LithuanianDefaults.PassMark);
 
 public sealed record PropertyIntegrationRuntimeSettings(
@@ -261,6 +262,9 @@ public sealed class AppSettingsService
                 ApiKey = Boolean(input, "clearApiKey") == true ? "" : String(input, "apiKey") ?? current.ApiKey,
                 Model = String(input, "model") is { Length: > 0 } model ? model.Trim() : current.Model,
                 HintModel = String(input, "hintModel") is { Length: > 0 } hintModel ? hintModel.Trim() : current.HintModel,
+                TranslationModel = String(input, "translationModel") is { Length: > 0 } translationModel
+                    ? translationModel.Trim()
+                    : current.TranslationModel,
                 PassMark = Math.Clamp(
                     Integer(input, "passMark") ?? current.PassMark,
                     LithuanianDefaults.MinimumPassMark,
@@ -410,6 +414,10 @@ public sealed class AppSettingsService
             HintModel = source.LithuanianValue.HintModel is { Length: > 0 } hintModel
                 ? hintModel
                 : LithuanianDefaults.HintModel,
+            // Likewise empty in a settings file written before translation existed.
+            TranslationModel = source.LithuanianValue.TranslationModel is { Length: > 0 } translationModel
+                ? translationModel
+                : LithuanianDefaults.TranslationModel,
             // A settings file written before the pass mark existed deserialises it as 0, which
             // would pass every take.
             PassMark = source.LithuanianValue.PassMark < LithuanianDefaults.MinimumPassMark
