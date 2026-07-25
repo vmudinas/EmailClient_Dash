@@ -15,6 +15,9 @@ NAS_HOST=${ARCHIVE_MAIL_NAS_HOST:-gliukaz@192.168.68.123}
 NAS_APP_DIR=${ARCHIVE_MAIL_NAS_APP_DIR:-/volume1/docker/archive-mail/app}
 SSH_IDENTITY=${ARCHIVE_MAIL_SSH_IDENTITY:-$HOME/.ssh/archive_mail_synology_ed25519}
 ENV_FILE="$NAS_APP_DIR/deploy/.env"
+# Expanded locally: a \$(date) inside the remote single-quoted path never expanded,
+# so every run overwrote one literally-named backup instead of keeping timestamps.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
 IMAGE=${ARCHIVE_MAIL_IMAGE:-ghcr.io/vmudinas/emailclient_dash:latest}
 MIGRATOR_IMAGE=${ARCHIVE_MAIL_MIGRATOR_IMAGE:-ghcr.io/vmudinas/emailclient_dash-migrator:latest}
@@ -54,7 +57,7 @@ echo
 echo "== Backing up and updating $ENV_FILE =="
 remote "
   set -eu
-  cp '$ENV_FILE' '$ENV_FILE.bak.\$(date -u +%Y%m%dT%H%M%SZ)'
+  cp '$ENV_FILE' '$ENV_FILE.bak.$STAMP'
   set_value() {
     key=\"\$1\"; value=\"\$2\"
     if grep -q \"^\$key=\" '$ENV_FILE'; then
