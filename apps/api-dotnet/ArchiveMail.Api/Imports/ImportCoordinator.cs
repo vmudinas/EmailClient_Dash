@@ -85,7 +85,10 @@ public sealed class ImportCoordinator(
                 "Keep the partial archive for inspection or clear it and restart once with the C# importer.");
         }
 
-        var staged = await stager.EnsureStagedAsync(job, cancellationToken);
+        var staged = await stager.EnsureStagedAsync(
+            job,
+            cancellationToken,
+            bytesRead => ReportExtractionProgress(job.Public.Id, bytesRead, lease, cancellationToken));
         var checkpoint = existingCheckpoint.Version == 2 ? existingCheckpoint : ImportCheckpoint.Empty;
         if (checkpoint.SourceFingerprint is not null && checkpoint.SourceFingerprint != staged.SourceFingerprint)
             throw new InvalidOperationException("The archive source changed after the checkpoint was created");
@@ -133,6 +136,35 @@ public sealed class ImportCoordinator(
         }
 
         await jobs.MarkCompletedAsync(job.Public.Id, cancellationToken);
+    }
+
+    /// <summary>
+    /// Fire-and-forget bridge from the stager's synchronous progress callback (invoked from the
+    /// PST poll loop roughly every 5 seconds, which is throttling enough on its own) to the
+    /// repository update. Never awaited by the caller so a slow write can't stall extraction;
+    /// any failure - including cancellation - is logged and swallowed here so it can't surface
+    /// as an unobserved task exception or affect the import outcome.
+    /// </summary>
+    private void ReportExtractionProgress(string jobId, long bytesRead, TimeSpan lease, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested) return;
+        _ = ReportExtractionProgressAsync(jobId, bytesRead, lease, cancellationToken);
+    }
+
+    private async Task ReportExtractionProgressAsync(string jobId, long bytesRead, TimeSpan lease, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await jobs.UpdateExtractionProgressAsync(jobId, bytesRead, lease, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Import is stopping; this last sample doesn't need to land.
+        }
+        catch (Exception exception)
+        {
+            logger.LogDebug(exception, "Unable to persist extraction progress for import {JobId}", jobId);
+        }
     }
 
     private static ImportCheckpoint ReadCheckpoint(JsonDocument document)

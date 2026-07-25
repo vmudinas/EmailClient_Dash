@@ -321,6 +321,33 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Records progress made during extraction (before <c>total_items</c> is known), and renews
+    /// the job's lease so a slow, hours-long readpst run isn't reclaimed by another worker as
+    /// stale. Scoped to status = 'running' so a job that was cancelled or reclaimed mid-poll
+    /// can't have a stray, late-arriving sample resurrect its row.
+    /// </summary>
+    public async Task UpdateExtractionProgressAsync(
+        string id,
+        long bytesRead,
+        TimeSpan lease,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            UPDATE import_jobs
+            SET processed_bytes = LEAST(total_bytes, $2),
+                lease_until = $3,
+                updated_at = $4
+            WHERE id = $1 AND status = 'running'
+            """;
+        await using var command = database.CreateCommand(sql);
+        command.Parameters.AddWithValue(id);
+        command.Parameters.AddWithValue(bytesRead);
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.Add(lease).ToString("O"));
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private async Task UpdateStateAsync(
         string id,
         string status,

@@ -8,7 +8,8 @@ public sealed class PstStager(IOptions<ImportOptions> options, ILogger<PstStager
 {
     private readonly ImportOptions _options = options.Value;
 
-    public async Task<StagedArchive> EnsureStagedAsync(ImportJobRecord job, CancellationToken cancellationToken)
+    public async Task<StagedArchive> EnsureStagedAsync(
+        ImportJobRecord job, CancellationToken cancellationToken, Action<long>? onBytesRead = null)
     {
         if (!string.Equals(job.Public.SourceType, "pst", StringComparison.OrdinalIgnoreCase))
             throw new NotSupportedException("PstStager only accepts PST sources");
@@ -25,6 +26,7 @@ public sealed class PstStager(IOptions<ImportOptions> options, ILogger<PstStager
             // batches remain durable, but an interrupted extraction is rebuilt.
             if (Directory.Exists(stagingPath)) Directory.Delete(stagingPath, recursive: true);
             Directory.CreateDirectory(stagingPath);
+            TryDisableCopyOnWrite(stagingPath);
             logger.LogInformation("Extracting {Source} with {Jobs} readpst workers", job.SourcePath, _options.ReadPstJobs);
             var startInfo = new ProcessStartInfo
             {
@@ -45,6 +47,22 @@ public sealed class PstStager(IOptions<ImportOptions> options, ILogger<PstStager
                 ?? throw new InvalidOperationException("Unable to start readpst");
             var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
             var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+
+            // Best-effort progress: sample /proc/{pid}/io every few seconds so the UI can show
+            // real extraction progress instead of a frozen 0% for the (potentially hours-long)
+            // readpst run. Linked to the outer token so it stops as soon as that fires, and
+            // always cancelled + drained in the finally below so it never outlives readpst.
+            using var progressCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var progressTask = onBytesRead is null
+                ? Task.CompletedTask
+                : ExtractionProgressPoller.RunAsync(
+                    process.Id,
+                    ReadCumulativeBytesRead,
+                    onBytesRead,
+                    SafeFileLength(job.SourcePath),
+                    ExtractionProgressPoller.DefaultInterval,
+                    progressCts.Token);
+
             try
             {
                 await process.WaitForExitAsync(cancellationToken);
@@ -55,6 +73,20 @@ public sealed class PstStager(IOptions<ImportOptions> options, ILogger<PstStager
                 await process.WaitForExitAsync(CancellationToken.None);
                 throw;
             }
+            finally
+            {
+                progressCts.Cancel();
+                try
+                {
+                    await progressTask;
+                }
+                catch (Exception exception)
+                {
+                    // Progress reporting must never affect the import outcome.
+                    logger.LogDebug(exception, "Extraction progress polling for {JobId} ended unexpectedly", job.Public.Id);
+                }
+            }
+
             var output = await stdout;
             var error = await stderr;
             if (process.ExitCode != 0)
@@ -69,6 +101,82 @@ public sealed class PstStager(IOptions<ImportOptions> options, ILogger<PstStager
             .ToArray();
         var fingerprint = await FingerprintAsync(job.SourcePath, cancellationToken);
         return new StagedArchive(stagingPath, files, fingerprint);
+    }
+
+    /// <summary>
+    /// Default reader for <see cref="ExtractionProgressPoller"/>: parses the cumulative bytes a
+    /// process has read from the Linux `/proc/{pid}/io` `rchar:` line. Fully defensive - missing
+    /// file, permission error, a process that already exited, or a non-Linux host all just
+    /// produce null so a tick is skipped rather than throwing.
+    /// </summary>
+    internal static long? ReadCumulativeBytesRead(int pid)
+    {
+        try
+        {
+            foreach (var line in File.ReadLines($"/proc/{pid}/io"))
+            {
+                if (!line.StartsWith("rchar:", StringComparison.Ordinal)) continue;
+                return long.TryParse(line.AsSpan("rchar:".Length).Trim(), out var bytes) ? bytes : null;
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static long? SafeFileLength(string path)
+    {
+        try
+        {
+            return new FileInfo(path).Length;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Best-effort: disables btrfs copy-on-write for the staging directory before readpst fills
+    /// it with tens of thousands of small .eml files, which is meaningfully cheaper on
+    /// COW filesystems. Only takes effect on an empty directory, which this always is (it was
+    /// just created). Anything going wrong here (missing `chattr` binary, non-btrfs volume, an
+    /// unsupported filesystem, or any other failure) must never block or fail the import.
+    /// </summary>
+    private void TryDisableCopyOnWrite(string path)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "chattr",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            startInfo.ArgumentList.Add("+C");
+            startInfo.ArgumentList.Add(path);
+
+            using var process = Process.Start(startInfo);
+            if (process is null) return;
+            if (!process.WaitForExit(5_000))
+            {
+                process.Kill(entireProcessTree: true);
+                return;
+            }
+            if (process.ExitCode != 0)
+            {
+                logger.LogDebug(
+                    "chattr +C on {Path} exited with code {ExitCode}; continuing without copy-on-write disabled",
+                    path, process.ExitCode);
+            }
+        }
+        catch (Exception exception)
+        {
+            logger.LogDebug(exception, "Unable to disable copy-on-write for {Path}; continuing without it", path);
+        }
     }
 
     private static async Task<string> FingerprintAsync(string path, CancellationToken cancellationToken)
