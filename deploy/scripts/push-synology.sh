@@ -76,6 +76,9 @@ remote() {
   ssh $SSH_IDENTITY_ARGS -S "$CONTROL_PATH" "$NAS_HOST" "$@"
 }
 
+. "$SCRIPT_DIR/extraction-guard.sh"
+guard_in_flight_extraction
+
 echo "Uploading the current repository snapshot..."
 COPYFILE_DISABLE=1 tar --no-xattrs \
   -C "$REPOSITORY_DIR" \
