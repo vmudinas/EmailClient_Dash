@@ -158,6 +158,8 @@ describe("SettingsDialog", () => {
       model: "gpt-4o-transcribe",
       hintModel: "gpt-5-mini",
       translationModel: "gpt-5-mini",
+      speechModel: "gpt-4o-mini-tts",
+      speechVoice: "alloy",
       passMark: 85
     }));
     // Cleared from the form so it is never re-submitted or left on screen.
@@ -185,6 +187,8 @@ describe("SettingsDialog", () => {
       model: "whisper-1",
       hintModel: "gpt-5-mini",
       translationModel: "gpt-5-mini",
+      speechModel: "gpt-4o-mini-tts",
+      speechVoice: "alloy",
       passMark: 85
     }));
   });
@@ -213,6 +217,8 @@ describe("SettingsDialog", () => {
       model: "gpt-4o-transcribe",
       hintModel: "gpt-5-mini",
       translationModel: "gpt-5-mini",
+      speechModel: "gpt-4o-mini-tts",
+      speechVoice: "alloy",
       passMark: 60
     }));
   });
@@ -1783,6 +1789,10 @@ const SETTINGS: AdminSettings = {
     defaultHintModel: "gpt-5-mini",
     translationModel: "gpt-5-mini",
     defaultTranslationModel: "gpt-5-mini",
+    speechModel: "gpt-4o-mini-tts",
+    defaultSpeechModel: "gpt-4o-mini-tts",
+    speechVoice: "alloy",
+    defaultSpeechVoice: "alloy",
     passMark: 85,
     defaultPassMark: 85,
     minimumPassMark: 50,

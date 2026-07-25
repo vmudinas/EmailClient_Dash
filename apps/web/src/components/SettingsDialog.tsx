@@ -2471,7 +2471,14 @@ function LithuanianSettingsPanel({
   const [translationModel, setTranslationModel] = useState(
     trainer.translationModel || trainer.defaultTranslationModel
   );
+  const [speechModel, setSpeechModel] = useState(trainer.speechModel || trainer.defaultSpeechModel);
+  const [speechVoice, setSpeechVoice] = useState(trainer.speechVoice || trainer.defaultSpeechVoice);
   const [passMark, setPassMark] = useState(String(trainer.passMark));
+
+  useEffect(() => {
+    setSpeechModel(trainer.speechModel || trainer.defaultSpeechModel);
+    setSpeechVoice(trainer.speechVoice || trainer.defaultSpeechVoice);
+  }, [trainer.speechModel, trainer.defaultSpeechModel, trainer.speechVoice, trainer.defaultSpeechVoice]);
 
   useEffect(() => {
     setModel(trainer.model || trainer.defaultModel);
@@ -2502,6 +2509,8 @@ function LithuanianSettingsPanel({
         model: model.trim() || trainer.defaultModel,
         hintModel: hintModel.trim() || trainer.defaultHintModel,
         translationModel: translationModel.trim() || trainer.defaultTranslationModel,
+        speechModel: speechModel.trim() || trainer.defaultSpeechModel,
+        speechVoice: speechVoice.trim() || trainer.defaultSpeechVoice,
         passMark: parsedPassMark
       }));
       setApiKey("");
@@ -2600,6 +2609,34 @@ function LithuanianSettingsPanel({
         <small>
           Turns the English Lucas types into the Lithuanian he practises.
           Default {trainer.defaultTranslationModel}.
+        </small>
+        <label>
+          Speech model
+          <input
+            value={speechModel}
+            onChange={(event) => setSpeechModel(event.target.value)}
+            placeholder={trainer.defaultSpeechModel}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={busy}
+          />
+        </label>
+        <label>
+          Speech voice
+          <input
+            value={speechVoice}
+            onChange={(event) => setSpeechVoice(event.target.value)}
+            placeholder={trainer.defaultSpeechVoice}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={busy}
+          />
+        </label>
+        <small>
+          Says each word once when it is added, so every device plays the same recording instead of
+          relying on a Lithuanian voice being installed. Default {trainer.defaultSpeechModel} and
+          {" "}{trainer.defaultSpeechVoice} — how good a voice is at Lithuanian is a question for
+          the ear, so both are changeable here rather than fixed in a deploy.
         </small>
         <label>
           Pass mark (%)

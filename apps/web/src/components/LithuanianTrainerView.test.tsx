@@ -12,6 +12,8 @@ function word(overrides: Partial<LithuanianWord> = {}): LithuanianWord {
     kind: "word",
     createdAt: new Date().toISOString(),
     hints: [],
+    // Most tests exercise the device-voice path; the server-audio tests opt in explicitly.
+    hasPronunciation: false,
     recordings: [
       {
         id: "take-1",
@@ -475,6 +477,57 @@ describe("LithuanianTrainerView", () => {
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(translateLithuanian).not.toHaveBeenCalled();
     expect((screen.getByLabelText(/Lithuanian/) as HTMLInputElement).value).toBe("dėkui");
+  });
+
+  it("plays the server's recording rather than the device voice when there is one", async () => {
+    const spoken = word({ hasPronunciation: true });
+    const lithuanianPronunciationBlob = vi.fn()
+      .mockResolvedValue(new Blob(["said"], { type: "audio/mpeg" }));
+    render(
+      <LithuanianTrainerView
+        api={client({
+          lithuanianPractice: vi.fn().mockResolvedValue({ passMark: 85, words: [spoken] }),
+          lithuanianPronunciationBlob
+        })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    fireEvent.click(screen.getByRole("button", { name: "Listen to labas" }));
+
+    await waitFor(() => expect(lithuanianPronunciationBlob).toHaveBeenCalledWith("word-1"));
+    // The generated audio is the reference; the device voice is not consulted at all.
+    expect(speech.spoken).toEqual([]);
+  });
+
+  it("falls back to the device voice when the server has no recording", async () => {
+    render(<LithuanianTrainerView api={client()} displayName="Lucas" onSignOut={vi.fn()} />);
+    await screen.findByText("labas");
+
+    fireEvent.click(screen.getByRole("button", { name: "Listen to labas" }));
+
+    expect(speech.spoken).toEqual([{ text: "labas", lang: "lt-LT" }]);
+  });
+
+  it("stops warning about a missing voice once the server can say every word", async () => {
+    installSpeech([{ lang: "en-US", name: "English" }]);
+    render(
+      <LithuanianTrainerView
+        api={client({
+          lithuanianPractice: vi.fn().mockResolvedValue({
+            passMark: 85,
+            words: [word({ hasPronunciation: true })]
+          })
+        })}
+        displayName="Lucas"
+        onSignOut={vi.fn()}
+      />
+    );
+    await screen.findByText("labas");
+
+    expect(screen.queryByText(/No Lithuanian voice is installed/)).toBeNull();
   });
 
   it("offers phrases around the word being typed and takes one up", async () => {

@@ -66,6 +66,30 @@ public static class LithuanianEndpoints
             catch (Exception error) { return Error(error); }
         }).WithName("CreateLithuanianWord").Produces<LithuanianWordDto>(StatusCodes.Status201Created);
 
+        // The reference pronunciation, generated once when the word was added. A word added
+        // before a key was configured has none until this is posted to.
+        group.MapGet("/words/{wordId}/pronunciation", async (string wordId, HttpContext context,
+            LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            try
+            {
+                var (path, contentType) = await repository.PronunciationContentAsync(wordId, session.User.Id, token);
+                return Results.File(path, contentType);
+            }
+            catch (Exception error) { return Error(error); }
+        }).WithName("GetLithuanianPronunciation");
+
+        group.MapPost("/words/{wordId}/pronunciation", async (string wordId, HttpContext context,
+            LithuanianRepository repository, CancellationToken token) =>
+        {
+            var session = Learner(context);
+            if (session is null) return Results.Forbid();
+            try { return Results.Ok(await repository.RefreshPronunciationAsync(wordId, session.User.Id, token)); }
+            catch (Exception error) { return Error(error); }
+        }).WithName("RefreshLithuanianPronunciation").Produces<LithuanianWordDto>();
+
         group.MapDelete("/words/{wordId}", async (string wordId, HttpContext context,
             LithuanianRepository repository, CancellationToken token) =>
         {

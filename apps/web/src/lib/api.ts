@@ -305,6 +305,14 @@ export class ApiClient {
     });
   }
 
+  lithuanianPronunciationBlob(wordId: string): Promise<Blob> {
+    return this.blobRequest(`/api/lithuanian/words/${encodeURIComponent(wordId)}/pronunciation`);
+  }
+
+  refreshLithuanianPronunciation(wordId: string): Promise<LithuanianWord> {
+    return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}/pronunciation`, { method: "POST" });
+  }
+
   deleteLithuanianWord(wordId: string): Promise<void> {
     return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}`, { method: "DELETE" });
   }
@@ -1828,6 +1836,10 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
       defaultHintModel: text(lithuanian.defaultHintModel),
       translationModel: text(lithuanian.translationModel),
       defaultTranslationModel: text(lithuanian.defaultTranslationModel),
+      speechModel: text(lithuanian.speechModel),
+      defaultSpeechModel: text(lithuanian.defaultSpeechModel),
+      speechVoice: text(lithuanian.speechVoice),
+      defaultSpeechVoice: text(lithuanian.defaultSpeechVoice),
       passMark: finiteNumber(lithuanian.passMark, LITHUANIAN_PASS_MARK),
       defaultPassMark: finiteNumber(lithuanian.defaultPassMark, LITHUANIAN_PASS_MARK),
       minimumPassMark: finiteNumber(lithuanian.minimumPassMark, LITHUANIAN_MIN_PASS_MARK),

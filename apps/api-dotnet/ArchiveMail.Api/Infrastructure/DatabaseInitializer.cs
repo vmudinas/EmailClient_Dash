@@ -127,6 +127,10 @@ public sealed class DatabaseInitializer(
         CREATE INDEX IF NOT EXISTS lithuanian_words_owner_idx ON lithuanian_words(owner_user_id, created_at DESC);
         ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'word';
         ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS hints_json TEXT;
+        -- The cached reference pronunciation. Null until one is generated, which is why every
+        -- read has to cope with its absence rather than assuming a file is there.
+        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS pronunciation_key TEXT;
+        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS pronunciation_type TEXT;
         ALTER TABLE lithuanian_words DROP CONSTRAINT IF EXISTS lithuanian_words_kind_check;
         ALTER TABLE lithuanian_words ADD CONSTRAINT lithuanian_words_kind_check
           CHECK(kind IN ('word', 'phrase'));

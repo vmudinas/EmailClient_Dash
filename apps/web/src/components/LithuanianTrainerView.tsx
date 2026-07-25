@@ -129,6 +129,13 @@ export function LithuanianTrainerView({
     void voiceRevision;
     return speechSupported && speechAvailability(LITHUANIAN_LOCALE) === "missing-voice";
   }, [speechSupported, voiceRevision]);
+  // Whether any word still depends on this device having a voice. Once the server can say them
+  // all, warning about the device's voices would be telling the learner about a problem the
+  // screen no longer has.
+  const leansOnDeviceVoice = useMemo(
+    () => words.length === 0 || words.some((word) => !word.hasPronunciation),
+    [words]
+  );
   const practice = useMemo(() => practiceStatus(words), [words]);
   const idleDays = daysSince(practice.lastAddedDay);
 
@@ -307,9 +314,55 @@ export function LithuanianTrainerView({
     }
   };
 
-  const pronounce = (text: string) => {
+  /**
+   * One word out of a phrase. Only whole entries are generated on the server, so a piece of a
+   * phrase is always the device's own voice.
+   */
+  const sayWithDeviceVoice = (text: string) => {
     setError("");
     if (!speak(text, LITHUANIAN_LOCALE)) setError("This browser cannot speak words out loud");
+  };
+
+  /**
+   * Says a word out loud, preferring the version the server generated.
+   *
+   * The browser's own voice only says Lithuanian properly on a device that happens to have a
+   * Lithuanian voice installed; without one it reads the word with an English voice, which
+   * teaches the wrong sounds. The generated audio is the same on every device, so it is what is
+   * played whenever it exists -- the browser voice is the fallback, not the other way round.
+   */
+  const pronounce = async (word: LithuanianWord) => {
+    setError("");
+    if (!word.hasPronunciation) {
+      if (!speak(word.lithuanian, LITHUANIAN_LOCALE)) setError("This browser cannot speak words out loud");
+      return;
+    }
+
+    const key = `say:${word.id}`;
+    const player = audio.current;
+    let url = objectUrls.current.get(key);
+    // Claims playback permission during the tap, for the same reason play() does.
+    if (player && !url && !audioUnlocked.current) {
+      audioUnlocked.current = true;
+      player.src = SILENT_CLIP;
+      void Promise.resolve(player.play()).catch(() => { audioUnlocked.current = false; });
+    }
+    setBusyId(key);
+    try {
+      if (!url) {
+        url = URL.createObjectURL(await api.lithuanianPronunciationBlob(word.id));
+        objectUrls.current.set(key, url);
+      }
+      if (!player) return;
+      player.src = url;
+      await player.play();
+    } catch {
+      // A missing or unplayable file is not worth an error message when the browser can have a
+      // go at it instead.
+      speak(word.lithuanian, LITHUANIAN_LOCALE);
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const toggleRecording = async (word: LithuanianWord) => {
@@ -528,12 +581,12 @@ export function LithuanianTrainerView({
           </small>
         </form>
 
-        {!speechSupported && (
+        {!speechSupported && leansOnDeviceVoice && (
           <p className="trainer-warning" role="status">
             <CircleAlert size={16} /> This browser cannot speak words out loud, so only your own recordings will play.
           </p>
         )}
-        {missingVoice && (
+        {missingVoice && leansOnDeviceVoice && (
           <p className="trainer-warning" role="status">
             <CircleAlert size={16} /> No Lithuanian voice is installed, so words are read with the default voice.
           </p>
@@ -589,8 +642,9 @@ export function LithuanianTrainerView({
                       <button
                         type="button"
                         className="trainer-action"
-                        onClick={() => pronounce(word.lithuanian)}
-                        disabled={!speechSupported || isRecording}
+                        onClick={() => void pronounce(word)}
+                        // A word the server can say needs no voice on this device at all.
+                        disabled={(!speechSupported && !word.hasPronunciation) || isRecording}
                         title={`Listen to ${word.lithuanian}`}
                         aria-label={`Listen to ${word.lithuanian}`}
                       >
@@ -635,7 +689,7 @@ export function LithuanianTrainerView({
                             <button
                               type="button"
                               className="trainer-hint-word"
-                              onClick={() => pronounce(hint.word)}
+                              onClick={() => sayWithDeviceVoice(hint.word)}
                               disabled={!speechSupported || isRecording}
                               aria-label={`Listen to ${hint.word} on its own`}
                             >

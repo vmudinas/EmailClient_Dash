@@ -47,6 +47,7 @@ builder.Services.AddSingleton<LithuanianTranscriptionService>();
 builder.Services.AddSingleton<LithuanianHintService>();
 builder.Services.AddSingleton<LithuanianTranslationService>();
 builder.Services.AddSingleton<LithuanianPhraseService>();
+builder.Services.AddSingleton<LithuanianSpeechService>();
 builder.Services.AddSingleton<LithuanianRepository>();
 builder.Services.AddSingleton<GmailService>();
 builder.Services.AddSingleton<AiService>();

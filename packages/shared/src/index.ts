@@ -1287,6 +1287,12 @@ export interface LithuanianWord {
   createdAt: string;
   /** Word-by-word breakdown of a phrase; always empty for a single word. */
   hints: LithuanianHint[];
+  /**
+   * Whether the server has a spoken version of this word. False falls playback back to the
+   * browser's own voice, which only says Lithuanian properly on a device that has a Lithuanian
+   * voice installed.
+   */
+  hasPronunciation: boolean;
   /** Newest first. */
   recordings: LithuanianRecording[];
 }
@@ -1442,6 +1448,10 @@ export interface AdminSettings {
     defaultHintModel: string;
     translationModel: string;
     defaultTranslationModel: string;
+    speechModel: string;
+    defaultSpeechModel: string;
+    speechVoice: string;
+    defaultSpeechVoice: string;
     passMark: number;
     defaultPassMark: number;
     minimumPassMark: number;
@@ -2609,6 +2619,8 @@ export const lithuanianSettingsPatchSchema = z.object({
   model: z.string().trim().min(1).max(100).optional(),
   hintModel: z.string().trim().min(1).max(100).optional(),
   translationModel: z.string().trim().min(1).max(100).optional(),
+  speechModel: z.string().trim().min(1).max(100).optional(),
+  speechVoice: z.string().trim().min(1).max(100).optional(),
   passMark: z.number().int().min(LITHUANIAN_MIN_PASS_MARK).max(LITHUANIAN_MAX_PASS_MARK).optional()
 }).strict().refine(
   (value) => Object.keys(value).length > 0,
