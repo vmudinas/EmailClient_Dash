@@ -96,8 +96,8 @@ public sealed class AdminSettingsViewService(
                 usage = emptyUsage,
                 providers = new Dictionary<string, object>
                 {
-                    ["openai"] = Provider("openai", ai.OpenAi ?? new("", "gpt-5-mini")),
-                    ["deepseek"] = Provider("deepseek", ai.DeepSeek ?? new("", "deepseek-chat"))
+                    ["openai"] = Provider("openai", ai.OpenAi ?? new("", AiModelDefaults.OpenAi)),
+                    ["deepseek"] = Provider("deepseek", ai.DeepSeek ?? new("", AiModelDefaults.DeepSeek))
                 }
             }
         };
