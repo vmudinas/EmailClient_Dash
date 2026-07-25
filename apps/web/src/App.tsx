@@ -171,6 +171,10 @@ const PropertyManagementView = lazy(async () => {
   const module = await import("./components/PropertyManagementView.js");
   return { default: module.PropertyManagementView };
 });
+const LithuanianTrainerView = lazy(async () => {
+  const module = await import("./components/LithuanianTrainerView.js");
+  return { default: module.LithuanianTrainerView };
+});
 const SettingsDialog = lazy(async () => {
   const module = await import("./components/SettingsDialog.js");
   return { default: module.SettingsDialog };
@@ -329,7 +333,9 @@ export function App() {
   const [backgroundActivityOpen, setBackgroundActivityOpen] = useState(false);
   const { statuses: pollingStatuses, report: reportPolling } = usePollingRegistry();
   const isRenter = session?.user.role === "renter";
-  const canUseMail = Boolean(session && !isRenter);
+  // Lucas signs in to the Lithuanian trainer only; none of the mail workspace loads for him.
+  const isLucas = session?.user.role === "lucas";
+  const canUseMail = Boolean(session && !isRenter && !isLucas);
   const canAccessScreen = (screen: UserScreenId) => !session || userCanAccessScreen(session.user, screen);
   const navigateView = (next: AppView, replace = false) => {
     setVisitedViews((current) => current.has(next) ? current : new Set([...current, next]));
@@ -351,14 +357,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || isLucas) return;
     if (session.user.role === "renter" && viewMode !== "properties") {
       navigateView("properties", true);
       return;
     }
     if (viewMode === "calendar" && !canAccessScreen("calendar")) navigateView("mail", true);
     if (viewMode === "properties" && !canAccessScreen("properties")) navigateView("mail", true);
-  }, [session, viewMode]);
+  }, [session, viewMode, isLucas]);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
   const searchFolderId = filters.folderId === ALL_MAIL_SEARCH_SCOPE
@@ -435,6 +441,11 @@ export function App() {
       if (window.location.pathname !== "/properties") window.history.replaceState(null, "", "/properties");
       return;
     }
+    if (accountRole === "lucas") {
+      setArchives([]);
+      setSelectedArchiveId(null);
+      return;
+    }
     const loadedArchives = await client.listArchives();
     void refreshStockQuotes(client);
     void refreshNewsHeadlines(client);
@@ -478,7 +489,7 @@ export function App() {
     key: "stockQuotes",
     settings: pollingSettings,
     report: reportPolling,
-    active: Boolean(api && session && session.user.role !== "renter"),
+    active: Boolean(api) && canUseMail,
     runImmediately: false,
     run: () => api && refreshStockQuotes(api)
   });
@@ -487,7 +498,7 @@ export function App() {
     key: "newsHeadlines",
     settings: pollingSettings,
     report: reportPolling,
-    active: Boolean(api && session && session.user.role !== "renter"),
+    active: Boolean(api) && canUseMail,
     runImmediately: false,
     run: () => api && refreshNewsHeadlines(api)
   });
@@ -656,7 +667,7 @@ export function App() {
     key: "importJobs",
     settings: pollingSettings,
     report: reportPolling,
-    active: Boolean(api) && !readOnly,
+    active: Boolean(api) && !readOnly && !isLucas,
     busy: hasActiveImportJobs,
     run: refreshJobs
   });
@@ -2243,6 +2254,25 @@ export function App() {
         error={loginError}
         onLogin={(username, pin) => void login(username, pin)}
       />
+    );
+  }
+
+  // Lucas gets the Lithuanian trainer instead of the mail shell -- it is his only screen.
+  if (isLucas && api) {
+    return (
+      <Suspense fallback={
+        <main className="startup-screen">
+          <span className="brand-mark"><Archive size={24} /></span>
+          <strong>Lithuanian practice</strong>
+          <LoaderCircle className="spin" size={20} />
+        </main>
+      }>
+        <LithuanianTrainerView
+          api={api}
+          displayName={session.user.displayName}
+          onSignOut={() => void logout()}
+        />
+      </Suspense>
     );
   }
 

@@ -45,6 +45,40 @@ public sealed class ApiRouteAuthorizationTests
             ApiRouteAuthorization.DenialReason(Session("renter", ["properties"]), method, new PathString(path)));
     }
 
+    [Theory]
+    [InlineData("GET", "/api/lithuanian/words")]
+    [InlineData("POST", "/api/lithuanian/words")]
+    [InlineData("POST", "/api/lithuanian/words/word-1/recordings")]
+    [InlineData("GET", "/api/lithuanian/recordings/take-1/content")]
+    [InlineData("DELETE", "/api/lithuanian/recordings/take-1")]
+    [InlineData("POST", "/api/diagnostics/client")]
+    [InlineData("GET", "/api/auth/session")]
+    [InlineData("POST", "/api/auth/logout")]
+    [InlineData("PATCH", "/api/auth/pin")]
+    public void AllowsLucasTheLithuanianTrainer(string method, string path)
+    {
+        Assert.Null(ApiRouteAuthorization.DenialReason(Session("lucas", []), method, new PathString(path)));
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/messages")]
+    [InlineData("GET", "/api/properties/overview")]
+    [InlineData("GET", "/api/calendar/sources")]
+    [InlineData("GET", "/api/admin/users")]
+    [InlineData("POST", "/api/admin/import")]
+    public void RejectsEverythingOutsideTheTrainerForLucas(string method, string path)
+    {
+        Assert.Equal(ApiRouteAuthorization.LucasDenied,
+            ApiRouteAuthorization.DenialReason(Session("lucas", []), method, new PathString(path)));
+    }
+
+    [Fact]
+    public void KeepsTheTrainerOutOfTheRenterAllowlist()
+    {
+        Assert.Equal(ApiRouteAuthorization.RenterDenied, ApiRouteAuthorization.DenialReason(
+            Session("renter", ["properties"]), "GET", new PathString("/api/lithuanian/words")));
+    }
+
     [Fact]
     public void LeavesBaselineMailOpenForStandardUsers()
     {

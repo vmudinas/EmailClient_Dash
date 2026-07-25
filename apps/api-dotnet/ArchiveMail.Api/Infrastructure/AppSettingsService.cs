@@ -21,6 +21,15 @@ public sealed record AiRuntimeSettings(
     int MonthlyRequestLimit = 0,
     AiProviderRuntimeSettings? OpenAi = null,
     AiProviderRuntimeSettings? DeepSeek = null);
+/// <summary>
+/// Speech-to-text credentials for the Lithuanian trainer. Kept separate from the mail AI
+/// providers on purpose: this key pays for a child's practice recordings, it can be revoked
+/// without touching mail analysis, and the audio it is spent on leaves the installation.
+/// </summary>
+public sealed record LithuanianRuntimeSettings(
+    string ApiKey = "",
+    string Model = LithuanianDefaults.TranscriptionModel);
+
 public sealed record PropertyIntegrationRuntimeSettings(
     string StripeSecretKey="",string StripeWebhookSecret="",string PaypalClientId="",string PaypalClientSecret="",
     string PaypalWebhookId="",string PaypalEnvironment="sandbox",string? ZelleRecipient=null,string ZelleNote="",
@@ -43,8 +52,10 @@ public sealed record AppRuntimeSettings(
     NewsRuntimeSettings? News = null,
     AiRuntimeSettings? Ai = null,
     PropertyIntegrationRuntimeSettings? PropertyIntegrations = null,
-    PollingRuntimeSettings? Polling = null)
+    PollingRuntimeSettings? Polling = null,
+    LithuanianRuntimeSettings? Lithuanian = null)
 {
+    public LithuanianRuntimeSettings LithuanianValue => Lithuanian ?? new();
     public GmailRuntimeSettings GmailValue => Gmail ?? new();
     public DraftRuntimeSettings DraftsValue => Drafts ?? new();
     public StockRuntimeSettings StocksValue => Stocks ?? new(["SPY", "QQQ"], 8);
@@ -238,6 +249,31 @@ public sealed class AppSettingsService
         }
     }
 
+    public AppRuntimeSettings UpdateLithuanian(JsonElement input)
+    {
+        lock (_gate)
+        {
+            var current = _settings.LithuanianValue;
+            _settings = _settings with { Lithuanian = current with
+            {
+                ApiKey = Boolean(input, "clearApiKey") == true ? "" : String(input, "apiKey") ?? current.ApiKey,
+                Model = String(input, "model") is { Length: > 0 } model ? model.Trim() : current.Model
+            }};
+            Save();
+            return WithEnvironment(_settings);
+        }
+    }
+
+    public AppRuntimeSettings ClearLithuanianKey()
+    {
+        lock (_gate)
+        {
+            _settings = _settings with { Lithuanian = _settings.LithuanianValue with { ApiKey = "" } };
+            Save();
+            return WithEnvironment(_settings);
+        }
+    }
+
     public AppRuntimeSettings UpdatePropertyIntegrations(JsonElement input)
     {
         lock(_gate)
@@ -356,7 +392,16 @@ public sealed class AppSettingsService
             TwilioMessagingServiceSid=Environment.GetEnvironmentVariable("TWILIO_MESSAGING_SERVICE_SID")?.Trim() is {Length:>0} messaging?messaging:source.PropertyIntegrationsValue.TwilioMessagingServiceSid,
             GmailConnectionId=Environment.GetEnvironmentVariable("PROPERTY_GMAIL_CONNECTION_ID")?.Trim() is {Length:>0} propertyGmail?propertyGmail:source.PropertyIntegrationsValue.GmailConnectionId
         };
-        return source with { Gmail = gmail, Ai = ai, PropertyIntegrations=property };
+        var lithuanian = source.LithuanianValue with
+        {
+            ApiKey = Environment.GetEnvironmentVariable(LithuanianDefaults.ApiKeyVariable)?.Trim() is { Length: > 0 } lithuanianKey
+                ? lithuanianKey
+                : source.LithuanianValue.ApiKey,
+            Model = source.LithuanianValue.Model is { Length: > 0 } lithuanianModel
+                ? lithuanianModel
+                : LithuanianDefaults.TranscriptionModel
+        };
+        return source with { Gmail = gmail, Ai = ai, PropertyIntegrations = property, Lithuanian = lithuanian };
     }
 
     private static string? String(JsonElement value, string name) =>

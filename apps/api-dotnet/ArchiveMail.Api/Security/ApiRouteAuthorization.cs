@@ -3,11 +3,13 @@ namespace ArchiveMail.Api.Security;
 internal static class ApiRouteAuthorization
 {
     internal const string RenterDenied = "Renter accounts can only access their property portal";
+    internal const string LucasDenied = "This account can only access the Lithuanian trainer";
     internal const string ScreenDenied = "Access to this feature is disabled for your account. Ask an administrator to enable it.";
     public static string? DenialReason(SessionRecord session, string method, PathString requestPath)
     {
         var path = requestPath.Value ?? string.Empty;
         if (session.User.Role == "renter" && !RenterCanAccess(method, path)) return RenterDenied;
+        if (session.User.Role == "lucas" && !LucasCanAccess(method, path)) return LucasDenied;
         if (session.Role is not ("user" or "renter")) return null;
 
         var screen = ScreenForPath(path);
@@ -34,14 +36,19 @@ internal static class ApiRouteAuthorization
         return null;
     }
 
+    internal static bool LucasCanAccess(string method, string path) =>
+        Starts(path, "/api/lithuanian/")
+        // Browser failures on the learner's phone would otherwise queue in local storage forever
+        // instead of reaching the administrator's diagnostics.
+        || (method.Equals("POST", StringComparison.OrdinalIgnoreCase) && path == "/api/diagnostics/client")
+        || SessionRoute(method, path);
+
     internal static bool RenterCanAccess(string method, string path)
     {
         var verb = method.ToUpperInvariant();
         if (verb == "GET" && path is "/api/property-platform/overview" or "/api/properties/overview") return true;
         if (verb == "POST" && path is "/api/property-service-requests" or "/api/property-payments") return true;
-        if ((verb == "GET" && path == "/api/auth/session")
-            || (verb == "POST" && path == "/api/auth/logout")
-            || (verb == "PATCH" && path == "/api/auth/pin")) return true;
+        if (SessionRoute(method, path)) return true;
 
         var segments = path.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
         return segments switch
@@ -54,6 +61,15 @@ internal static class ApiRouteAuthorization
             ["api", "property-request-attachments", _, "content"] when verb == "GET" => true,
             _ => false
         };
+    }
+
+    // Every restricted role still needs to read its own session, sign out, and change its PIN.
+    private static bool SessionRoute(string method, string path)
+    {
+        var verb = method.ToUpperInvariant();
+        return (verb == "GET" && path == "/api/auth/session")
+            || (verb == "POST" && path == "/api/auth/logout")
+            || (verb == "PATCH" && path == "/api/auth/pin");
     }
 
     private static bool Starts(string path, string prefix) => path.StartsWith(prefix, StringComparison.Ordinal);

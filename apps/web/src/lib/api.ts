@@ -55,6 +55,10 @@ import type {
   InboxTabReclassifyResult,
   InboxTabSettings,
   InboxTabSettingsUpdate,
+  LithuanianRecording,
+  LithuanianSettingsPatch,
+  LithuanianWord,
+  LithuanianWordCreate,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMergeResult,
@@ -255,6 +259,53 @@ export class ApiClient {
     });
     this.setAccessToken(result.accessToken);
     return result;
+  }
+
+  async updateLithuanianSettings(input: LithuanianSettingsPatch): Promise<AdminSettings> {
+    return normalizeAdminSettings(await this.request("/api/admin/settings/lithuanian", {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    }));
+  }
+
+  async clearLithuanianApiKey(): Promise<AdminSettings> {
+    return normalizeAdminSettings(await this.request("/api/admin/settings/lithuanian/key", { method: "DELETE" }));
+  }
+
+  lithuanianWords(): Promise<LithuanianWord[]> {
+    return this.request("/api/lithuanian/words");
+  }
+
+  createLithuanianWord(input: LithuanianWordCreate): Promise<LithuanianWord> {
+    return this.request("/api/lithuanian/words", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  deleteLithuanianWord(wordId: string): Promise<void> {
+    return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}`, { method: "DELETE" });
+  }
+
+  saveLithuanianRecording(
+    wordId: string,
+    audio: Blob,
+    durationMs: number,
+    transcript: string | null
+  ): Promise<LithuanianRecording> {
+    return this.request(
+      `/api/lithuanian/words/${encodeURIComponent(wordId)}/recordings?${queryString({ durationMs, transcript })}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": audio.type || "audio/webm" },
+        body: audio
+      }
+    );
+  }
+
+  lithuanianRecordingBlob(recordingId: string): Promise<Blob> {
+    return this.blobRequest(`/api/lithuanian/recordings/${encodeURIComponent(recordingId)}/content`);
+  }
+
+  deleteLithuanianRecording(recordingId: string): Promise<void> {
+    return this.request(`/api/lithuanian/recordings/${encodeURIComponent(recordingId)}`, { method: "DELETE" });
   }
 
   propertyOverview(): Promise<PropertyPortfolioOverview> {
@@ -1655,6 +1706,7 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
   const news = record(root.news);
   const ai = record(root.ai);
   const usage = record(ai.usage);
+  const lithuanian = record(root.lithuanian);
   const polling = record(root.polling);
 
   return {
@@ -1740,6 +1792,16 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
       secondsPerHeadline: finiteNumber(news.secondsPerHeadline, 10),
       settingsPath: text(news.settingsPath),
       configurationError: nullableText(news.configurationError)
+    },
+    lithuanian: {
+      apiKeyConfigured: Boolean(lithuanian.apiKeyConfigured),
+      environmentManaged: Boolean(lithuanian.environmentManaged),
+      source: text(lithuanian.source, "none") as AdminSettings["lithuanian"]["source"],
+      model: text(lithuanian.model),
+      defaultModel: text(lithuanian.defaultModel),
+      learnerCount: finiteNumber(lithuanian.learnerCount),
+      settingsPath: text(lithuanian.settingsPath),
+      configurationError: nullableText(lithuanian.configurationError)
     },
     ai: {
       ...ai,
