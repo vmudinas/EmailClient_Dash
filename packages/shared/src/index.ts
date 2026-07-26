@@ -2,6 +2,11 @@ import { z } from "zod";
 
 export type ArchiveSourceType = "pst" | "mbox" | "gmail";
 export type ImportSourceType = Exclude<ArchiveSourceType, "gmail">;
+/**
+ * Archive and mailbox merges are tracked as import jobs so they get the importer's progress bar,
+ * phase label and ETA, but they have no archive file behind them.
+ */
+export type ImportJobSourceType = ImportSourceType | "combine";
 export type ArchiveStatus = "importing" | "ready" | "ready_with_errors" | "failed";
 export type ImportPhase = "queued" | "fingerprinting" | "parsing" | "attachments" | "indexing" | "finalizing";
 export type ImportJobStatus = "queued" | "running" | "paused" | "completed" | "completed_with_errors" | "cancelled" | "failed";
@@ -209,7 +214,7 @@ export interface ImportJob {
   id: string;
   archiveId: string | null;
   sourceName: string;
-  sourceType: ImportSourceType;
+  sourceType: ImportJobSourceType;
   status: ImportJobStatus;
   phase: ImportPhase;
   processedItems: number;
@@ -1122,19 +1127,9 @@ export const todoPatchSchema = z.object({
 
 export type TodoPatch = z.infer<typeof todoPatchSchema>;
 
-export interface ArchiveMergeResult {
-  archive: Archive;
-  movedMessages: number;
-  movedFolders: number;
-  movedAttachments: number;
-}
-
-export interface MailboxMergeResult {
-  mailbox: Folder;
-  movedMessages: number;
-  removedMailboxes: number;
-  movedAttachments: number;
-}
+// Combining archives and mailboxes returns the ImportJob that tracks the merge rather than a
+// finished result. The move outlasts the request that starts it, so counts are only knowable
+// once the job completes - watch the job's progress instead.
 
 export interface MailboxMoveResult {
   mailbox: Folder;

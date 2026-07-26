@@ -142,8 +142,7 @@ public sealed record BulkReadRequest(string[] MessageIds);
 public sealed record BulkMoveFolderRequest(string[] MessageIds, string FolderId);
 public sealed record BulkReadResult(long Updated, long AlreadyRead, long Failed);
 public sealed record BulkFolderMoveResult(string FolderId, string FolderPath, long Moved, long AlreadyThere, long Failed);
-public sealed record ArchiveMergeResult(ArchiveDto Archive, long MovedMessages, long MovedFolders, long MovedAttachments);
-public sealed record MailboxMergeResult(FolderDto Mailbox, long MovedMessages, long RemovedMailboxes, long MovedAttachments);
+// Combines report through the import job they create, so there is no merge result to return.
 public sealed record MailboxMoveResult(FolderDto Mailbox, long MovedMailboxes);
 public sealed record BulkMoveRequest(string[] MessageIds, string Destination);
 public sealed record BulkMoveResult(string Destination, string[] FolderPaths, long Moved, long AlreadyThere, long Failed, long SenderRules);

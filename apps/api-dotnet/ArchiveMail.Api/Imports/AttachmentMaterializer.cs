@@ -22,21 +22,34 @@ public sealed class AttachmentMaterializer(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var work = await ClaimAsync(stoppingToken);
-            if (work is null)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
-                continue;
-            }
+            // The claim query and the failure bookkeeping are inside the guard on purpose: an
+            // exception escaping ExecuteAsync faults the hosted service, and the host stops the
+            // whole application on a faulted background service by default. This backlog is
+            // released the moment an import finishes, so that is exactly when a database hiccup
+            // here is most likely - and when taking the API down is least excusable.
             try
             {
-                await MaterializeAsync(work, stoppingToken);
-                await FinishAsync(work.Id, null, stoppingToken);
+                var work = await ClaimAsync(stoppingToken);
+                if (work is null)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+                    continue;
+                }
+                try
+                {
+                    await MaterializeAsync(work, stoppingToken);
+                    await FinishAsync(work.Id, null, stoppingToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    logger.LogWarning(exception, "Deferred attachment extraction failed for message {MessageId}", work.MessageId);
+                    await FinishAsync(work.Id, exception.Message, stoppingToken);
+                }
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
             {
-                logger.LogWarning(exception, "Deferred attachment extraction failed for message {MessageId}", work.MessageId);
-                await FinishAsync(work.Id, exception.Message, stoppingToken);
+                logger.LogError(exception, "Deferred attachment worker iteration failed; retrying");
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
     }
