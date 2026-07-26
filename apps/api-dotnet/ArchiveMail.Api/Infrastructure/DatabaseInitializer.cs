@@ -391,6 +391,11 @@ public sealed class DatabaseInitializer(
           blob_sha256 TEXT NOT NULL REFERENCES blobs(sha256)
         );
         CREATE INDEX IF NOT EXISTS attachments_message_idx ON attachments(message_id);
+        -- The deferred attachment worker recounts a blob's references once per attachment it
+        -- stores. Without this index that recount is a sequential scan of the whole attachments
+        -- table, so the backlog released at the end of an import degrades quadratically and
+        -- pins Postgres for the rest of the archive.
+        CREATE INDEX IF NOT EXISTS attachments_blob_idx ON attachments(blob_sha256);
         DROP INDEX IF EXISTS attachments_postgres_search_idx;
         CREATE INDEX IF NOT EXISTS attachments_search_idx ON attachments USING GIN (
           archive_mail_attachment_search(filename, extracted_text)

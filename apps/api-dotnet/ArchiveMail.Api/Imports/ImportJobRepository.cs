@@ -6,11 +6,30 @@ namespace ArchiveMail.Api.Imports;
 
 public sealed class ImportJobRepository(NpgsqlDataSource database)
 {
+    /// <summary>
+    /// Finalizing an import recounts every message, folder and attachment in the archive. On a
+    /// large archive that runs well past Npgsql's 30 second default, and a timeout there marks a
+    /// job that committed every message as failed. Matches the importer's own batch ceiling.
+    /// </summary>
+    internal const int FinalizeCommandTimeoutSeconds = 600;
+
+    /// <summary>
+    /// Archive and mailbox merges are tracked as import jobs so they inherit the importer's
+    /// progress UI, but they are run by their own worker and share none of the file-import
+    /// machinery - no source file, no staging directory, no checkpoint of parsed messages.
+    /// </summary>
+    internal const string CombineSourceType = "combine";
+
+    /// <summary>
+    /// An allowlist, not a denylist. Claiming by exclusion meant every source type added later
+    /// was silently opted in to the file importer, which is not survivable for a job whose
+    /// source_path is an archive id rather than a path on disk.
+    /// </summary>
     internal const string ClaimNextSql = """
         WITH candidate AS (
           SELECT id
           FROM import_jobs
-          WHERE source_type <> 'gmail'
+          WHERE source_type IN ('pst', 'mbox')
             AND (
               status = 'queued'
               OR (status = 'running' AND (lease_until IS NULL OR lease_until < $1))
@@ -199,25 +218,49 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
     {
         var job = await GetAsync(id, ownerUserId, cancellationToken);
         if (job is null) return null;
-        if (!File.Exists(job.SourcePath)) throw new InvalidOperationException("Import source file is no longer available");
+        // A combine's source_path is an archive id, not a file. It resumes from whatever it has
+        // already moved, so there is nothing on disk to check for.
+        if (job.Public.SourceType != CombineSourceType && !File.Exists(job.SourcePath))
+            throw new InvalidOperationException("Import source file is no longer available");
         await UpdateStateAsync(id, "queued", "Queued to resume", canResume: false, cancellationToken);
         return (await GetAsync(id, ownerUserId, cancellationToken))?.Public;
     }
 
     public async Task<bool> ClearAsync(string id, string ownerUserId, CancellationToken cancellationToken)
     {
-        const string sql = """
-            DELETE FROM archives
-            WHERE id = (
-              SELECT archive_id FROM import_jobs
-              WHERE id = $1 AND status NOT IN ('queued', 'running')
-            )
-            AND owner_user_id = $2
+        await using var connection = await database.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        string? sourceType;
+        const string lookupSql = """
+            SELECT job.source_type
+            FROM import_jobs job JOIN archives archive ON archive.id = job.archive_id
+            WHERE job.id = $1 AND archive.owner_user_id = $2
+              AND job.status NOT IN ('queued', 'running')
             """;
-        await using var command = database.CreateCommand(sql);
-        command.Parameters.AddWithValue(id);
-        command.Parameters.AddWithValue(ownerUserId);
-        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
+        await using (var lookup = new NpgsqlCommand(lookupSql, connection, transaction))
+        {
+            lookup.Parameters.AddWithValue(id);
+            lookup.Parameters.AddWithValue(ownerUserId);
+            sourceType = await lookup.ExecuteScalarAsync(cancellationToken) as string;
+        }
+        if (sourceType is null) return false;
+
+        // Clearing a file import discards what it produced, so it drops the archive and lets the
+        // cascade take the job row with it. A combine's archive_id is the archive that SURVIVED
+        // the merge - the user's combined mail - so clearing it must remove the job row and
+        // nothing else.
+        var deleteSql = sourceType == CombineSourceType
+            ? "DELETE FROM import_jobs WHERE id = $1"
+            : "DELETE FROM archives WHERE id = (SELECT archive_id FROM import_jobs WHERE id = $1)";
+        await using (var delete = new NpgsqlCommand(deleteSql, connection, transaction))
+        {
+            delete.Parameters.AddWithValue(id);
+            await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 
     public async Task MarkFailedAsync(string id, string message, CancellationToken cancellationToken) =>
@@ -239,7 +282,10 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
                 updated_at = $2
             WHERE id = $1
             """;
-        await using (var command = new NpgsqlCommand(completeJobSql, connection, transaction))
+        await using (var command = new NpgsqlCommand(completeJobSql, connection, transaction)
+        {
+            CommandTimeout = FinalizeCommandTimeoutSeconds
+        })
         {
             command.Parameters.AddWithValue(id);
             command.Parameters.AddWithValue(now);
@@ -261,7 +307,10 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
                 imported_at = $2
             WHERE id = (SELECT archive_id FROM import_jobs WHERE id = $1)
             """;
-        await using (var command = new NpgsqlCommand(completeArchiveSql, connection, transaction))
+        await using (var command = new NpgsqlCommand(completeArchiveSql, connection, transaction)
+        {
+            CommandTimeout = FinalizeCommandTimeoutSeconds
+        })
         {
             command.Parameters.AddWithValue(id);
             command.Parameters.AddWithValue(now);
@@ -272,7 +321,10 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
             SET message_count = (SELECT COUNT(*) FROM messages WHERE folder_id = folders.id)
             WHERE archive_id = (SELECT archive_id FROM import_jobs WHERE id = $1)
             """;
-        await using (var command = new NpgsqlCommand(completeFoldersSql, connection, transaction))
+        await using (var command = new NpgsqlCommand(completeFoldersSql, connection, transaction)
+        {
+            CommandTimeout = FinalizeCommandTimeoutSeconds
+        })
         {
             command.Parameters.AddWithValue(id);
             await command.ExecuteNonQueryAsync(cancellationToken);

@@ -1172,21 +1172,26 @@ export function App() {
     }
   };
 
+  // Combining now returns a job rather than a finished merge. The dialog closes immediately and
+  // the sidebar's job list carries the progress bar, so a 600k message merge is something the
+  // user can watch and walk away from instead of a button that hangs and then reports failure.
   const combineArchives = async (targetArchiveId: string) => {
     if (!api || !combineSource || readOnly) return;
     setCombineBusy(true);
     try {
-      const result = await api.combineArchives(combineSource.id, targetArchiveId);
+      const job = await api.combineArchives(combineSource.id, targetArchiveId);
       setCombineSource(null);
-      setSelectedArchiveId(result.archive.id);
+      setSelectedArchiveId(targetArchiveId);
       setSelectedFolderId(null);
       setSelectedMessageId(null);
       setMessage(null);
       await refreshArchives();
-      setFolders(await api.listFolders(result.archive.id));
+      setFolders(await api.listFolders(targetArchiveId));
       await refreshJobs();
       showError(
-        `${result.movedMessages.toLocaleString()} messages and ${result.movedAttachments.toLocaleString()} attachments combined into ${result.archive.name}`
+        job.totalItems === null
+          ? "Combining archives — progress is in the sidebar"
+          : `Combining ${job.totalItems.toLocaleString()} messages — progress is in the sidebar`
       );
     } catch (error) {
       showError(error instanceof Error ? error.message : "Archives could not be combined");
@@ -1197,19 +1202,23 @@ export function App() {
 
   const combineMailboxes = async (targetFolderId: string) => {
     if (!api || !combineMailboxSource || readOnly) return;
+    const archiveId = combineMailboxSource.archiveId;
     setCombineMailboxBusy(true);
     try {
-      const result = await api.combineMailboxes(combineMailboxSource.id, targetFolderId);
+      const job = await api.combineMailboxes(combineMailboxSource.id, targetFolderId);
       setCombineMailboxSource(null);
-      setSelectedArchiveId(result.mailbox.archiveId);
-      setSelectedFolderId(result.mailbox.id);
+      setSelectedArchiveId(archiveId);
+      setSelectedFolderId(targetFolderId);
       setSelectedMessageId(null);
       setMessage(null);
-      setFolders(await api.listFolders(result.mailbox.archiveId));
+      setFolders(await api.listFolders(archiveId));
       await refreshArchives();
+      await refreshJobs();
       setMessageListRevision((current) => current + 1);
       showError(
-        `${result.movedMessages.toLocaleString()} messages and ${result.movedAttachments.toLocaleString()} attachments combined into ${result.mailbox.path}`
+        job.totalItems === null
+          ? "Combining mailboxes — progress is in the sidebar"
+          : `Combining ${job.totalItems.toLocaleString()} messages — progress is in the sidebar`
       );
     } catch (error) {
       showError(error instanceof Error ? error.message : "Mailboxes could not be combined");
@@ -1223,11 +1232,14 @@ export function App() {
     setMailboxDropBusy(true);
     try {
       if (action === "merge") {
-        const result = await api.combineMailboxes(mailboxDrop.source.id, mailboxDrop.target.id);
-        setSelectedArchiveId(result.mailbox.archiveId);
-        setSelectedFolderId(result.mailbox.id);
+        const job = await api.combineMailboxes(mailboxDrop.source.id, mailboxDrop.target.id);
+        setSelectedArchiveId(mailboxDrop.target.archiveId);
+        setSelectedFolderId(mailboxDrop.target.id);
+        await refreshJobs();
         showError(
-          `${result.movedMessages.toLocaleString()} messages combined into ${result.mailbox.path}`
+          job.totalItems === null
+            ? `Combining into ${mailboxDrop.target.path} — progress is in the sidebar`
+            : `Combining ${job.totalItems.toLocaleString()} messages into ${mailboxDrop.target.path} — progress is in the sidebar`
         );
       } else {
         const result = await api.moveMailbox(mailboxDrop.source.id, mailboxDrop.target.id);

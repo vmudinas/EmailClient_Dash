@@ -37,31 +37,44 @@ public sealed class ImportCoordinator(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var job = await jobs.ClaimNextAsync(_workerId, lease, stoppingToken);
-            if (job is null)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
-                continue;
-            }
-
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            _active[job.Public.Id] = linked;
+            // Everything in the loop body is guarded. An exception escaping ExecuteAsync faults
+            // the hosted service, and the host's default BackgroundServiceExceptionBehavior is
+            // StopHost - so a single transient Npgsql failure while claiming a job used to take
+            // the whole API down, not just the importer, and the reverse proxy answered 502
+            // until the container restarted.
             try
             {
-                await RunJobAsync(job, stager, lease, linked.Token);
+                var job = await jobs.ClaimNextAsync(_workerId, lease, stoppingToken);
+                if (job is null)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                    continue;
+                }
+
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                _active[job.Public.Id] = linked;
+                try
+                {
+                    await RunJobAsync(job, stager, lease, linked.Token);
+                }
+                catch (OperationCanceledException) when (linked.IsCancellationRequested)
+                {
+                    logger.LogInformation("Import {JobId} stopped at its last committed checkpoint", job.Public.Id);
+                }
+                catch (Exception exception)
+                {
+                    logger.LogError(exception, "Import {JobId} failed", job.Public.Id);
+                    await jobs.MarkFailedAsync(job.Public.Id, exception.Message, stoppingToken);
+                }
+                finally
+                {
+                    _active.TryRemove(job.Public.Id, out _);
+                }
             }
-            catch (OperationCanceledException) when (linked.IsCancellationRequested)
+            catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
             {
-                logger.LogInformation("Import {JobId} stopped at its last committed checkpoint", job.Public.Id);
-            }
-            catch (Exception exception)
-            {
-                logger.LogError(exception, "Import {JobId} failed", job.Public.Id);
-                await jobs.MarkFailedAsync(job.Public.Id, exception.Message, stoppingToken);
-            }
-            finally
-            {
-                _active.TryRemove(job.Public.Id, out _);
+                logger.LogError(exception, "Import worker iteration failed; retrying");
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
     }

@@ -22,7 +22,6 @@ import type {
   AiScheduleUpdate,
   AiSettingsPatch,
   Archive,
-  ArchiveMergeResult,
   AuditPage,
   AuthLoginResult,
   AuthSessionInfo,
@@ -67,7 +66,6 @@ import type {
   LithuanianWordCreate,
   LocalMessageState,
   LocalMessageStatePatch,
-  MailboxMergeResult,
   MailboxMoveResult,
   MessageDetail,
   MessageFollowUp,
@@ -559,18 +557,23 @@ export class ApiClient {
     });
   }
 
-  combineArchives(sourceArchiveId: string, targetArchiveId: string): Promise<ArchiveMergeResult> {
-    return this.request(`/api/archives/${encodeURIComponent(sourceArchiveId)}/combine`, {
-      method: "POST",
-      body: JSON.stringify({ targetArchiveId })
-    });
+  /**
+   * Starts the merge and returns the job tracking it. The move itself runs on the server: a large
+   * archive takes far longer than a request can stay open, and the disconnect that follows a
+   * proxy timeout used to roll the whole merge back.
+   */
+  async combineArchives(sourceArchiveId: string, targetArchiveId: string): Promise<ImportJob> {
+    return normalizeImportJob(await this.request(
+      `/api/archives/${encodeURIComponent(sourceArchiveId)}/combine`,
+      { method: "POST", body: JSON.stringify({ targetArchiveId }) }
+    ));
   }
 
-  combineMailboxes(sourceFolderId: string, targetFolderId: string): Promise<MailboxMergeResult> {
-    return this.request(`/api/folders/${encodeURIComponent(sourceFolderId)}/combine`, {
-      method: "POST",
-      body: JSON.stringify({ targetFolderId })
-    });
+  async combineMailboxes(sourceFolderId: string, targetFolderId: string): Promise<ImportJob> {
+    return normalizeImportJob(await this.request(
+      `/api/folders/${encodeURIComponent(sourceFolderId)}/combine`,
+      { method: "POST", body: JSON.stringify({ targetFolderId }) }
+    ));
   }
 
   moveMailbox(folderId: string, targetParentId: string | null): Promise<MailboxMoveResult> {

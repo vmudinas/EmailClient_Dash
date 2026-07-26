@@ -35,13 +35,22 @@ public static class MailEndpoints
             catch (Exception error) { return MailError(error); }
         }).WithName("DeleteArchive").Produces(StatusCodes.Status204NoContent);
 
+        // Returns the job that tracks the merge, not the merged archive. Moving hundreds of
+        // thousands of messages cannot finish inside a request, and when it used to try, the
+        // proxy timed out, the client disconnect cancelled the token, and the whole transaction
+        // rolled back - so the merge reported failure and silently changed nothing.
         api.MapPost("/archives/{archiveId}/combine", async (string archiveId, CombineArchiveRequest request,
-            HttpContext context, MailRepository mail, CancellationToken token) =>
+            HttpContext context, ArchiveCombineService combines, CancellationToken token) =>
         {
             var session = MailSession(context, true); if (session is null) return Results.Forbid();
-            try { return Results.Ok(await mail.CombineArchivesAsync(archiveId, request.TargetArchiveId, session.User.Id, token)); }
+            try
+            {
+                return Results.Accepted(
+                    "/api/import-jobs",
+                    await combines.EnqueueArchiveCombineAsync(archiveId, request.TargetArchiveId, session.User.Id, token));
+            }
             catch (Exception error) { return MailError(error); }
-        }).WithName("CombineArchives");
+        }).WithName("CombineArchives").Produces<ImportJobDto>(StatusCodes.Status202Accepted);
 
         api.MapGet("/archives/{archiveId}/folders", async (
             string archiveId, HttpContext context, MailRepository mail, CancellationToken token) =>
@@ -77,13 +86,20 @@ public static class MailEndpoints
             catch (Exception error) { return MailError(error); }
         }).WithName("DeleteFolder").Produces(StatusCodes.Status204NoContent);
 
+        // Same shape as the archive merge above, and for the same reason: a mailbox holding a
+        // large chunk of a 600k archive is just as far past what a request can carry.
         api.MapPost("/folders/{folderId}/combine", async (string folderId, CombineFolderRequest request,
-            HttpContext context, MailRepository mail, CancellationToken token) =>
+            HttpContext context, ArchiveCombineService combines, CancellationToken token) =>
         {
             var session = MailSession(context, true); if (session is null) return Results.Forbid();
-            try { return Results.Ok(await mail.CombineFoldersAsync(folderId, request.TargetFolderId, session.User.Id, token)); }
+            try
+            {
+                return Results.Accepted(
+                    "/api/import-jobs",
+                    await combines.EnqueueFolderCombineAsync(folderId, request.TargetFolderId, session.User.Id, token));
+            }
             catch (Exception error) { return MailError(error); }
-        }).WithName("CombineFolders");
+        }).WithName("CombineFolders").Produces<ImportJobDto>(StatusCodes.Status202Accepted);
 
         api.MapPost("/folders/{folderId}/move", async (string folderId, MoveFolderRequest request,
             HttpContext context, MailRepository mail, CancellationToken token) =>

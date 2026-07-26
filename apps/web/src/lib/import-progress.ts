@@ -14,9 +14,23 @@ export interface ImportEtaUpdate {
   secondsRemaining: number | null;
 }
 
+/**
+ * A combine has no file to read, count or parse - it moves rows it counted up front. So its
+ * progress is the plain ratio the import phases have to approximate around, and its labels say
+ * moving rather than importing.
+ */
+function isCombine(job: ImportJob): boolean {
+  return job.sourceType === "combine";
+}
+
 export function importProgressPercent(job: ImportJob): number {
   if (job.status === "completed" || job.status === "completed_with_errors") return 100;
   if (job.phase === "queued") return 0;
+  if (isCombine(job)) {
+    if (job.totalItems === null) return 0;
+    if (job.totalItems === 0) return 99;
+    return Math.min(99, Math.round(ratio(job.processedItems, job.totalItems) * 100));
+  }
   if (job.phase === "fingerprinting") {
     return Math.round(ratio(job.processedBytes, job.totalBytes) * 10);
   }
@@ -35,6 +49,13 @@ export function importProgressPercent(job: ImportJob): number {
 }
 
 export function importPhaseLabel(job: ImportJob): string {
+  if (isCombine(job)) {
+    if (job.status === "cancelled") return "Combine stopped";
+    if (job.status === "failed") return "Combine failed";
+    if (job.status === "completed" || job.status === "completed_with_errors") return "Combine complete";
+    if (job.status === "queued") return "Waiting to combine";
+    return "Moving emails";
+  }
   if (job.status === "paused") return "Import paused";
   if (job.status === "cancelled") return "Import stopped";
   if (job.status === "failed") return "Import failed";

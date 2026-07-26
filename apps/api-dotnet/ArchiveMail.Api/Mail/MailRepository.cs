@@ -73,34 +73,9 @@ public sealed class MailRepository(NpgsqlDataSource database)
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task<ArchiveMergeResult> CombineArchivesAsync(string sourceId, string targetId, string ownerUserId, CancellationToken cancellationToken)
-    {
-        if (sourceId == targetId) throw new ArgumentException("Choose two different archives");
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        const string lockSql = "SELECT id,name,status FROM archives WHERE id=ANY(@ids) AND owner_user_id=@owner FOR UPDATE";
-        await using var locked = new NpgsqlCommand(lockSql, connection, transaction);
-        locked.Parameters.AddWithValue("ids", new[] { sourceId, targetId }); locked.Parameters.AddWithValue("owner", ownerUserId);
-        var rows = new Dictionary<string, (string Name, string Status)>();
-        await using (var reader = await locked.ExecuteReaderAsync(cancellationToken))
-            while (await reader.ReadAsync(cancellationToken)) rows[reader.GetString(0)] = (reader.GetString(1), reader.GetString(2));
-        if (rows.Count != 2) throw new MailNotFoundException("Archive not found");
-        if (rows.Values.Any(value => value.Status == "importing")) throw new MailConflictException("Wait for imports to finish before combining archives");
-        var prefix = NormalizeMailboxName(rows[sourceId].Name);
-        var suffix = 1;
-        while (await ScalarStringAsync(connection, transaction, "SELECT id FROM folders WHERE archive_id=@archive AND lower(path)=lower(@path)", [new("archive", targetId), new("path", prefix)], cancellationToken) is not null)
-            prefix = $"{rows[sourceId].Name} ({++suffix})";
-        var counts = await CountsAsync(connection, transaction, sourceId, cancellationToken);
-        var rootId = Guid.NewGuid().ToString();
-        await ExecuteAsync(connection, transaction, "INSERT INTO folders(id,archive_id,parent_id,name,path,message_count,unread_count) VALUES(@id,@archive,NULL,@name,@path,0,0)", [new("id",rootId),new("archive",targetId),new("name",prefix),new("path",prefix)], cancellationToken);
-        await ExecuteAsync(connection, transaction, "UPDATE messages SET source_key=@source || ':' || source_key WHERE archive_id=@source", [new("source", sourceId)], cancellationToken);
-        await ExecuteAsync(connection, transaction, "UPDATE folders SET archive_id=@target,parent_id=CASE WHEN parent_id IS NULL THEN @root ELSE parent_id END,path=@prefix || '/' || path WHERE archive_id=@source", [new("target", targetId),new("root",rootId),new("prefix",prefix),new("source",sourceId)], cancellationToken);
-        await ExecuteAsync(connection, transaction, "UPDATE messages SET archive_id=@target WHERE archive_id=@source", [new("target",targetId),new("source",sourceId)], cancellationToken);
-        await ExecuteAsync(connection, transaction, "DELETE FROM archives WHERE id=@source", [new("source",sourceId)], cancellationToken);
-        await RecountArchiveAsync(connection, transaction, targetId, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new((await GetArchiveAsync(targetId, ownerUserId, cancellationToken))!, counts.Messages, counts.Folders, counts.Attachments);
-    }
+    // Combining archives lives in ArchiveCombineService now. It cannot run inline on a request:
+    // moving a large archive outlasts any proxy timeout, and the client disconnect that follows
+    // rolls the whole thing back.
 
     public async Task<IReadOnlyList<FolderDto>> ListFoldersAsync(
         string archiveId,
@@ -240,26 +215,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         return new(new(id, source.ArchiveId, targetParentId, name, newPath, source.MessageCount, source.UnreadCount), moved);
     }
 
-    public async Task<MailboxMergeResult> CombineFoldersAsync(string sourceId, string targetId, string ownerUserId, CancellationToken cancellationToken)
-    {
-        if (sourceId == targetId) throw new ArgumentException("Choose two different mailboxes");
-        await using var connection = await database.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var source = await GetFolderRowAsync(connection, transaction, sourceId, ownerUserId, cancellationToken) ?? throw new MailNotFoundException("Mailbox not found");
-        var target = await GetFolderRowAsync(connection, transaction, targetId, ownerUserId, cancellationToken) ?? throw new MailNotFoundException("Destination mailbox not found");
-        if (source.ArchiveId != target.ArchiveId) throw new ArgumentException("Mailboxes belong to different archives");
-        if (target.Path.StartsWith(source.Path + "/", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("A mailbox cannot be combined into its child");
-        var ids = new List<string>();
-        await using (var command = new NpgsqlCommand("SELECT id FROM folders WHERE archive_id=@archive AND (path=@path OR path LIKE @children ESCAPE '\\\\')", connection, transaction))
-        { command.Parameters.AddWithValue("archive",source.ArchiveId);command.Parameters.AddWithValue("path",source.Path);command.Parameters.AddWithValue("children",$"{EscapeLike(source.Path)}/%");await using var reader=await command.ExecuteReaderAsync(cancellationToken);while(await reader.ReadAsync(cancellationToken)) ids.Add(reader.GetString(0)); }
-        var moved = Convert.ToInt64(await ScalarAsync(connection,transaction,"SELECT COUNT(*) FROM messages WHERE folder_id=ANY(@ids)",[new("ids",ids.ToArray())],cancellationToken));
-        var attachments = Convert.ToInt64(await ScalarAsync(connection,transaction,"SELECT COUNT(*) FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.folder_id=ANY(@ids)",[new("ids",ids.ToArray())],cancellationToken));
-        await ExecuteAsync(connection,transaction,"UPDATE messages SET folder_id=@target WHERE folder_id=ANY(@ids)",[new("target",targetId),new("ids",ids.ToArray())],cancellationToken);
-        await ExecuteAsync(connection,transaction,"DELETE FROM folders WHERE id=@source",[new("source",sourceId)],cancellationToken);
-        await RecountArchiveAsync(connection,transaction,source.ArchiveId,cancellationToken); await transaction.CommitAsync(cancellationToken);
-        var result=(await ListFoldersAsync(source.ArchiveId,ownerUserId,cancellationToken)).Single(folder=>folder.Id==targetId);
-        return new(result,moved,ids.Count,attachments);
-    }
+    // Combining mailboxes lives in ArchiveCombineService too - see the note above CombineArchives.
 
     public async Task<CursorPageDto<MessageSummaryDto>> ListMessagesAsync(
         MessageFilters filters,
@@ -737,7 +693,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         return normalized;
     }
 
-    private static string NormalizeMailboxName(string value)
+    internal static string NormalizeMailboxName(string value)
     {
         var normalized = NormalizeName(value, "Mailbox name");
         if (normalized.Contains('/') || normalized.Contains('\\') || normalized.Any(char.IsControl))
@@ -761,7 +717,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         catch { return 0; }
     }
 
-    private static string EscapeLike(string value) => value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+    internal static string EscapeLike(string value) => value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
     private static async Task<string?> ScalarStringAsync(
         NpgsqlConnection connection,
@@ -791,15 +747,6 @@ public sealed class MailRepository(NpgsqlDataSource database)
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<(long Messages, long Folders, long Attachments)> CountsAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, string archiveId, CancellationToken cancellationToken)
-    {
-        const string sql = "SELECT (SELECT COUNT(*) FROM messages WHERE archive_id=@archive),(SELECT COUNT(*) FROM folders WHERE archive_id=@archive),(SELECT COUNT(*) FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.archive_id=@archive)";
-        await using var command = new NpgsqlCommand(sql, connection, transaction); command.Parameters.AddWithValue("archive", archiveId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken); await reader.ReadAsync(cancellationToken);
-        return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
-    }
-
     private sealed record FolderRow(
         string ArchiveId, string? ParentId, string Path, long MessageCount, long UnreadCount, string Status);
 
@@ -825,7 +772,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
             : null;
     }
 
-    private static async Task RecountArchiveAsync(
+    internal static async Task RecountArchiveAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
         string archiveId,
@@ -845,7 +792,9 @@ public sealed class MailRepository(NpgsqlDataSource database)
               starred_unread_count = (SELECT COUNT(*) FROM messages m JOIN message_state s ON s.message_id = m.id WHERE m.archive_id = a.id AND s.is_starred = 1 AND s.is_read = 0)
             WHERE a.id = @archive;
             """;
-        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        // These counts sweep every message in the archive. On Npgsql's 30 second default they
+        // time out on a large one, which would fail the merge that just moved all of it.
+        await using var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = 600 };
         command.Parameters.AddWithValue("archive", archiveId);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
