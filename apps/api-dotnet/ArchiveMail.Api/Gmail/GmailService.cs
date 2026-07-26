@@ -45,6 +45,16 @@ public sealed class GmailService(
         status='connected',can_send=EXCLUDED.can_send,can_modify_mailbox=EXCLUDED.can_modify_mailbox,
         can_manage_calendar=EXCLUDED.can_manage_calendar,last_error=NULL,updated_at=EXCLUDED.updated_at
       """;
+    /// <summary>
+    /// Reauthorization reads the destination back out of the row rather than trusting the request,
+    /// so finishing an authorization can never redirect an account's mail somewhere else. Changing
+    /// where a connection files its mail goes through <see cref="MoveAsync"/> instead.
+    /// </summary>
+    internal const string ExistingConnectionSql = """
+      SELECT g.email,g.archive_id,g.folder_id
+      FROM gmail_connections g JOIN archives a ON a.id=g.archive_id
+      WHERE g.id=$1 AND a.owner_user_id=$2 FOR UPDATE
+      """;
     private readonly ConcurrentDictionary<string,PendingGmailAuthorization> _pending=new();
     private readonly ConcurrentDictionary<string,CancellationTokenSource> _runs=new();
 
@@ -92,12 +102,7 @@ public sealed class GmailService(
         string? id=null;
         if(!string.IsNullOrWhiteSpace(requestedConnectionId))
         {
-            const string existingSql="""
-              SELECT g.email,g.archive_id,g.folder_id
-              FROM gmail_connections g JOIN archives a ON a.id=g.archive_id
-              WHERE g.id=$1 AND a.owner_user_id=$2 FOR UPDATE
-              """;
-            await using var existing=new NpgsqlCommand(existingSql,connection,tx);existing.Parameters.AddWithValue(requestedConnectionId);existing.Parameters.AddWithValue(pending.OwnerUserId);
+            await using var existing=new NpgsqlCommand(ExistingConnectionSql,connection,tx);existing.Parameters.AddWithValue(requestedConnectionId);existing.Parameters.AddWithValue(pending.OwnerUserId);
             await using var reader=await existing.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))throw new InvalidOperationException("Gmail connection not found");
             if(!string.Equals(reader.GetString(0),email,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("Choose the same Google account when reauthorizing this connection");
             id=requestedConnectionId;archiveId=reader.GetString(1);folderId=reader.GetString(2);await reader.CloseAsync();
@@ -116,6 +121,58 @@ public sealed class GmailService(
         id??=Guid.NewGuid().ToString();
         await using var insert=new NpgsqlCommand(ConnectionUpsertSql,connection,tx);insert.Parameters.AddWithValue(id);insert.Parameters.AddWithValue(email);insert.Parameters.AddWithValue(archiveId);insert.Parameters.AddWithValue(folderId);insert.Parameters.AddWithValue(Text(pending.Request,"query")??"newer_than:30d");insert.Parameters.AddWithValue(Bool(pending.Request,"ocrEnabled")?1:0);insert.Parameters.AddWithValue(refreshToken);insert.Parameters.AddWithValue(accessToken);insert.Parameters.AddWithValue(DateTimeOffset.UtcNow.AddSeconds(expires).ToString("O"));insert.Parameters.AddWithValue(granted.Contains("gmail.send",StringComparison.Ordinal)?1:0);insert.Parameters.AddWithValue(pending.ModifyRequested&&granted.Contains("gmail.modify",StringComparison.Ordinal)?1:0);insert.Parameters.AddWithValue(granted.Contains("calendar.events",StringComparison.Ordinal)&&granted.Contains("calendar.calendarlist",StringComparison.Ordinal)?1:0);insert.Parameters.AddWithValue(now);await insert.ExecuteNonQueryAsync(token);await tx.CommitAsync(token);
         var result=(await GetAsync(id,pending.OwnerUserId,token))!.Public;StartSync(id,pending.OwnerUserId,false);return result;
+    }
+
+    /// <summary>Archive and mailbox move together: a folder only ever belongs to one archive.</summary>
+    internal const string MoveDestinationSql =
+        "UPDATE gmail_connections SET archive_id=$2,folder_id=$3,updated_at=$4 WHERE id=$1";
+
+    /// <summary>
+    /// Re-points a connection at another archive or mailbox. The Google grant is untouched: a
+    /// refresh token belongs to the Google account, not to whichever archive it happens to fill,
+    /// so there is nothing to reauthorize. Reauthorizing could not do this anyway - it pins the
+    /// connection's existing archive and folder on purpose, so that finishing an authorization
+    /// cannot quietly redirect an account's mail somewhere else.
+    ///
+    /// Only the destination of future syncs moves. Messages already downloaded stay in the archive
+    /// they were downloaded into, which also means the next sync picks up from last_synced_at
+    /// rather than backfilling the new destination.
+    /// </summary>
+    public async Task<GmailConnectionDto> MoveAsync(string id,string owner,JsonElement request,CancellationToken token)
+    {
+        var archiveId=Text(request,"archiveId");if(string.IsNullOrWhiteSpace(archiveId))throw new ArgumentException("Choose a destination archive");
+        var folderId=Text(request,"folderId");var folderName=Text(request,"folderName");
+        if(folderName?.Length>120)throw new ArgumentException("Mailbox names are limited to 120 characters");
+        var current=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");
+        await using var connection=await database.OpenConnectionAsync(token);await using var tx=await connection.BeginTransactionAsync(token);
+        // A sync in flight is writing into the archive this is about to move away from, and it holds
+        // the old destination for the rest of its run. _runs only knows about this process, so the
+        // locked row's status is what settles it when more than one instance is serving the API.
+        if(_runs.ContainsKey(id))throw new InvalidOperationException("Stop this account's Gmail sync before moving it");
+        await using(var locked=new NpgsqlCommand("SELECT g.status FROM gmail_connections g JOIN archives a ON a.id=g.archive_id WHERE g.id=$1 AND a.owner_user_id=$2 FOR UPDATE",connection,tx))
+        {
+            locked.Parameters.AddWithValue(id);locked.Parameters.AddWithValue(owner);
+            var status=await locked.ExecuteScalarAsync(token) as string??throw new KeyNotFoundException("Gmail connection not found");
+            if(status=="syncing")throw new InvalidOperationException("Stop this account's Gmail sync before moving it");
+        }
+        if(!await OwnsArchiveAsync(connection,tx,archiveId,owner,token))throw new KeyNotFoundException("Destination archive not found");
+        if(!string.IsNullOrWhiteSpace(folderId))
+        {
+            await using var target=new NpgsqlCommand("SELECT 1 FROM folders WHERE id=$1 AND archive_id=$2",connection,tx);
+            target.Parameters.AddWithValue(folderId);target.Parameters.AddWithValue(archiveId);
+            if(await target.ExecuteScalarAsync(token) is null)throw new KeyNotFoundException("That mailbox is not in the destination archive");
+        }
+        else
+        {
+            var name=string.IsNullOrWhiteSpace(folderName)?current.Public.FolderPath.Split('/')[^1]:folderName;
+            await using var folder=new NpgsqlCommand("INSERT INTO folders(id,archive_id,name,path) VALUES($1,$2,$3,$3) ON CONFLICT(archive_id,path) DO UPDATE SET name=EXCLUDED.name RETURNING id",connection,tx);
+            folder.Parameters.AddWithValue(Guid.NewGuid().ToString());folder.Parameters.AddWithValue(archiveId);folder.Parameters.AddWithValue(name);
+            folderId=Convert.ToString(await folder.ExecuteScalarAsync(token))!;
+        }
+        await using(var move=new NpgsqlCommand(MoveDestinationSql,connection,tx))
+        {move.Parameters.AddWithValue(id);move.Parameters.AddWithValue(archiveId);move.Parameters.AddWithValue(folderId);move.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));await move.ExecuteNonQueryAsync(token);}
+        await tx.CommitAsync(token);
+        return(await GetAsync(id,owner,token))!.Public;
     }
 
     public async Task<GmailConnectionDto> StartSyncAsync(string id,string owner,bool full,CancellationToken token)
@@ -240,7 +297,10 @@ public sealed class GmailService(
 
 public sealed class GmailScheduledSyncService(GmailService gmail,AppSettingsService settings,ILogger<GmailScheduledSyncService> logger):BackgroundService
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken){while(!stoppingToken.IsCancellationRequested){var minutes=Math.Clamp(settings.Current().GmailValue.SyncIntervalMinutes,1,1440);await Task.Delay(TimeSpan.FromMinutes(minutes),stoppingToken);try{foreach(var connection in await gmail.ListAsyncForSchedule(stoppingToken))if(connection.Status!="syncing")await gmail.StartSyncAsync(connection.Id,connection.OwnerUserId,false,stoppingToken);}catch(Exception error){logger.LogError(error,"Scheduled Gmail synchronization failed");}}}
+    // Reading the interval and awaiting the delay sit inside the guard with everything else: they
+    // decrypt saved settings and observe the shutdown token, and an exception from either escaping
+    // ExecuteAsync faults this service. Every other worker here already guards its whole loop.
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken){while(!stoppingToken.IsCancellationRequested){try{var minutes=Math.Clamp(settings.Current().GmailValue.SyncIntervalMinutes,1,1440);await Task.Delay(TimeSpan.FromMinutes(minutes),stoppingToken);foreach(var connection in await gmail.ListAsyncForSchedule(stoppingToken))if(connection.Status!="syncing")await gmail.StartSyncAsync(connection.Id,connection.OwnerUserId,false,stoppingToken);}catch(OperationCanceledException)when(stoppingToken.IsCancellationRequested){break;}catch(Exception error){logger.LogError(error,"Scheduled Gmail synchronization failed");await Task.Delay(TimeSpan.FromMinutes(1),CancellationToken.None);}}}
 }
 
 public sealed record ScheduledGmailConnection(string Id,string OwnerUserId,string Status);

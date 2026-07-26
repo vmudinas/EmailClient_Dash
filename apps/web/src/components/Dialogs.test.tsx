@@ -6,7 +6,8 @@ import {
   EMPTY_FILTERS,
   FilterPanel,
   GmailDialog,
-  MailboxDropDialog
+  MailboxDropDialog,
+  MoveGmailConnectionDialog
 } from "./Dialogs.js";
 
 afterEach(cleanup);
@@ -33,6 +34,7 @@ describe("GmailDialog", () => {
         onReorganize={vi.fn()}
         onReauthorize={vi.fn()}
         onCompose={vi.fn()}
+        onMoveDestination={vi.fn()}
         onDisconnect={vi.fn()}
       />
     );
@@ -91,6 +93,7 @@ describe("GmailDialog", () => {
         onReorganize={vi.fn()}
         onReauthorize={onReauthorize}
         onCompose={vi.fn()}
+        onMoveDestination={vi.fn()}
         onDisconnect={vi.fn()}
       />
     );
@@ -120,6 +123,7 @@ describe("GmailDialog", () => {
         onReorganize={vi.fn()}
         onReauthorize={vi.fn()}
         onCompose={vi.fn()}
+        onMoveDestination={vi.fn()}
         onDisconnect={vi.fn()}
       />
     );
@@ -128,6 +132,73 @@ describe("GmailDialog", () => {
     expect(confirmSpy).toHaveBeenCalled();
     expect(onFullSync).toHaveBeenCalledWith(CONNECTIONS[0]!.id);
     confirmSpy.mockRestore();
+  });
+});
+
+describe("MoveGmailConnectionDialog", () => {
+  it("re-points a connected account at a different archive without reauthorizing", async () => {
+    const onMove = vi.fn();
+    render(
+      <MoveGmailConnectionDialog
+        connection={CONNECTIONS[0]!}
+        archives={[...ARCHIVES, SECOND_ARCHIVE]}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onLoadFolders={vi.fn().mockResolvedValue(SECOND_ARCHIVE_FOLDERS)}
+        onMove={onMove}
+      />
+    );
+
+    // Defaults away from the archive the account already fills - the point of opening this is to
+    // move it somewhere else.
+    const [archiveSelect] = screen.getAllByRole("combobox") as HTMLSelectElement[];
+    expect(archiveSelect!.value).toBe(SECOND_ARCHIVE.id);
+    expect(screen.getByText(/stays authorized with Google/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Move" }));
+    expect(onMove).toHaveBeenCalledWith({ archiveId: SECOND_ARCHIVE.id, folderName: "Inbox" });
+  });
+
+  it("merges into a mailbox that already exists in the destination", async () => {
+    const onMove = vi.fn();
+    render(
+      <MoveGmailConnectionDialog
+        connection={CONNECTIONS[0]!}
+        archives={[...ARCHIVES, SECOND_ARCHIVE]}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onLoadFolders={vi.fn().mockResolvedValue(SECOND_ARCHIVE_FOLDERS)}
+        onMove={onMove}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Existing mailbox/ }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /Existing mailbox/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Move" }));
+    expect(onMove).toHaveBeenCalledWith({
+      archiveId: SECOND_ARCHIVE.id,
+      folderId: SECOND_ARCHIVE_FOLDERS[0]!.id
+    });
+  });
+
+  it("will not submit a move that changes nothing", async () => {
+    render(
+      <MoveGmailConnectionDialog
+        connection={CONNECTIONS[0]!}
+        archives={ARCHIVES}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onLoadFolders={vi.fn().mockResolvedValue(FOLDERS)}
+        onMove={vi.fn()}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Existing mailbox/ }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: /Existing mailbox/ }));
+    expect(screen.getByRole("button", { name: "Move" }).hasAttribute("disabled")).toBe(true);
   });
 });
 
@@ -214,9 +285,15 @@ const ARCHIVES: Archive[] = [{
   createdAt: "2026-07-13T00:00:00.000Z"
 }];
 
+const SECOND_ARCHIVE: Archive = { ...ARCHIVES[0]!, id: "archive-two", name: "Everything" };
+
 const FOLDERS: Folder[] = [
   { id: "folder-inbox", archiveId: "archive-one", parentId: null, name: "Inbox", path: "Inbox", messageCount: 7, unreadCount: 3 },
   { id: "folder-shared", archiveId: "archive-one", parentId: null, name: "Shared", path: "Shared", messageCount: 3, unreadCount: 1 }
+];
+
+const SECOND_ARCHIVE_FOLDERS: Folder[] = [
+  { id: "folder-merged", archiveId: "archive-two", parentId: null, name: "Merged", path: "Merged", messageCount: 12, unreadCount: 0 }
 ];
 
 const CONNECTIONS: GmailConnection[] = [

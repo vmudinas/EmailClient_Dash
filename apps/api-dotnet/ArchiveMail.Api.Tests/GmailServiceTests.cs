@@ -69,6 +69,33 @@ public sealed class GmailServiceTests : IDisposable
     }
 
     [Fact]
+    public void MovingAConnectionRewritesOnlyItsDestination()
+    {
+        // Moving is not reauthorizing. The refresh token, the granted scopes and last_synced_at all
+        // survive untouched - a token belongs to the Google account, not to the archive it fills -
+        // and the row is addressed by id so one move cannot take another connection with it.
+        var sql = GmailService.MoveDestinationSql;
+        Assert.Contains("SET archive_id=$2,folder_id=$3", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE id=$1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("refresh_token", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("last_synced_at", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("can_send", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReauthorizingStillCannotRedirectAnAccountsMail()
+    {
+        // The move endpoint exists precisely because this stays true: finishing an authorization
+        // for an existing connection reads its archive and folder back out of the row and ignores
+        // whatever the request asked for, so a stray authorization cannot capture someone's mail.
+        Assert.Contains(
+            "SELECT g.email,g.archive_id,g.folder_id",
+            GmailService.ExistingConnectionSql,
+            StringComparison.Ordinal);
+        Assert.Contains("FOR UPDATE", GmailService.ExistingConnectionSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ExistingGmailSchemaGetsProgressDefaultsRepaired()
     {
         Assert.Contains(

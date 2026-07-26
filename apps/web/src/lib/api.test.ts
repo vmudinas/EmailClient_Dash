@@ -164,6 +164,25 @@ describe("ApiClient request headers", () => {
     expect(init.body).toBeUndefined();
   });
 
+  it("moves a Gmail connection to another archive without touching the OAuth grant", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "gmail-1", archiveId: "archive-two" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({
+      apiBaseUrl: "http://127.0.0.1:3001",
+      accessToken: "local-token",
+      platform: "browser"
+    });
+
+    await client.moveGmailConnection("gmail-1", { archiveId: "archive-two", folderName: "Gmail" });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://127.0.0.1:3001/api/gmail/connections/gmail-1/destination");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({ archiveId: "archive-two", folderName: "Gmail" });
+    // Nothing on the OAuth route: moving is a destination change, not a reauthorization.
+    expect(fetchMock.mock.calls.every((call) => !String(call[0]).includes("/oauth/"))).toBe(true);
+  });
+
   it("reconnects an existing Apple Calendar account in place", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "apple-1", status: "connected" }));
     vi.stubGlobal("fetch", fetchMock);

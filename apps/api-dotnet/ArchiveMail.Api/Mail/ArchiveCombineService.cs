@@ -37,6 +37,13 @@ public sealed class ArchiveCombineService(
     /// the archive_id change rather than running as its own pass over the table, which halves the
     /// row rewrites; it is there to keep moved rows from colliding with the destination's own keys
     /// on the (archive_id, source_key) unique index.
+    ///
+    /// It only fires on an actual collision. A Gmail connection dedupes its sync against
+    /// (archive_id, source_key), so a message whose key was rewritten looks unseen to the account
+    /// that downloaded it - and rewriting unconditionally meant a full pull after a merge
+    /// re-imported the entire mailbox as duplicates. Two rows out of the same source archive can
+    /// never collide with each other (that unique index is what stops them), so the probe only has
+    /// to consider what is already in the destination.
     /// </summary>
     internal const string MoveArchiveBatchSql = """
         WITH batch AS (
@@ -48,9 +55,36 @@ public sealed class ArchiveCombineService(
         )
         UPDATE messages message
         SET archive_id = $2,
-            source_key = $1 || ':' || message.source_key
+            source_key = CASE
+              WHEN EXISTS (
+                SELECT 1 FROM messages existing
+                WHERE existing.archive_id = $2 AND existing.source_key = message.source_key
+              )
+              THEN $1 || ':' || message.source_key
+              ELSE message.source_key
+            END
         FROM batch
         WHERE message.id = batch.id
+        """;
+
+    /// <summary>
+    /// Carries a Google authorization across an archive merge. gmail_connections.archive_id is
+    /// ON DELETE CASCADE, so without this the source archive's delete took the connection, its
+    /// refresh token - never revoked at Google - and its drafts with it, silently, and the account
+    /// simply stopped syncing. The folder tree is re-homed to the destination first, so folder_id
+    /// still points somewhere real and only the archive needs moving.
+    /// </summary>
+    internal const string CarryArchiveConnectionsSql = """
+        UPDATE gmail_connections SET archive_id = $2, updated_at = $3 WHERE archive_id = $1
+        """;
+
+    /// <summary>
+    /// The same rescue for a mailbox merge, where the cascade comes off folder_id when the source
+    /// subtree is dropped. The combine dialog has always told the user their Gmail destinations
+    /// move into the target mailbox; this is what makes that true.
+    /// </summary>
+    internal const string CarryFolderConnectionsSql = """
+        UPDATE gmail_connections SET folder_id = $2, updated_at = $3 WHERE folder_id = ANY($1)
         """;
 
     /// <summary>
@@ -286,9 +320,19 @@ public sealed class ArchiveCombineService(
         }
 
         string recountArchiveId;
+        var now = DateTimeOffset.UtcNow.ToString("O");
 
         if (plan.Kind == FolderKind)
         {
+            await using (var connections = new NpgsqlCommand(
+                CarryFolderConnectionsSql, connection, transaction))
+            {
+                connections.Parameters.AddWithValue(plan.SubtreeFolderIds);
+                connections.Parameters.AddWithValue(plan.TargetId);
+                connections.Parameters.AddWithValue(now);
+                await connections.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             // The subtree cascades from its root. Every message left it above, so nothing rides
             // along with the delete.
             await using var drop = new NpgsqlCommand(
@@ -318,6 +362,17 @@ public sealed class ArchiveCombineService(
                 folders.Parameters.AddWithValue(plan.RootFolderId);
                 folders.Parameters.AddWithValue(plan.Prefix);
                 await folders.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Ordered after the folder re-home and before the delete: the connection keeps its
+            // folder_id, and that folder now belongs to the destination archive.
+            await using (var connections = new NpgsqlCommand(
+                CarryArchiveConnectionsSql, connection, transaction))
+            {
+                connections.Parameters.AddWithValue(plan.SourceId);
+                connections.Parameters.AddWithValue(plan.TargetId);
+                connections.Parameters.AddWithValue(now);
+                await connections.ExecuteNonQueryAsync(cancellationToken);
             }
 
             // The job row points at the destination archive, so dropping the source cannot

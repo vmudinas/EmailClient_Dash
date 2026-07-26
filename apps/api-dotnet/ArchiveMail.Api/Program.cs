@@ -22,6 +22,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.DictionaryKeyPolicy = JsonNamingPolicy.CamelCase;
 });
 builder.Services.Configure<ImportOptions>(builder.Configuration.GetSection("Import"));
+builder.Services.AddResilientBackgroundWorkers();
 
 var activeDatabase = DatabaseBootstrap.Resolve(builder.Configuration);
 if (activeDatabase.Provider != DatabaseProviderIds.PostgreSql)

@@ -93,6 +93,46 @@ public sealed class ImportJobRepositoryTests
     }
 
     [Fact]
+    public void CombiningAnArchiveCarriesItsGoogleAuthorizationInsteadOfCascadingItAway()
+    {
+        // gmail_connections.archive_id is ON DELETE CASCADE, so finishing an archive merge used to
+        // delete the source's Gmail connection outright - refresh token (never revoked at Google)
+        // and drafts with it - and the account silently stopped syncing. Re-pointing it is the only
+        // thing standing between the delete and that cascade.
+        Assert.Contains(
+            "archive_id TEXT NOT NULL REFERENCES archives(id) ON DELETE CASCADE",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
+        Assert.Contains("UPDATE gmail_connections", ArchiveCombineService.CarryArchiveConnectionsSql, StringComparison.Ordinal);
+        Assert.Contains("SET archive_id = $2", ArchiveCombineService.CarryArchiveConnectionsSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE archive_id = $1", ArchiveCombineService.CarryArchiveConnectionsSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CombiningAMailboxCarriesTheGoogleAuthorizationsFiledUnderIt()
+    {
+        // Same cascade, reached through folder_id when the source subtree is dropped. The combine
+        // dialog has always promised Gmail destinations move into the target mailbox.
+        Assert.Contains("SET folder_id = $2", ArchiveCombineService.CarryFolderConnectionsSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE folder_id = ANY($1)", ArchiveCombineService.CarryFolderConnectionsSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MergedMessagesKeepTheSourceKeysTheirGmailAccountDedupesAgainst()
+    {
+        // A Gmail sync asks "does (archive_id, source_key) already exist?" before downloading a
+        // message. Prefixing every moved key unconditionally made every merged message look unseen,
+        // so a full pull after a merge re-imported the whole mailbox as duplicates. The prefix is
+        // only there to dodge the unique index, so it has to be conditional on a real collision.
+        var sql = ArchiveCombineService.MoveArchiveBatchSql;
+        Assert.Contains("ELSE message.source_key", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "existing.archive_id = $2 AND existing.source_key = message.source_key",
+            sql,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FinalizingAnImportDoesNotRunOnNpgsqlsDefaultCommandTimeout()
     {
         // Completion recounts every message, folder and attachment in the archive. On Npgsql's
