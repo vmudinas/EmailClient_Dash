@@ -21,6 +21,28 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
     internal const string CombineSourceType = "combine";
 
     /// <summary>
+    /// Matches an active combine touching any of the given archives, on either side.
+    ///
+    /// An archive combine stores its destination in archive_id and its SOURCE in source_path, so
+    /// a predicate on archive_id alone misses every job by the archive it is draining. That gap
+    /// let a second combine queue against a source already being emptied, and let a job be queued
+    /// into an archive that a running combine was about to delete - taking the queued job's row
+    /// with it through the cascade.
+    ///
+    /// It is also what makes mid-combine deletes refusable. Between batches a moved message
+    /// carries the destination's archive_id while still sitting in a folder owned by the source,
+    /// so deleting the source cascades archives -> folders -> messages and takes the already
+    /// moved mail with it. The worker would then count zero rows left and report success.
+    /// </summary>
+    internal const string ActiveCombineTouchingSql = $"""
+        SELECT 1 FROM import_jobs
+        WHERE source_type = '{CombineSourceType}'
+          AND status IN ('queued', 'running')
+          AND (archive_id = ANY($1) OR source_path = ANY($1))
+        LIMIT 1
+        """;
+
+    /// <summary>
     /// An allowlist, not a denylist. Claiming by exclusion meant every source type added later
     /// was silently opted in to the file importer, which is not survivable for a job whose
     /// source_path is an archive id rather than a path on disk.

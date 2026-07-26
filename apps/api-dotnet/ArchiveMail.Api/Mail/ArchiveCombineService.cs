@@ -53,6 +53,12 @@ public sealed class ArchiveCombineService(
         WHERE message.id = batch.id
         """;
 
+    /// <summary>
+    /// Read in the finalizing transaction, so a cancel cannot slip between the last progress
+    /// write and the deletes that finish the merge.
+    /// </summary>
+    internal const string LockJobStatusSql = "SELECT status FROM import_jobs WHERE id = $1 FOR UPDATE";
+
     /// <summary>Moves one bounded batch out of a mailbox subtree into the destination mailbox.</summary>
     internal const string MoveFolderBatchSql = """
         WITH batch AS (
@@ -218,7 +224,7 @@ public sealed class ArchiveCombineService(
             await onProgress(moved);
         }
 
-        await FinalizeAsync(plan, cancellationToken);
+        await FinalizeAsync(job.Public.Id, plan, cancellationToken);
     }
 
     private async Task<int> MoveBatchAsync(CombinePlan plan, CancellationToken cancellationToken)
@@ -258,7 +264,7 @@ public sealed class ArchiveCombineService(
     /// holds thousands of folders, not hundreds of thousands - but it deletes rows that cascade to
     /// messages, so it re-checks that nothing is left to move before it touches anything.
     /// </summary>
-    private async Task FinalizeAsync(CombinePlan plan, CancellationToken cancellationToken)
+    private async Task FinalizeAsync(string jobId, CombinePlan plan, CancellationToken cancellationToken)
     {
         var remaining = await RemainingAsync(plan, cancellationToken);
         if (remaining != 0)
@@ -267,6 +273,18 @@ public sealed class ArchiveCombineService(
 
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // Cancellation is a row update, and the loop only notices it through a progress write
+        // that is throttled to once a second. A cancel landing inside that window - or during the
+        // final batches, or during this method - would otherwise still delete the source. Taking
+        // the status under FOR UPDATE in the same transaction as the delete closes that window.
+        await using (var status = new NpgsqlCommand(LockJobStatusSql, connection, transaction))
+        {
+            status.Parameters.AddWithValue(jobId);
+            if (Convert.ToString(await status.ExecuteScalarAsync(cancellationToken)) != "running")
+                throw new OperationCanceledException("This combine is no longer running");
+        }
+
         string recountArchiveId;
 
         if (plan.Kind == FolderKind)
@@ -371,15 +389,7 @@ public sealed class ArchiveCombineService(
         CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(
-            $"""
-            SELECT 1 FROM import_jobs
-            WHERE source_type = '{SourceType}'
-              AND status IN ('queued', 'running')
-              AND archive_id = ANY($1)
-            LIMIT 1
-            """,
-            connection,
-            transaction);
+            ImportJobRepository.ActiveCombineTouchingSql, connection, transaction);
         command.Parameters.AddWithValue(archiveIds);
         if (await command.ExecuteScalarAsync(cancellationToken) is not null)
             throw new MailConflictException("A combine is already running for this archive");

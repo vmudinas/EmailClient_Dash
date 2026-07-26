@@ -142,17 +142,23 @@ public sealed class ArchiveCombineCoordinator(
             throw new OperationCanceledException("This combine is no longer running");
     }
 
+    /// <summary>
+    /// Scoped to status = 'running' so a cancel that landed while the merge was finishing is not
+    /// overwritten with 'completed'. Finalization takes the same status under FOR UPDATE, so by
+    /// the time this runs a cancelled job has already thrown out of the merge.
+    /// </summary>
+    internal const string CompleteSql = """
+        UPDATE import_jobs
+        SET status = 'completed', phase = 'finalizing', can_resume = 0,
+            processed_items = COALESCE(total_items, processed_items),
+            worker_id = NULL, lease_until = NULL,
+            message = 'Combine complete', updated_at = $2
+        WHERE id = $1 AND status = 'running'
+        """;
+
     private async Task CompleteAsync(string jobId, CancellationToken cancellationToken)
     {
-        const string sql = """
-            UPDATE import_jobs
-            SET status = 'completed', phase = 'finalizing', can_resume = 0,
-                processed_items = COALESCE(total_items, processed_items),
-                worker_id = NULL, lease_until = NULL,
-                message = 'Combine complete', updated_at = $2
-            WHERE id = $1
-            """;
-        await using var command = database.CreateCommand(sql);
+        await using var command = database.CreateCommand(CompleteSql);
         command.Parameters.AddWithValue(jobId);
         command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync(cancellationToken);

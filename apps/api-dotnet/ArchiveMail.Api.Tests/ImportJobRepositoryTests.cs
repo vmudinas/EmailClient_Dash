@@ -61,6 +61,38 @@ public sealed class ImportJobRepositoryTests
     }
 
     [Fact]
+    public void ActiveCombinesAreMatchedByTheirSourceAsWellAsTheirDestination()
+    {
+        // An archive combine stores its destination in archive_id and its SOURCE in source_path.
+        // Matching only archive_id let a second combine queue against a source already being
+        // drained, and let a job be queued into an archive a running combine was about to delete
+        // - which cascaded the queued job's own row away.
+        Assert.Contains(
+            "archive_id = ANY($1) OR source_path = ANY($1)",
+            ImportJobRepository.ActiveCombineTouchingSql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "status IN ('queued', 'running')",
+            ImportJobRepository.ActiveCombineTouchingSql,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FinishingACombineIsScopedToJobsStillRunning()
+    {
+        // Cancellation is a row update the merge only notices through a progress write throttled
+        // to once a second. Finalization takes the status under FOR UPDATE in the same
+        // transaction as the delete, and completion is scoped to 'running', so a cancel arriving
+        // inside that window cannot lose the source archive and then be overwritten by
+        // 'completed'.
+        Assert.Contains("FOR UPDATE", ArchiveCombineService.LockJobStatusSql, StringComparison.Ordinal);
+        Assert.Contains(
+            "AND status = 'running'",
+            ArchiveCombineCoordinator.CompleteSql,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FinalizingAnImportDoesNotRunOnNpgsqlsDefaultCommandTimeout()
     {
         // Completion recounts every message, folder and attachment in the archive. On Npgsql's

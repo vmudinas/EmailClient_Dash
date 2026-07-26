@@ -629,18 +629,40 @@ export function App() {
   const importScreenAllowed = !session || userCanAccessScreen(session.user, "import");
   const hasActiveImportJobs = jobs.some((job) => job.status === "running" || job.status === "queued");
 
+  // A combine re-homes the source's whole folder tree in its final step, so nothing the UI
+  // loaded while the job was running reflects the finished shape - an archive combine leaves the
+  // sidebar showing only the empty root it created at enqueue. Watching for the active-to-settled
+  // transition is what reloads the tree at the one moment it actually changes.
+  const activeCombineIds = useRef<Set<string>>(new Set());
+
   const refreshJobs = useCallback(async () => {
     if (!api || readOnly || !importScreenAllowed) return;
     try {
       const loaded = await api.listImportJobs();
       setJobs(loaded);
+
+      const stillActive = new Set(
+        loaded
+          .filter((job) => job.sourceType === "combine")
+          .filter((job) => job.status === "running" || job.status === "queued")
+          .map((job) => job.id)
+      );
+      const settled = [...activeCombineIds.current].some((id) => !stillActive.has(id));
+      activeCombineIds.current = stillActive;
+
+      if (settled) {
+        await refreshArchives();
+        if (selectedArchiveId) setFolders(await api.listFolders(selectedArchiveId));
+        setMessageListRevision((current) => current + 1);
+        return;
+      }
       if (loaded.some((job) => job.status === "running" || job.status === "queued")) {
         await refreshArchives();
       }
     } catch (error) {
       showError(error instanceof Error ? error.message : "Import status could not be loaded");
     }
-  }, [api, readOnly, importScreenAllowed, refreshArchives, showError]);
+  }, [api, readOnly, importScreenAllowed, refreshArchives, selectedArchiveId, showError]);
 
   const refreshDiagnostics = useCallback(async () => {
     if (!api || readOnly) return;

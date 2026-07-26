@@ -64,6 +64,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await EnsureNoActiveCombineAsync(connection, transaction, id, cancellationToken);
         const string sql = "DELETE FROM archives WHERE id = @id AND owner_user_id = @owner";
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         command.Parameters.AddWithValue("id", id);
@@ -155,6 +156,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         var row = await GetFolderRowAsync(connection, transaction, id, ownerUserId, cancellationToken)
             ?? throw new MailNotFoundException("Mailbox not found");
         if (row.Status == "importing") throw new MailConflictException("Wait for the archive import to finish before renaming a mailbox");
+        await EnsureNoActiveCombineAsync(connection, transaction, row.ArchiveId, cancellationToken);
         var parentPath = row.Path.Contains('/') ? row.Path[..row.Path.LastIndexOf('/')] : null;
         var newPath = parentPath is null ? normalized : $"{parentPath}/{normalized}";
         const string sql = """
@@ -184,6 +186,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         var row = await GetFolderRowAsync(connection, transaction, id, ownerUserId, cancellationToken)
             ?? throw new MailNotFoundException("Mailbox not found");
         if (row.Status == "importing") throw new MailConflictException("Wait for the archive import to finish before deleting this mailbox");
+        await EnsureNoActiveCombineAsync(connection, transaction, row.ArchiveId, cancellationToken);
         await using (var delete = new NpgsqlCommand("DELETE FROM folders WHERE id = @id", connection, transaction))
         {
             delete.Parameters.AddWithValue("id", id);
@@ -200,6 +203,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var source = await GetFolderRowAsync(connection, transaction, id, ownerUserId, cancellationToken) ?? throw new MailNotFoundException("Mailbox not found");
         if (source.Status == "importing") throw new MailConflictException("Wait for the archive import to finish before moving a mailbox");
+        await EnsureNoActiveCombineAsync(connection, transaction, source.ArchiveId, cancellationToken);
         string? parentPath = null;
         if (!string.IsNullOrWhiteSpace(targetParentId))
         {
@@ -737,6 +741,29 @@ public sealed class MailRepository(NpgsqlDataSource database)
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         foreach (var parameter in parameters) command.Parameters.Add(parameter);
         return await command.ExecuteScalarAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Refuses structural changes to an archive a combine is part-way through.
+    ///
+    /// A combine commits its message moves in batches, so between them a moved message already
+    /// carries the destination's archive_id while still sitting in a folder owned by the source.
+    /// Deleting the source there cascades archives -> folders -> messages and destroys mail that
+    /// has already been merged; renaming or moving a mailbox mid-merge collides with the path
+    /// rewrite the combine performs when it finishes. The old inline merge held one transaction
+    /// for the whole operation and had no such window.
+    /// </summary>
+    private static async Task EnsureNoActiveCombineAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        string archiveId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            ImportJobRepository.ActiveCombineTouchingSql, connection, transaction);
+        command.Parameters.AddWithValue(new[] { archiveId });
+        if (await command.ExecuteScalarAsync(cancellationToken) is not null)
+            throw new MailConflictException("Wait for the combine to finish or stop it before changing this archive");
     }
 
     private static async Task<int> ExecuteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql,
