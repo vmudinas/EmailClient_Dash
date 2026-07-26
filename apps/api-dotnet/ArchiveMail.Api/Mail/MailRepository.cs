@@ -759,6 +759,18 @@ public sealed class MailRepository(NpgsqlDataSource database)
         string archiveId,
         CancellationToken cancellationToken)
     {
+        // Take the archive row before reading import_jobs. Enqueueing a combine locks the same
+        // row before it writes its job row, so without this the two interleave: the check reads
+        // an empty import_jobs, the enqueue commits, and the delete then proceeds against an
+        // archive a combine is about to start draining. Folder mutations already hold this row
+        // through GetFolderRowAsync's join, which locks archives as well as folders.
+        await using (var archive = new NpgsqlCommand(
+            "SELECT 1 FROM archives WHERE id = $1 FOR UPDATE", connection, transaction))
+        {
+            archive.Parameters.AddWithValue(archiveId);
+            await archive.ExecuteScalarAsync(cancellationToken);
+        }
+
         await using var command = new NpgsqlCommand(
             ImportJobRepository.ActiveCombineTouchingSql, connection, transaction);
         command.Parameters.AddWithValue(new[] { archiveId });

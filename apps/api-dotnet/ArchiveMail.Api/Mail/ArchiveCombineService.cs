@@ -438,6 +438,7 @@ public sealed class ArchiveCombineService(
             SELECT folder.archive_id, folder.path, archive.status
             FROM folders folder JOIN archives archive ON archive.id = folder.archive_id
             WHERE folder.id = $1 AND archive.owner_user_id = $2
+            FOR UPDATE
             """,
             connection,
             transaction);
