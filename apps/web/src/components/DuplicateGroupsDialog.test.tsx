@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DuplicateGroup, DuplicateGroupDetail, MessageDetail } from "@email-client/shared";
+import type { DuplicateGroup, DuplicateGroupDetail, DuplicateScan, MessageDetail } from "@email-client/shared";
 import { DuplicateGroupsDialog } from "./DuplicateGroupsDialog.js";
 
 afterEach(cleanup);
@@ -53,17 +53,19 @@ const detail: DuplicateGroupDetail = {
 function renderDialog(overrides: Partial<Parameters<typeof DuplicateGroupsDialog>[0]> = {}) {
   const props = {
     open: true,
-    list: { groups: [group], totalPending: 1 },
+    list: { groups: [group], totalPending: 1, scan: null },
     status: "pending" as const,
     expanded: null,
     expandedId: null,
     loading: false,
-    scanning: false,
+    scan: null,
+    scanStarting: false,
     busyGroupId: null,
     readOnly: false,
     onClose: vi.fn(),
     onRefresh: vi.fn(),
     onScan: vi.fn(),
+    onCancelScan: vi.fn(),
     onChangeStatus: vi.fn(),
     onToggleGroup: vi.fn(),
     onConfirm: vi.fn(),
@@ -86,12 +88,14 @@ describe("DuplicateGroupsDialog", () => {
         expanded={null}
         expandedId={null}
         loading={false}
-        scanning={false}
+        scan={null}
+        scanStarting={false}
         busyGroupId={null}
         readOnly={false}
         onClose={vi.fn()}
         onRefresh={vi.fn()}
         onScan={vi.fn()}
+        onCancelScan={vi.fn()}
         onChangeStatus={vi.fn()}
         onToggleGroup={vi.fn()}
         onConfirm={vi.fn()}
@@ -170,7 +174,61 @@ describe("DuplicateGroupsDialog", () => {
   });
 
   it("shows an empty state when there is nothing to review", () => {
-    renderDialog({ list: { groups: [], totalPending: 0 } });
+    renderDialog({ list: { groups: [], totalPending: 0, scan: null } });
     expect(screen.getByText("No duplicates to review")).toBeTruthy();
   });
+
+  it("reports the running phase and lets the user leave while a scan runs", () => {
+    const props = renderDialog({ scan: runningScan({ phase: "fingerprinting", processedItems: 250, totalItems: 1000 }) });
+    expect(screen.getByText("Fingerprinting messages")).toBeTruthy();
+    expect(screen.getByText("25%")).toBeTruthy();
+    // The whole point of the background job: closing is never blocked by a scan.
+    fireEvent.click(screen.getByLabelText("Close"));
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it("keeps the review tabs usable during a scan", () => {
+    const props = renderDialog({ scan: runningScan({ phase: "matching" }) });
+    fireEvent.click(screen.getByRole("tab", { name: "Confirmed" }));
+    expect(props.onChangeStatus).toHaveBeenCalledWith("confirmed");
+  });
+
+  it("offers to stop a running scan instead of starting another", () => {
+    const props = renderDialog({ scan: runningScan({}) });
+    expect(screen.queryByRole("button", { name: /Scan now/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Stop scan/ }));
+    expect(props.onCancelScan).toHaveBeenCalled();
+  });
+
+  it("surfaces a failed scan", () => {
+    renderDialog({ scan: runningScan({ status: "failed", message: "connection reset" }) });
+    expect(screen.getByText(/connection reset/)).toBeTruthy();
+  });
+
+  it("says so when near-duplicate coverage was capped", () => {
+    renderDialog({
+      scan: runningScan({ status: "completed", phase: "done", scannedMessages: 50000, skippedMessages: 12000 })
+    });
+    expect(screen.getByText(/12,000 were past that limit/)).toBeTruthy();
+  });
 });
+
+function runningScan(overrides: Partial<DuplicateScan>): DuplicateScan {
+  return {
+    id: "scan-1",
+    status: "running",
+    phase: "fingerprinting",
+    processedItems: 0,
+    totalItems: null,
+    fingerprinted: 0,
+    groupsCreated: 0,
+    duplicateMessages: 0,
+    scannedMessages: 0,
+    skippedMessages: 0,
+    message: "",
+    createdAt: "2026-07-26T00:00:00.000Z",
+    updatedAt: "2026-07-26T00:00:00.000Z",
+    finishedAt: null,
+    ...overrides
+  };
+}

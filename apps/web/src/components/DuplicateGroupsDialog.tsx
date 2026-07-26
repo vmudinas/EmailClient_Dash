@@ -1,5 +1,6 @@
 import { CheckCheck, ChevronDown, ChevronRight, Copy, LoaderCircle, RefreshCw, ScanSearch, Split, Star, X } from "lucide-react";
-import type { DuplicateDetectionTier, DuplicateGroup, DuplicateGroupDetail, DuplicateGroupList, DuplicateReviewStatus } from "@email-client/shared";
+import type { DuplicateDetectionTier, DuplicateGroup, DuplicateGroupDetail, DuplicateGroupList, DuplicateReviewStatus, DuplicateScan } from "@email-client/shared";
+import { isDuplicateScanActive } from "@email-client/shared";
 import { displayAddress, formatDateTime } from "../lib/format.js";
 
 interface DuplicateGroupsDialogProps {
@@ -9,12 +10,14 @@ interface DuplicateGroupsDialogProps {
   expanded: DuplicateGroupDetail | null;
   expandedId: string | null;
   loading: boolean;
-  scanning: boolean;
+  scan: DuplicateScan | null;
+  scanStarting: boolean;
   busyGroupId: string | null;
   readOnly: boolean;
   onClose(): void;
   onRefresh(): void;
   onScan(): void;
+  onCancelScan(): void;
   onChangeStatus(status: DuplicateReviewStatus): void;
   onToggleGroup(group: DuplicateGroup): void;
   onConfirm(group: DuplicateGroup): void;
@@ -30,6 +33,14 @@ const TIER_LABELS: Record<DuplicateDetectionTier, string> = {
   near_duplicate: "Near-duplicate"
 };
 
+const PHASE_LABELS: Record<DuplicateScan["phase"], string> = {
+  queued: "Waiting for a worker",
+  fingerprinting: "Fingerprinting messages",
+  matching: "Comparing messages",
+  grouping: "Grouping copies",
+  done: "Finishing"
+};
+
 export function DuplicateGroupsDialog({
   open,
   list,
@@ -37,12 +48,14 @@ export function DuplicateGroupsDialog({
   expanded,
   expandedId,
   loading,
-  scanning,
+  scan,
+  scanStarting,
   busyGroupId,
   readOnly,
   onClose,
   onRefresh,
   onScan,
+  onCancelScan,
   onChangeStatus,
   onToggleGroup,
   onConfirm,
@@ -53,9 +66,13 @@ export function DuplicateGroupsDialog({
   if (!open) return null;
   const groups = list?.groups ?? [];
   const duplicateMessages = groups.reduce((total, group) => total + Math.max(0, group.memberCount - 1), 0);
+  const scanning = isDuplicateScanActive(scan);
+  const busy = scanning || scanStarting;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!scanning) onClose(); }}>
+    // The dialog closes during a scan. The scan is a background job now, so holding the user here
+    // bought nothing - it only meant a scan they started locked them out of their own mail.
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         className="dialog duplicates-dialog"
         role="dialog"
@@ -66,16 +83,20 @@ export function DuplicateGroupsDialog({
         <header className="dialog-header">
           <div><Copy size={20} /><h2 id="duplicates-title">Duplicate messages</h2></div>
           <div className="dialog-header-actions">
-            {!readOnly && (
-              <button className="secondary-button" disabled={loading || scanning} onClick={onScan} title="Scan the archive for duplicates">
-                {scanning ? <LoaderCircle className="spin" size={15} /> : <ScanSearch size={15} />}
-                <span>{scanning ? "Scanning" : "Scan now"}</span>
+            {!readOnly && (scanning ? (
+              <button className="secondary-button" onClick={onCancelScan} title="Stop the running scan">
+                <X size={15} /><span>Stop scan</span>
               </button>
-            )}
-            <button className="icon-button" disabled={loading || scanning} onClick={onRefresh} title="Refresh" aria-label="Refresh duplicate groups">
+            ) : (
+              <button className="secondary-button" disabled={loading || scanStarting} onClick={onScan} title="Scan the archive for duplicates">
+                {scanStarting ? <LoaderCircle className="spin" size={15} /> : <ScanSearch size={15} />}
+                <span>Scan now</span>
+              </button>
+            ))}
+            <button className="icon-button" disabled={loading} onClick={onRefresh} title="Refresh" aria-label="Refresh duplicate groups">
               <RefreshCw className={loading ? "spin" : ""} size={17} />
             </button>
-            <button className="icon-button" disabled={scanning} onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
+            <button className="icon-button" onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
           </div>
         </header>
         <div className="dialog-body duplicates-body">
@@ -92,13 +113,25 @@ export function DuplicateGroupsDialog({
                 role="tab"
                 aria-selected={status === value}
                 className={status === value ? "active" : ""}
-                disabled={loading || scanning}
+                disabled={loading}
                 onClick={() => onChangeStatus(value)}
               >
                 {value === "pending" ? "Needs review" : "Confirmed"}
               </button>
             ))}
           </div>
+
+          {busy && <ScanProgress scan={scan} />}
+          {!busy && scan?.status === "failed" && (
+            <p className="duplicates-scan-failed" role="status">The last scan failed: {scan.message}</p>
+          )}
+          {!busy && scan?.status === "completed" && scan.skippedMessages > 0 && (
+            <p className="duplicates-note" role="status">
+              {scan.scannedMessages.toLocaleString()} messages were compared for near-duplicates and{" "}
+              {scan.skippedMessages.toLocaleString()} were past that limit — those were still checked for
+              identical copies.
+            </p>
+          )}
 
           <p className="duplicates-note">
             Detected locally with content fingerprints — no AI and no API cost. Nothing is ever deleted:
@@ -219,4 +252,33 @@ export function DuplicateGroupsDialog({
 
 function Metric({ value, label, tone = "neutral" }: { value: number; label: string; tone?: string }) {
   return <div className={`review-queue-metric ${tone}`}><strong>{value}</strong><span>{label}</span></div>;
+}
+
+/**
+ * Fingerprinting is the only phase with a countable total, so the bar is determinate there and
+ * indeterminate afterwards rather than inventing a percentage for the matching passes.
+ */
+function ScanProgress({ scan }: { scan: DuplicateScan | null }) {
+  const total = scan?.totalItems ?? 0;
+  const determinate = scan?.phase === "fingerprinting" && total > 0;
+  const percent = determinate ? Math.min(100, Math.round((scan!.processedItems / total) * 100)) : null;
+  return (
+    <div className="duplicates-scan-progress" role="status" aria-live="polite">
+      <div className="duplicates-scan-heading">
+        <LoaderCircle className="spin" size={15} />
+        <span>{scan ? PHASE_LABELS[scan.phase] : "Starting scan"}</span>
+        {percent !== null && <strong>{percent}%</strong>}
+      </div>
+      <div
+        className={`duplicates-scan-bar ${determinate ? "" : "indeterminate"}`}
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={determinate ? 100 : undefined}
+        aria-valuenow={percent ?? undefined}
+      >
+        <span style={determinate ? { width: `${percent}%` } : undefined} />
+      </div>
+      <small>You can close this and keep working — the scan runs in the background.</small>
+    </div>
+  );
 }

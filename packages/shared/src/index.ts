@@ -380,21 +380,50 @@ export interface DuplicateGroupMember {
   evidence: string[];
 }
 
+/**
+ * A duplicate scan is a background job, not something the request that starts it waits on: running
+ * it inline timed out at the proxy and took the API's connections with it. Everything below is what
+ * the dialog polls while it runs.
+ */
+export type DuplicateScanStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type DuplicateScanPhase = "queued" | "fingerprinting" | "matching" | "grouping" | "done";
+
+export interface DuplicateScan {
+  id: string;
+  status: DuplicateScanStatus;
+  phase: DuplicateScanPhase;
+  processedItems: number;
+  /** Messages needing a fingerprint when the scan started; null until that count is known. */
+  totalItems: number | null;
+  fingerprinted: number;
+  groupsCreated: number;
+  duplicateMessages: number;
+  /** Messages compared for near-duplicates. Capped, so this can be less than the archive. */
+  scannedMessages: number;
+  /** Messages past the near-duplicate cap — checked for identical copies only. */
+  skippedMessages: number;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+}
+
+export const DUPLICATE_SCAN_ACTIVE: readonly DuplicateScanStatus[] = ["queued", "running"];
+
+export function isDuplicateScanActive(scan: DuplicateScan | null | undefined): boolean {
+  return scan != null && DUPLICATE_SCAN_ACTIVE.includes(scan.status);
+}
+
 export interface DuplicateGroupList {
   groups: DuplicateGroup[];
   totalPending: number;
+  /** The owner's latest scan, so opening the dialog mid-scan shows it immediately. */
+  scan: DuplicateScan | null;
 }
 
 export interface DuplicateGroupDetail {
   group: DuplicateGroup;
   members: DuplicateGroupMember[];
-}
-
-export interface DuplicateScanResult {
-  fingerprinted: number;
-  groupsCreated: number;
-  duplicateMessages: number;
-  scannedAt: string;
 }
 
 export const duplicateGroupPatchSchema = z.object({

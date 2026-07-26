@@ -6,13 +6,17 @@ namespace ArchiveMail.Api.Ai;
 
 /// <summary>
 /// Deterministic duplicate detection (plan tiers 0-3). Runs entirely locally: no AI provider and no
-/// API cost. A background loop backfills message fingerprints; a scan groups messages with union-find
-/// and records reviewable duplicate groups. Nothing is ever deleted.
+/// API cost. Fingerprints are backfilled in batches; a scan groups messages with union-find and
+/// records reviewable duplicate groups. Nothing is ever deleted.
+///
+/// A scan is a claimed job (<c>ai_duplicate_scans</c>) driven by
+/// <see cref="DuplicateScanCoordinator"/>, not work done on the request thread. Every write below
+/// is batched for the same reason: the original scan issued two statements per message during
+/// fingerprinting and one per member and per dismissed pair afterwards, which on a real archive was
+/// hundreds of thousands of round trips inside a single HTTP request. It timed out at the proxy
+/// long before it finished, and while it ran nothing else could get a connection.
 /// </summary>
-public sealed class DeduplicationService(
-    NpgsqlDataSource database,
-    MailRepository mail,
-    ILogger<DeduplicationService> logger) : BackgroundService
+public sealed class DeduplicationService(NpgsqlDataSource database, MailRepository mail)
 {
     /// <summary>
     /// Maximum differing SimHash bits for two messages to count as near-duplicates. Email bodies are
@@ -22,8 +26,31 @@ public sealed class DeduplicationService(
     /// requires owner confirmation before anything is collapsed.
     /// </summary>
     internal const int NearDuplicateHammingThreshold = 6;
-    private const int FingerprintBatchSize = 200;
-    private const int NearDuplicateScanLimit = 50_000;
+
+    /// <summary>Batch size for the idle backfill, which runs beside a live API and stays small.</summary>
+    internal const int FingerprintBatchSize = 200;
+
+    /// <summary>
+    /// Batch size while a scan is running. Larger than the idle backfill because a batch is now two
+    /// statements regardless of its size, so the round-trip cost no longer scales with the count.
+    /// </summary>
+    internal const int ScanFingerprintBatchSize = 1_000;
+
+    /// <summary>
+    /// A pause between scan batches. The scan is background work behind a progress bar and nobody
+    /// is waiting on any single batch, so it deliberately leaves the connection pool and the disk
+    /// to whatever the user is doing in the app meanwhile.
+    /// </summary>
+    internal static readonly TimeSpan BatchPause = TimeSpan.FromMilliseconds(75);
+
+    /// <summary>
+    /// The candidate joins and the banding pass both run over an entire owner's mail, which on a
+    /// large archive is well past Npgsql's 30 second default. A timeout there used to surface as a
+    /// failed scan that had done all of its work.
+    /// </summary>
+    internal const int ScanCommandTimeoutSeconds = 600;
+
+    internal const int NearDuplicateScanLimit = 50_000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     // ---------- read/review API ----------
@@ -42,7 +69,9 @@ public sealed class DeduplicationService(
         await using (var reader = await command.ExecuteReaderAsync(token))
             while (await reader.ReadAsync(token)) groups.Add(GroupRow(reader));
         var pending = await CountAsync("pending", owner, token);
-        return new { groups, totalPending = pending };
+        // The in-flight scan rides along so opening the dialog - or reloading the page mid-scan -
+        // shows the running job straight away instead of an idle button.
+        return new { groups, totalPending = pending, scan = await LatestScanAsync(owner, token) };
     }
 
     public async Task<object?> GetGroupAsync(string id, string owner, CancellationToken token)
@@ -134,29 +163,175 @@ public sealed class DeduplicationService(
             while (await reader.ReadAsync(token)) members.Add(reader.GetString(0));
         }
         members.Sort(StringComparer.Ordinal);
+        var lefts = new List<string>();
+        var rights = new List<string>();
         for (var left = 0; left < members.Count; left++)
             for (var right = left + 1; right < members.Count; right++)
             {
-                await using var insert = database.CreateCommand(
-                    "INSERT INTO ai_not_duplicate_pairs(owner_user_id,left_message_id,right_message_id,created_at) "
-                    + "VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING");
-                insert.Parameters.AddWithValue(owner);
-                insert.Parameters.AddWithValue(members[left]);
-                insert.Parameters.AddWithValue(members[right]);
-                insert.Parameters.AddWithValue(now);
-                await insert.ExecuteNonQueryAsync(token);
+                lefts.Add(members[left]);
+                rights.Add(members[right]);
             }
+        if (lefts.Count == 0) return;
+        // Every pair in one statement: the combinations grow quadratically, so dismissing a group
+        // of thirty copies was 435 separate inserts while the user waited on the click.
+        await using var insert = database.CreateCommand(
+            "INSERT INTO ai_not_duplicate_pairs(owner_user_id,left_message_id,right_message_id,created_at) "
+            + "SELECT $1, pair.left_id, pair.right_id, $4 FROM unnest($2::text[], $3::text[]) AS pair(left_id, right_id) "
+            + "ON CONFLICT DO NOTHING");
+        insert.Parameters.AddWithValue(owner);
+        insert.Parameters.AddWithValue(lefts.ToArray());
+        insert.Parameters.AddWithValue(rights.ToArray());
+        insert.Parameters.AddWithValue(now);
+        await insert.ExecuteNonQueryAsync(token);
     }
+
+    // ---------- scan job ----------
+
+    private const string ScanColumns =
+        "id,status,phase,processed_items,total_items,fingerprinted,groups_created,duplicate_messages,"
+        + "scanned_messages,skipped_messages,message,created_at,updated_at,finished_at";
+
+    /// <summary>
+    /// Queues a scan and returns immediately. When one is already queued or running for this owner
+    /// the existing job comes back untouched: the active partial unique index makes that a database
+    /// guarantee, so two clicks - or two browser tabs - cannot start two passes over the same mail.
+    /// </summary>
+    public async Task<object> EnqueueScanAsync(string owner, CancellationToken token)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        await using (var insert = database.CreateCommand(
+            "INSERT INTO ai_duplicate_scans(id,owner_user_id,status,phase,message,created_at,updated_at) "
+            + "VALUES($1,$2,'queued','queued','Waiting for a worker',$3,$3) "
+            + "ON CONFLICT (owner_user_id) WHERE status IN ('queued','running') DO NOTHING"))
+        {
+            insert.Parameters.AddWithValue(Guid.NewGuid().ToString());
+            insert.Parameters.AddWithValue(owner);
+            insert.Parameters.AddWithValue(now);
+            await insert.ExecuteNonQueryAsync(token);
+        }
+        return await LatestScanAsync(owner, token)
+            ?? throw new InvalidOperationException("The duplicate scan could not be queued");
+    }
+
+    /// <summary>The owner's most recent scan, running or finished, or null if they have never run one.</summary>
+    public async Task<object?> LatestScanAsync(string owner, CancellationToken token)
+    {
+        await using var command = database.CreateCommand(
+            $"SELECT {ScanColumns} FROM ai_duplicate_scans WHERE owner_user_id=$1 "
+            + "ORDER BY CASE WHEN status IN ('queued','running') THEN 0 ELSE 1 END, created_at DESC LIMIT 1");
+        command.Parameters.AddWithValue(owner);
+        await using var reader = await command.ExecuteReaderAsync(token);
+        return await reader.ReadAsync(token) ? ScanRow(reader) : null;
+    }
+
+    /// <summary>
+    /// Flips an active scan to cancelled. The worker finds out at its next progress write, which is
+    /// scoped to status = 'running' - the same mechanism a combine uses - so it stops at a batch
+    /// boundary rather than being killed mid-statement.
+    /// </summary>
+    public async Task<object?> CancelScanAsync(string owner, CancellationToken token)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        await using (var command = database.CreateCommand(
+            "UPDATE ai_duplicate_scans SET status='cancelled',message='Scan cancelled',worker_id=NULL,"
+            + "lease_until=NULL,finished_at=$2,updated_at=$2 "
+            + "WHERE owner_user_id=$1 AND status IN ('queued','running')"))
+        {
+            command.Parameters.AddWithValue(owner);
+            command.Parameters.AddWithValue(now);
+            if (await command.ExecuteNonQueryAsync(token) == 0) return null;
+        }
+        return await LatestScanAsync(owner, token);
+    }
+
+    /// <summary>
+    /// Claims one queued scan, or one whose lease has expired because the worker holding it died.
+    /// Returns the scan id and the owner it belongs to.
+    /// </summary>
+    public async Task<(string Id, string Owner)?> ClaimScanAsync(
+        string workerId, TimeSpan lease, CancellationToken token)
+    {
+        const string sql = """
+            WITH candidate AS (
+              SELECT id FROM ai_duplicate_scans
+              WHERE status = 'queued'
+                 OR (status = 'running' AND (lease_until IS NULL OR lease_until < $1))
+              ORDER BY updated_at
+              FOR UPDATE SKIP LOCKED
+              LIMIT 1
+            )
+            UPDATE ai_duplicate_scans AS scan
+            SET status='running', phase='fingerprinting', worker_id=$2, lease_until=$3,
+                message='Fingerprinting messages', updated_at=$1
+            FROM candidate
+            WHERE scan.id = candidate.id
+            RETURNING scan.id, scan.owner_user_id
+            """;
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await database.OpenConnectionAsync(token);
+        await using var transaction = await connection.BeginTransactionAsync(token);
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue(now.ToString("O"));
+        command.Parameters.AddWithValue(workerId);
+        command.Parameters.AddWithValue(now.Add(lease).ToString("O"));
+        (string, string)? claimed = null;
+        await using (var reader = await command.ExecuteReaderAsync(token))
+            if (await reader.ReadAsync(token)) claimed = (reader.GetString(0), reader.GetString(1));
+        await transaction.CommitAsync(token);
+        return claimed;
+    }
+
+    /// <summary>
+    /// Writes progress and renews the lease in one statement, scoped to status = 'running'. Matching
+    /// nothing means the scan was cancelled or reclaimed, so the run gives up here rather than
+    /// carrying on writing groups nobody asked for.
+    /// </summary>
+    private async Task ReportAsync(
+        string scanId, string phase, string message, long processed, TimeSpan lease, CancellationToken token)
+    {
+        var now = DateTimeOffset.UtcNow;
+        await using var command = database.CreateCommand(
+            "UPDATE ai_duplicate_scans SET phase=$2,message=$3,processed_items=$4,lease_until=$5,updated_at=$6 "
+            + "WHERE id=$1 AND status='running'");
+        command.Parameters.AddWithValue(scanId);
+        command.Parameters.AddWithValue(phase);
+        command.Parameters.AddWithValue(message);
+        command.Parameters.AddWithValue(processed);
+        command.Parameters.AddWithValue(now.Add(lease).ToString("O"));
+        command.Parameters.AddWithValue(now.ToString("O"));
+        if (await command.ExecuteNonQueryAsync(token) != 1)
+            throw new OperationCanceledException("This duplicate scan is no longer running");
+    }
+
+    public async Task MarkScanFailedAsync(string scanId, string message, CancellationToken token)
+    {
+        await using var command = database.CreateCommand(
+            "UPDATE ai_duplicate_scans SET status='failed',message=$2,worker_id=NULL,lease_until=NULL,"
+            + "finished_at=$3,updated_at=$3 WHERE id=$1 AND status='running'");
+        command.Parameters.AddWithValue(scanId);
+        command.Parameters.AddWithValue(Truncate(message));
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
+    }
+
+    /// <summary>Failure text goes straight to the dialog, so it is bounded before it is stored.</summary>
+    private static string Truncate(string value) =>
+        value.Length <= 300 ? value : value[..300];
 
     // ---------- scan ----------
 
     /// <summary>
     /// Rebuilds pending duplicate groups for one owner. Confirmed groups and dismissed pairs are
     /// preserved: their members are excluded so an owner decision is never undone by a rescan.
+    ///
+    /// Runs under a claimed job: every phase reports progress, and a report that matches no running
+    /// row aborts the scan, which is how a cancel gets in.
     /// </summary>
-    public async Task<object> ScanAsync(string owner, CancellationToken token)
+    public async Task RunScanAsync(string scanId, string owner, TimeSpan lease, CancellationToken token)
     {
-        var fingerprinted = await FingerprintOwnerAsync(owner, token);
+        var fingerprinted = await FingerprintForScanAsync(scanId, owner, lease, token);
+        await ReportAsync(scanId, "matching", "Looking for identical copies", fingerprinted, lease, token);
+
         await using (var clear = database.CreateCommand(
             "DELETE FROM ai_duplicate_groups WHERE owner_user_id=$1 AND review_status='pending'"))
         {
@@ -168,7 +343,10 @@ public sealed class DeduplicationService(
         var notDuplicate = await LoadNotDuplicatePairsAsync(owner, token);
         var pairs = new List<(string Left, string Right, string Tier, string Evidence)>();
         pairs.AddRange(await ExactPairsAsync(owner, token));
-        pairs.AddRange(await NearDuplicatePairsAsync(owner, token));
+        await ReportAsync(scanId, "matching", "Comparing similar messages", fingerprinted, lease, token);
+        var (nearPairs, scanned, skipped) = await NearDuplicatePairsAsync(owner, token);
+        pairs.AddRange(nearPairs);
+        await ReportAsync(scanId, "grouping", "Grouping copies", fingerprinted, lease, token);
 
         var union = new UnionFind();
         var tiers = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -188,6 +366,7 @@ public sealed class DeduplicationService(
 
         var clusters = union.Clusters().Where(cluster => cluster.Count > 1).ToList();
         var now = DateTimeOffset.UtcNow.ToString("O");
+        var preferred = await PreferredCopiesAsync(clusters, token);
         var created = 0;
         foreach (var cluster in clusters)
         {
@@ -195,7 +374,6 @@ public sealed class DeduplicationService(
             var key = "u:" + cluster[0];
             var tier = cluster.Select(id => tiers.GetValueOrDefault(id, "near_duplicate"))
                 .OrderBy(TierRank).First();
-            var preferred = await PreferredCopyAsync(cluster, token);
             var groupId = Guid.NewGuid().ToString();
             await using (var insert = database.CreateCommand(
                 "INSERT INTO ai_duplicate_groups(id,owner_user_id,group_key,preferred_message_id,detection_tier,confidence,member_count,review_status,created_at,updated_at) "
@@ -207,7 +385,7 @@ public sealed class DeduplicationService(
                 insert.Parameters.AddWithValue(groupId);
                 insert.Parameters.AddWithValue(owner);
                 insert.Parameters.AddWithValue(key);
-                insert.Parameters.AddWithValue((object?)preferred ?? DBNull.Value);
+                insert.Parameters.AddWithValue((object?)preferred.GetValueOrDefault(key) ?? DBNull.Value);
                 insert.Parameters.AddWithValue(tier);
                 insert.Parameters.AddWithValue(TierConfidence(tier));
                 insert.Parameters.AddWithValue((long)cluster.Count);
@@ -219,28 +397,76 @@ public sealed class DeduplicationService(
                 wipe.Parameters.AddWithValue(groupId);
                 await wipe.ExecuteNonQueryAsync(token);
             }
-            foreach (var member in cluster)
+            await using (var insert = database.CreateCommand(MemberInsertSql))
             {
-                await using var insert = database.CreateCommand(
-                    "INSERT INTO ai_duplicate_members(group_id,message_id,relation,evidence_json,created_at) "
-                    + "VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING");
                 insert.Parameters.AddWithValue(groupId);
-                insert.Parameters.AddWithValue(member);
-                insert.Parameters.AddWithValue("same_message");
-                insert.Parameters.AddWithValue(JsonSerializer.Serialize(
-                    evidence.GetValueOrDefault(member, []), JsonOptions));
+                insert.Parameters.AddWithValue(cluster.ToArray());
+                insert.Parameters.AddWithValue(cluster
+                    .Select(member => JsonSerializer.Serialize(evidence.GetValueOrDefault(member, []), JsonOptions))
+                    .ToArray());
                 insert.Parameters.AddWithValue(now);
                 await insert.ExecuteNonQueryAsync(token);
             }
             created++;
+            // Groups land as they are built, so a scan cancelled halfway still leaves reviewable
+            // work behind, and the count in the dialog climbs while it runs.
+            if (created % 25 == 0)
+                await ReportAsync(scanId, "grouping", $"Grouping copies ({created} groups)", fingerprinted, lease, token);
         }
-        return new
-        {
+
+        await CompleteScanAsync(
+            scanId,
             fingerprinted,
-            groupsCreated = created,
-            duplicateMessages = clusters.Sum(cluster => cluster.Count),
-            scannedAt = now
-        };
+            created,
+            clusters.Sum(cluster => cluster.Count),
+            scanned,
+            skipped,
+            token);
+    }
+
+    /// <summary>
+    /// One statement for a whole group's members instead of one per member. Member counts are
+    /// usually small, but a scan that finds thousands of groups pays this per group.
+    /// </summary>
+    internal const string MemberInsertSql = """
+        INSERT INTO ai_duplicate_members(group_id,message_id,relation,evidence_json,created_at)
+        SELECT $1, member.message_id, 'same_message', member.evidence, $4
+        FROM unnest($2::text[], $3::text[]) AS member(message_id, evidence)
+        ON CONFLICT DO NOTHING
+        """;
+
+    /// <summary>
+    /// Records the outcome. Scoped to status = 'running' so a scan cancelled while the last groups
+    /// were being written is not reported back to the user as a completed one.
+    /// </summary>
+    private async Task CompleteScanAsync(
+        string scanId,
+        long fingerprinted,
+        long groupsCreated,
+        long duplicateMessages,
+        long scannedMessages,
+        long skippedMessages,
+        CancellationToken token)
+    {
+        // Near-duplicate coverage is capped, so a scan that did not look at everything says so
+        // rather than reporting a clean result over mail it never compared.
+        var message = skippedMessages > 0
+            ? $"Scan complete. {skippedMessages:N0} messages were past the near-duplicate limit and were only checked for identical copies."
+            : "Scan complete";
+        await using var command = database.CreateCommand(
+            "UPDATE ai_duplicate_scans SET status='completed',phase='done',message=$2,fingerprinted=$3,"
+            + "groups_created=$4,duplicate_messages=$5,scanned_messages=$6,skipped_messages=$7,"
+            + "processed_items=$3,worker_id=NULL,lease_until=NULL,finished_at=$8,updated_at=$8 "
+            + "WHERE id=$1 AND status='running'");
+        command.Parameters.AddWithValue(scanId);
+        command.Parameters.AddWithValue(message);
+        command.Parameters.AddWithValue(fingerprinted);
+        command.Parameters.AddWithValue(groupsCreated);
+        command.Parameters.AddWithValue(duplicateMessages);
+        command.Parameters.AddWithValue(scannedMessages);
+        command.Parameters.AddWithValue(skippedMessages);
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
     }
 
     /// <summary>Tiers 0-1: identical Message-ID, raw bytes, or normalized content hash.</summary>
@@ -268,6 +494,7 @@ public sealed class DeduplicationService(
             WHERE left_side.content_sha256 IS NOT NULL AND left_side.content_sha256 <> ''
             """;
         await using var command = database.CreateCommand(sql);
+        command.CommandTimeout = ScanCommandTimeoutSeconds;
         command.Parameters.AddWithValue(owner);
         var pairs = new List<(string, string, string, string)>();
         await using var reader = await command.ExecuteReaderAsync(token);
@@ -283,8 +510,13 @@ public sealed class DeduplicationService(
     /// Tier 2: SimHash banding. Candidates share a 16-bit band; a pair is kept only when the Hamming
     /// distance is within threshold AND the sender or normalized subject matches, so unrelated short
     /// messages are not collapsed together.
+    ///
+    /// Coverage is capped at <see cref="NearDuplicateScanLimit"/>, so this also reports how many of
+    /// the owner's fingerprinted messages it compared and how many it did not reach - a cap that
+    /// says nothing reads as "no near-duplicates" when it means "not looked at".
     /// </summary>
-    private async Task<List<(string, string, string, string)>> NearDuplicatePairsAsync(string owner, CancellationToken token)
+    private async Task<(List<(string, string, string, string)> Pairs, long Scanned, long Skipped)>
+        NearDuplicatePairsAsync(string owner, CancellationToken token)
     {
         const string sql = """
             SELECT m.id, m.simhash, lower(COALESCE(m.sender_address, '')), COALESCE(m.subject, ''), COALESCE(m.body_text, '')
@@ -293,6 +525,7 @@ public sealed class DeduplicationService(
             ORDER BY m.created_at DESC LIMIT $2
             """;
         await using var command = database.CreateCommand(sql);
+        command.CommandTimeout = ScanCommandTimeoutSeconds;
         command.Parameters.AddWithValue(owner);
         command.Parameters.AddWithValue((long)NearDuplicateScanLimit);
         var rows = new List<(string Id, long SimHash, string Sender, string Subject, string Digits)>();
@@ -301,6 +534,9 @@ public sealed class DeduplicationService(
                 rows.Add((reader.GetString(0), reader.GetInt64(1), reader.GetString(2),
                     MessageFingerprint.NormalizeSubject(reader.GetString(3)),
                     MessageFingerprint.DigitSignature(reader.GetString(4))));
+        var skipped = rows.Count < NearDuplicateScanLimit
+            ? 0
+            : Math.Max(0, await CountComparableAsync(owner, token) - rows.Count);
 
         var buckets = new Dictionary<string, List<int>>(StringComparer.Ordinal);
         for (var index = 0; index < rows.Count; index++)
@@ -333,15 +569,46 @@ public sealed class DeduplicationService(
                         $"near-duplicate body (hamming {distance}, {(sameSubject ? "same subject" : "same sender")})"));
                 }
         }
-        return pairs;
+        return (pairs, rows.Count, skipped);
     }
 
-    private async Task<string?> PreferredCopyAsync(List<string> cluster, CancellationToken token)
+    private async Task<long> CountComparableAsync(string owner, CancellationToken token)
     {
         await using var command = database.CreateCommand(
-            "SELECT id FROM messages WHERE id=ANY($1) ORDER BY COALESCE(received_at, sent_at, created_at), id LIMIT 1");
-        command.Parameters.AddWithValue(cluster.ToArray());
-        return Convert.ToString(await command.ExecuteScalarAsync(token));
+            "SELECT COUNT(*) FROM messages m JOIN archives a ON a.id=m.archive_id "
+            + "WHERE a.owner_user_id=$1 AND m.simhash IS NOT NULL AND m.simhash <> 0");
+        command.CommandTimeout = ScanCommandTimeoutSeconds;
+        command.Parameters.AddWithValue(owner);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(token));
+    }
+
+    /// <summary>
+    /// Picks the oldest copy in every cluster at once, keyed by group key. One query per cluster
+    /// meant a scan finding a few thousand groups spent a few thousand round trips deciding which
+    /// copy to prefer.
+    /// </summary>
+    private async Task<Dictionary<string, string?>> PreferredCopiesAsync(
+        List<List<string>> clusters, CancellationToken token)
+    {
+        var preferred = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (clusters.Count == 0) return preferred;
+        var all = clusters.SelectMany(cluster => cluster).Distinct(StringComparer.Ordinal).ToArray();
+        var order = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using (var command = database.CreateCommand(
+            "SELECT id, COALESCE(received_at, sent_at, created_at) FROM messages WHERE id=ANY($1)"))
+        {
+            command.CommandTimeout = ScanCommandTimeoutSeconds;
+            command.Parameters.AddWithValue(all);
+            await using var reader = await command.ExecuteReaderAsync(token);
+            while (await reader.ReadAsync(token)) order[reader.GetString(0)] = reader.GetString(1);
+        }
+        foreach (var cluster in clusters)
+        {
+            var sorted = cluster.OrderBy(id => order.GetValueOrDefault(id, ""), StringComparer.Ordinal)
+                .ThenBy(id => id, StringComparer.Ordinal);
+            preferred["u:" + cluster.Min(StringComparer.Ordinal)] = sorted.FirstOrDefault();
+        }
+        return preferred;
     }
 
     private async Task<HashSet<string>> LoadDecidedMessagesAsync(string owner, CancellationToken token)
@@ -369,20 +636,70 @@ public sealed class DeduplicationService(
 
     // ---------- fingerprint backfill ----------
 
-    /// <summary>Fingerprints this owner's unfingerprinted messages; returns how many were written.</summary>
-    public async Task<int> FingerprintOwnerAsync(string owner, CancellationToken token)
+    /// <summary>
+    /// Fingerprints this owner's unfingerprinted messages under a running scan, reporting progress
+    /// and pausing between batches. Returns how many were written.
+    /// </summary>
+    private async Task<long> FingerprintForScanAsync(
+        string scanId, string owner, TimeSpan lease, CancellationToken token)
     {
-        var total = 0;
+        var pending = await CountUnfingerprintedAsync(owner, token);
+        await SetScanTotalAsync(scanId, pending, token);
+        var total = 0L;
         while (true)
         {
-            var written = await FingerprintBatchAsync(owner, token);
+            var written = await FingerprintBatchAsync(owner, ScanFingerprintBatchSize, token);
+            if (written == 0) break;
             total += written;
-            if (written < FingerprintBatchSize) break;
+            await ReportAsync(
+                scanId, "fingerprinting", $"Fingerprinting messages ({total:N0} of {pending:N0})", total, lease, token);
+            await Task.Delay(BatchPause, token);
         }
         return total;
     }
 
-    private async Task<int> FingerprintBatchAsync(string? owner, CancellationToken token)
+    /// <summary>One batch for the idle backfill loop, outside any scan.</summary>
+    public Task<int> FingerprintIdleBatchAsync(CancellationToken token) =>
+        FingerprintBatchAsync(null, FingerprintBatchSize, token);
+
+    private async Task<long> CountUnfingerprintedAsync(string owner, CancellationToken token)
+    {
+        await using var command = database.CreateCommand(
+            "SELECT COUNT(*) FROM messages m JOIN archives a ON a.id=m.archive_id "
+            + "WHERE a.owner_user_id=$1 AND m.fingerprinted_at IS NULL");
+        command.CommandTimeout = ScanCommandTimeoutSeconds;
+        command.Parameters.AddWithValue(owner);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(token));
+    }
+
+    private async Task SetScanTotalAsync(string scanId, long total, CancellationToken token)
+    {
+        await using var command = database.CreateCommand(
+            "UPDATE ai_duplicate_scans SET total_items=$2,updated_at=$3 WHERE id=$1");
+        command.Parameters.AddWithValue(scanId);
+        command.Parameters.AddWithValue(total);
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
+    }
+
+    /// <summary>
+    /// Writes a whole batch of fingerprints back in one statement. This used to be one attachment
+    /// query and one UPDATE per message: 1.2 million round trips for a 600k archive, all of them on
+    /// the request thread, which is what turned a scan into a 504 and starved everything else of
+    /// connections while it ran.
+    /// </summary>
+    internal const string FingerprintWriteSql = """
+        UPDATE messages AS message
+        SET content_sha256 = fingerprint.content,
+            raw_sha256 = fingerprint.raw,
+            simhash = fingerprint.simhash,
+            fingerprinted_at = $5
+        FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[])
+          AS fingerprint(id, content, raw, simhash)
+        WHERE message.id = fingerprint.id
+        """;
+
+    private async Task<int> FingerprintBatchAsync(string? owner, int batchSize, CancellationToken token)
     {
         var sql = "SELECT m.id,m.subject,m.sender_address,m.body_text,m.headers_json FROM messages m "
             + (owner is null ? "" : "JOIN archives a ON a.id=m.archive_id ")
@@ -390,61 +707,59 @@ public sealed class DeduplicationService(
             + (owner is null ? "" : "AND a.owner_user_id=$2 ")
             + "ORDER BY m.created_at LIMIT $1";
         await using var command = database.CreateCommand(sql);
-        command.Parameters.AddWithValue((long)FingerprintBatchSize);
+        command.CommandTimeout = ScanCommandTimeoutSeconds;
+        command.Parameters.AddWithValue((long)batchSize);
         if (owner is not null) command.Parameters.AddWithValue(owner);
         var rows = new List<(string Id, string Subject, string Sender, string Body, string Headers)>();
         await using (var reader = await command.ExecuteReaderAsync(token))
             while (await reader.ReadAsync(token))
                 rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2),
                     reader.GetString(3), reader.GetString(4)));
+        if (rows.Count == 0) return 0;
 
-        var now = DateTimeOffset.UtcNow.ToString("O");
-        foreach (var row in rows)
+        var attachments = await AttachmentHashesAsync(rows.Select(row => row.Id).ToArray(), token);
+        var ids = new string[rows.Count];
+        var contents = new string[rows.Count];
+        var raws = new string[rows.Count];
+        var simhashes = new long[rows.Count];
+        for (var index = 0; index < rows.Count; index++)
         {
-            var attachments = await AttachmentHashesAsync(row.Id, token);
-            var content = MessageFingerprint.ContentHash(row.Subject, row.Sender, row.Body, attachments);
-            var raw = MessageFingerprint.RawHash($"{row.Headers}\n\n{row.Subject}\n{row.Sender}\n{row.Body}");
-            var simhash = MessageFingerprint.SimHash(row.Body);
-            await using var update = database.CreateCommand(
-                "UPDATE messages SET content_sha256=$2,raw_sha256=$3,simhash=$4,fingerprinted_at=$5 WHERE id=$1");
-            update.Parameters.AddWithValue(row.Id);
-            update.Parameters.AddWithValue(content);
-            update.Parameters.AddWithValue(raw);
-            update.Parameters.AddWithValue(simhash);
-            update.Parameters.AddWithValue(now);
-            await update.ExecuteNonQueryAsync(token);
+            var row = rows[index];
+            ids[index] = row.Id;
+            contents[index] = MessageFingerprint.ContentHash(
+                row.Subject, row.Sender, row.Body, attachments.GetValueOrDefault(row.Id));
+            raws[index] = MessageFingerprint.RawHash($"{row.Headers}\n\n{row.Subject}\n{row.Sender}\n{row.Body}");
+            simhashes[index] = MessageFingerprint.SimHash(row.Body);
         }
+
+        await using var write = database.CreateCommand(FingerprintWriteSql);
+        write.CommandTimeout = ScanCommandTimeoutSeconds;
+        write.Parameters.AddWithValue(ids);
+        write.Parameters.AddWithValue(contents);
+        write.Parameters.AddWithValue(raws);
+        write.Parameters.AddWithValue(simhashes);
+        write.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await write.ExecuteNonQueryAsync(token);
         return rows.Count;
     }
 
-    private async Task<List<string>> AttachmentHashesAsync(string messageId, CancellationToken token)
+    /// <summary>Attachment digests for a whole batch, keyed by message.</summary>
+    private async Task<Dictionary<string, List<string>>> AttachmentHashesAsync(
+        string[] messageIds, CancellationToken token)
     {
-        var hashes = new List<string>();
+        var hashes = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         await using var command = database.CreateCommand(
-            "SELECT blob_sha256 FROM attachments WHERE message_id=$1");
-        command.Parameters.AddWithValue(messageId);
+            "SELECT message_id, blob_sha256 FROM attachments WHERE message_id=ANY($1) AND blob_sha256 IS NOT NULL");
+        command.CommandTimeout = ScanCommandTimeoutSeconds;
+        command.Parameters.AddWithValue(messageIds);
         await using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
-            if (!reader.IsDBNull(0)) hashes.Add(reader.GetString(0));
-        return hashes;
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
         {
-            try
-            {
-                var written = await FingerprintBatchAsync(null, stoppingToken);
-                await Task.Delay(written == 0 ? TimeSpan.FromSeconds(30) : TimeSpan.FromMilliseconds(250), stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-            catch (Exception error)
-            {
-                logger.LogError(error, "Duplicate fingerprint backfill iteration failed");
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-            }
+            var id = reader.GetString(0);
+            if (!hashes.TryGetValue(id, out var list)) hashes[id] = list = [];
+            list.Add(reader.GetString(1));
         }
+        return hashes;
     }
 
     // ---------- helpers ----------
@@ -477,6 +792,24 @@ public sealed class DeduplicationService(
         "raw_hash" => "identical raw message bytes",
         "content_hash" => "identical normalized content and attachments",
         _ => "near-duplicate body"
+    };
+
+    private static object ScanRow(NpgsqlDataReader r) => new
+    {
+        id = r.GetString(0),
+        status = r.GetString(1),
+        phase = r.GetString(2),
+        processedItems = r.GetInt64(3),
+        totalItems = r.IsDBNull(4) ? (long?)null : r.GetInt64(4),
+        fingerprinted = r.GetInt64(5),
+        groupsCreated = r.GetInt64(6),
+        duplicateMessages = r.GetInt64(7),
+        scannedMessages = r.GetInt64(8),
+        skippedMessages = r.GetInt64(9),
+        message = r.GetString(10),
+        createdAt = r.GetString(11),
+        updatedAt = r.GetString(12),
+        finishedAt = r.IsDBNull(13) ? null : r.GetString(13)
     };
 
     private static object GroupRow(NpgsqlDataReader r) => new

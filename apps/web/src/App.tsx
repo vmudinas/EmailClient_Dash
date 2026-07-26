@@ -58,6 +58,7 @@ import type {
   DuplicateGroupDetail,
   DuplicateGroupList,
   DuplicateReviewStatus,
+  DuplicateScan,
   InboxTabSettings,
   LocalMessageStatePatch,
   MessageActionSuggestion,
@@ -70,7 +71,7 @@ import type {
   StockQuote,
   UserScreenId
 } from "@email-client/shared";
-import { DEFAULT_INBOX_TABS, userCanAccessScreen } from "@email-client/shared";
+import { DEFAULT_INBOX_TABS, isDuplicateScanActive, userCanAccessScreen } from "@email-client/shared";
 import { Sidebar } from "./components/Sidebar.js";
 import {
   MessageList,
@@ -302,7 +303,8 @@ export function App() {
   const [duplicateExpanded, setDuplicateExpanded] = useState<DuplicateGroupDetail | null>(null);
   const [duplicateExpandedId, setDuplicateExpandedId] = useState<string | null>(null);
   const [duplicatesLoading, setDuplicatesLoading] = useState(false);
-  const [duplicateScanning, setDuplicateScanning] = useState(false);
+  const [duplicateScan, setDuplicateScan] = useState<DuplicateScan | null>(null);
+  const [duplicateScanStarting, setDuplicateScanStarting] = useState(false);
   const [duplicateBusyId, setDuplicateBusyId] = useState<string | null>(null);
   const [reviewActionBusyId, setReviewActionBusyId] = useState<string | null>(null);
   const [reviewAllBusy, setReviewAllBusy] = useState(false);
@@ -1376,7 +1378,9 @@ export function App() {
     if (!api || !aiScreenAllowed) return;
     setDuplicatesLoading(true);
     try {
-      setDuplicateList(await api.listDuplicateGroups(status));
+      const list = await api.listDuplicateGroups(status);
+      setDuplicateList(list);
+      setDuplicateScan(list.scan);
     } catch (error) {
       showError(error instanceof Error ? error.message : "Duplicate groups could not be loaded");
     } finally {
@@ -1390,6 +1394,37 @@ export function App() {
     setDuplicateExpandedId(null);
     void refreshDuplicates(duplicateStatus);
   };
+
+  // Follows a running scan wherever the user goes: the poll is not tied to the dialog being open,
+  // so closing it does not lose the job, and the result still lands as a message when it finishes.
+  useEffect(() => {
+    if (!api || !aiScreenAllowed || !isDuplicateScanActive(duplicateScan)) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const scan = await api.getDuplicateScan();
+          if (cancelled) return;
+          setDuplicateScan(scan);
+          if (isDuplicateScanActive(scan)) return;
+          void refreshDuplicates(duplicateStatus);
+          if (scan?.status === "completed") {
+            showError(scan.groupsCreated === 0
+              ? "No duplicate copies were found."
+              : `Found ${scan.groupsCreated} duplicate ${scan.groupsCreated === 1 ? "group" : "groups"} covering ${scan.duplicateMessages} messages.`);
+          } else if (scan?.status === "failed") {
+            showError(`The duplicate scan failed: ${scan.message}`);
+          }
+        } catch {
+          // A poll that misses is not worth a message; the next tick tries again.
+        }
+      })();
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [api, aiScreenAllowed, duplicateScan, duplicateStatus, refreshDuplicates, showError]);
 
   const toggleDuplicateGroup = async (group: DuplicateGroup) => {
     if (!api) return;
@@ -1410,19 +1445,26 @@ export function App() {
 
   const scanDuplicates = async () => {
     if (!api || readOnly) return;
-    setDuplicateScanning(true);
+    setDuplicateScanStarting(true);
     try {
-      const result = await api.scanDuplicates();
       setDuplicateExpanded(null);
       setDuplicateExpandedId(null);
-      await refreshDuplicates(duplicateStatus);
-      showError(result.groupsCreated === 0
-        ? "No duplicate copies were found."
-        : `Found ${result.groupsCreated} duplicate ${result.groupsCreated === 1 ? "group" : "groups"} covering ${result.duplicateMessages} messages.`);
+      // Returns as soon as the job is queued. A worker runs it; the effect below follows along, so
+      // the dialog can be closed and the rest of the app keeps working while it does.
+      setDuplicateScan(await api.startDuplicateScan());
     } catch (error) {
-      showError(error instanceof Error ? error.message : "The duplicate scan could not run");
+      showError(error instanceof Error ? error.message : "The duplicate scan could not be started");
     } finally {
-      setDuplicateScanning(false);
+      setDuplicateScanStarting(false);
+    }
+  };
+
+  const cancelDuplicateScan = async () => {
+    if (!api || readOnly) return;
+    try {
+      setDuplicateScan(await api.cancelDuplicateScan());
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "The duplicate scan could not be cancelled");
     }
   };
 
@@ -2829,12 +2871,14 @@ export function App() {
         expanded={duplicateExpanded}
         expandedId={duplicateExpandedId}
         loading={duplicatesLoading}
-        scanning={duplicateScanning}
+        scan={duplicateScan}
+        scanStarting={duplicateScanStarting}
         busyGroupId={duplicateBusyId}
         readOnly={readOnly}
         onClose={() => setDuplicatesOpen(false)}
         onRefresh={() => void refreshDuplicates(duplicateStatus)}
         onScan={() => void scanDuplicates()}
+        onCancelScan={() => void cancelDuplicateScan()}
         onChangeStatus={(status) => {
           setDuplicateStatus(status);
           setDuplicateExpanded(null);

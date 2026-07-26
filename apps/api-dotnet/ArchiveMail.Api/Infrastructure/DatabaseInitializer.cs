@@ -303,6 +303,14 @@ public sealed class DatabaseInitializer(
           WHERE content_sha256 IS NOT NULL;
         CREATE INDEX IF NOT EXISTS messages_internet_id_idx ON messages(archive_id, internet_message_id)
           WHERE internet_message_id IS NOT NULL;
+        -- The duplicate scan matches across every archive an owner has, so it joins on these two
+        -- columns alone. messages_internet_id_idx leads with archive_id and cannot serve that, and
+        -- raw_sha256 had no index at all, which left two of the three exact-match tiers running as
+        -- sequential scans over the whole table.
+        CREATE INDEX IF NOT EXISTS messages_internet_id_global_idx ON messages(internet_message_id)
+          WHERE internet_message_id IS NOT NULL AND internet_message_id <> '';
+        CREATE INDEX IF NOT EXISTS messages_raw_hash_idx ON messages(raw_sha256)
+          WHERE raw_sha256 IS NOT NULL;
         CREATE INDEX IF NOT EXISTS messages_fingerprint_pending_idx ON messages(created_at)
           WHERE fingerprinted_at IS NULL;
         CREATE INDEX IF NOT EXISTS messages_archive_date_idx ON messages(archive_id, received_at DESC, sent_at DESC);
@@ -851,6 +859,42 @@ public sealed class DatabaseInitializer(
           created_at TEXT NOT NULL,
           PRIMARY KEY(owner_user_id, left_message_id, right_message_id)
         );
+
+        -- A duplicate scan used to run inline on the POST that started it, which on any real
+        -- archive outlived the reverse proxy's patience: the browser got a 504, the request was
+        -- aborted, and the work was thrown away having already saturated the database on its way
+        -- out. It is a claimed job now, the same shape as a combine, so the enqueue returns at once
+        -- and the scan survives a restart.
+        CREATE TABLE IF NOT EXISTS ai_duplicate_scans (
+          id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN (
+            'queued', 'running', 'completed', 'failed', 'cancelled'
+          )),
+          phase TEXT NOT NULL DEFAULT 'queued' CHECK(phase IN (
+            'queued', 'fingerprinting', 'matching', 'grouping', 'done'
+          )),
+          processed_items BIGINT NOT NULL DEFAULT 0,
+          total_items BIGINT,
+          fingerprinted BIGINT NOT NULL DEFAULT 0,
+          groups_created BIGINT NOT NULL DEFAULT 0,
+          duplicate_messages BIGINT NOT NULL DEFAULT 0,
+          scanned_messages BIGINT NOT NULL DEFAULT 0,
+          skipped_messages BIGINT NOT NULL DEFAULT 0,
+          message TEXT NOT NULL DEFAULT '',
+          worker_id TEXT,
+          lease_until TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS ai_duplicate_scans_owner_idx
+          ON ai_duplicate_scans(owner_user_id, created_at DESC);
+        -- One active scan per owner, enforced by the database rather than by a check-then-insert
+        -- that two clicks can both pass. The enqueue infers this index and hands back whatever is
+        -- already running instead of queueing a second pass over the same mail.
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_duplicate_scans_active_idx
+          ON ai_duplicate_scans(owner_user_id) WHERE status IN ('queued', 'running');
 
         CREATE TABLE IF NOT EXISTS ai_questions (
           id TEXT PRIMARY KEY,
