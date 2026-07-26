@@ -16,7 +16,7 @@ import type {
   DuplicateGroupList,
   DuplicateGroupPatch,
   DuplicateReviewStatus,
-  DuplicateScanResult,
+  DuplicateScan,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleUpdate,
@@ -887,8 +887,17 @@ export class ApiClient {
     });
   }
 
-  scanDuplicates(): Promise<DuplicateScanResult> {
+  /** Queues a scan and returns at once; poll {@link getDuplicateScan} for progress. */
+  startDuplicateScan(): Promise<DuplicateScan> {
     return this.request("/api/ai/duplicates/scan", { method: "POST" });
+  }
+
+  getDuplicateScan(): Promise<DuplicateScan | null> {
+    return this.request("/api/ai/duplicates/scan");
+  }
+
+  cancelDuplicateScan(): Promise<DuplicateScan> {
+    return this.request("/api/ai/duplicates/scan/cancel", { method: "POST" });
   }
 
   getAiJob(jobId: string): Promise<AiJob> {

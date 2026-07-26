@@ -75,7 +75,7 @@ builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequired
 builder.Services.AddHostedService<GmailScheduledSyncService>();
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<AiService>());
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<SmartRuleService>());
-builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<DeduplicationService>());
+builder.Services.AddHostedService<DuplicateScanCoordinator>();
 builder.Services.AddHostedService<PropertyAutomationHostedService>();
 builder.Services.AddHttpClient("external", client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddHttpClient("ai", client => client.Timeout = TimeSpan.FromMinutes(2));

@@ -10159,6 +10159,79 @@ textarea:focus-visible {
   line-height: 1.45;
 }
 
+.duplicates-scan-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.duplicates-scan-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.duplicates-scan-heading strong {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.duplicates-scan-progress small {
+  color: var(--faint);
+  font-size: 0.74rem;
+}
+
+.duplicates-scan-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.duplicates-scan-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+/* The matching and grouping passes have no countable total, so the bar sweeps instead of lying
+   about a percentage. */
+.duplicates-scan-bar.indeterminate span {
+  width: 35%;
+  animation: duplicates-scan-sweep 1.2s ease-in-out infinite;
+}
+
+@keyframes duplicates-scan-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(285%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .duplicates-scan-bar.indeterminate span {
+    animation: none;
+    width: 100%;
+    opacity: 0.55;
+  }
+}
+
+.duplicates-scan-failed {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 10px;
+  color: var(--red-dark, #b42318);
+  background: var(--red-soft, rgba(217, 45, 32, 0.1));
+  font-size: 0.8rem;
+}
+
 .duplicates-list {
   display: flex;
   flex-direction: column;

@@ -34,8 +34,14 @@ public static class AiEndpoints
             await duplicates.GetGroupAsync(groupId,Session(context).User.Id,token) is{} group?Results.Ok(group):Results.NotFound(new{error="Duplicate group not found"})).WithTags("AI duplicates");
         app.MapPatch("/api/ai/duplicates/{groupId}",async(string groupId,JsonElement input,HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
         {try{return await duplicates.UpdateGroupAsync(groupId,input,Session(context).User.Id,token) is{} group?Results.Ok(group):Results.NotFound(new{error="Duplicate group not found"});}catch(Exception error){return Error(error);}}).WithTags("AI duplicates");
+        // Enqueue only - the scan itself runs in DuplicateScanCoordinator. Running it inline here
+        // is what produced the 504s, so this endpoint must never do more than write one row.
         app.MapPost("/api/ai/duplicates/scan",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
-        {try{return Results.Ok(await duplicates.ScanAsync(Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI duplicates");
+        {try{return Results.Accepted(value:await duplicates.EnqueueScanAsync(Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI duplicates");
+        app.MapGet("/api/ai/duplicates/scan",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
+            Results.Ok(await duplicates.LatestScanAsync(Session(context).User.Id,token))).WithTags("AI duplicates");
+        app.MapPost("/api/ai/duplicates/scan/cancel",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
+            await duplicates.CancelScanAsync(Session(context).User.Id,token) is{} scan?Results.Ok(scan):Results.NotFound(new{error="No duplicate scan is running"})).WithTags("AI duplicates");
 
         app.MapGet("/api/admin/ai-schedules",async(HttpContext context,AiService ai,CancellationToken token)=>Admin(context)?Results.Ok(await ai.ListSchedulesAsync(Session(context).User.Id,token)):Results.Forbid()).WithTags("AI schedules");
         app.MapPost("/api/admin/ai-schedules",async(JsonElement input,HttpContext context,AiService ai,CancellationToken token)=>

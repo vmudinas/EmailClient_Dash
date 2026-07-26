@@ -85,6 +85,71 @@ public sealed class DeduplicationServiceTests
     }
 
     [Fact]
+    public void Scan_is_a_claimable_job_rather_than_work_done_on_the_request()
+    {
+        // The inline scan timed out at the proxy on any real archive. The job table is what lets
+        // the enqueue return immediately and the work survive a restart.
+        Assert.Contains(
+            "CREATE TABLE IF NOT EXISTS ai_duplicate_scans (",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Only_one_scan_per_owner_can_be_active_at_a_time()
+    {
+        // Enforced by the database, not by a check-then-insert two clicks can both pass.
+        Assert.Contains(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ai_duplicate_scans_active_idx",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ON ai_duplicate_scans(owner_user_id) WHERE status IN ('queued', 'running');",
+            DatabaseInitializer.ConnectedServicesSchemaSql,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cross_archive_match_columns_are_indexed_for_the_way_the_scan_joins_them()
+    {
+        // messages_internet_id_idx leads with archive_id, so it cannot serve an owner-wide join on
+        // internet_message_id alone, and raw_sha256 had no index at all. Two of the three exact
+        // tiers were sequential scans over the whole table.
+        foreach (var expected in new[]
+        {
+            "CREATE INDEX IF NOT EXISTS messages_internet_id_global_idx ON messages(internet_message_id)",
+            "CREATE INDEX IF NOT EXISTS messages_raw_hash_idx ON messages(raw_sha256)"
+        })
+            Assert.Contains(expected, DatabaseInitializer.CoreSchemaSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fingerprints_are_written_a_batch_at_a_time()
+    {
+        // One UPDATE and one attachment SELECT per message was 1.2 million round trips on a 600k
+        // archive. The set-returning write is what keeps a batch to a single statement.
+        Assert.Contains("FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[])",
+            DeduplicationService.FingerprintWriteSql, StringComparison.Ordinal);
+        Assert.Contains("AS fingerprint(id, content, raw, simhash)",
+            DeduplicationService.FingerprintWriteSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Group_members_are_written_in_one_statement()
+    {
+        Assert.Contains("FROM unnest($2::text[], $3::text[]) AS member(message_id, evidence)",
+            DeduplicationService.MemberInsertSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Scan_queries_are_given_room_to_outlast_the_default_command_timeout()
+    {
+        // A timeout in the middle of the candidate join used to surface as a failed scan that had
+        // already done all of its work.
+        Assert.True(DeduplicationService.ScanCommandTimeoutSeconds >= 600);
+    }
+
+    [Fact]
     public void Ask_history_table_records_questions_without_storing_excerpt_bodies()
     {
         Assert.Contains(
