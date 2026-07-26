@@ -246,14 +246,7 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
         }
         if (sourceType is null) return false;
 
-        // Clearing a file import discards what it produced, so it drops the archive and lets the
-        // cascade take the job row with it. A combine's archive_id is the archive that SURVIVED
-        // the merge - the user's combined mail - so clearing it must remove the job row and
-        // nothing else.
-        var deleteSql = sourceType == CombineSourceType
-            ? "DELETE FROM import_jobs WHERE id = $1"
-            : "DELETE FROM archives WHERE id = (SELECT archive_id FROM import_jobs WHERE id = $1)";
-        await using (var delete = new NpgsqlCommand(deleteSql, connection, transaction))
+        await using (var delete = new NpgsqlCommand(ClearSqlFor(sourceType), connection, transaction))
         {
             delete.Parameters.AddWithValue(id);
             await delete.ExecuteNonQueryAsync(cancellationToken);
@@ -262,6 +255,16 @@ public sealed class ImportJobRepository(NpgsqlDataSource database)
         await transaction.CommitAsync(cancellationToken);
         return true;
     }
+
+    /// <summary>
+    /// Clearing a file import discards what it produced, so it drops the archive and lets the
+    /// cascade take the job row with it. A combine's archive_id is the archive that SURVIVED the
+    /// merge - the user's combined mail - so clearing one must remove the job row and nothing
+    /// else. Split out from <see cref="ClearAsync"/> so that difference is directly testable.
+    /// </summary>
+    internal static string ClearSqlFor(string sourceType) => sourceType == CombineSourceType
+        ? "DELETE FROM import_jobs WHERE id = $1"
+        : "DELETE FROM archives WHERE id = (SELECT archive_id FROM import_jobs WHERE id = $1)";
 
     public async Task MarkFailedAsync(string id, string message, CancellationToken cancellationToken) =>
         await UpdateStateAsync(id, "failed", message, canResume: true, cancellationToken);
