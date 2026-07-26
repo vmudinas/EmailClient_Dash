@@ -40,6 +40,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Tags,
   TrendingUp,
   Trash2,
   UserPlus,
@@ -75,6 +76,8 @@ import type {
   SmartMailRuleSuggestion,
   InboxTabDefinition,
   InboxTabSettings,
+  OrganizeLabelSummary,
+  OrganizeRun,
   UserScreenId,
   UserSummary
 } from "@email-client/shared";
@@ -85,7 +88,8 @@ import {
 
   NEWS_SOURCE_IDS,
   NEWS_SOURCE_LABELS,
-  USER_SCREENS
+  USER_SCREENS,
+  isOrganizeRunActive
 } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
@@ -1153,6 +1157,12 @@ function SenderFilingPanel({
   const [destinationFolderId, setDestinationFolderId] = useState("");
   const [destinationFolderName, setDestinationFolderName] = useState("");
   const [applyExisting, setApplyExisting] = useState(true);
+  const [organizeRun, setOrganizeRun] = useState<OrganizeRun | null>(null);
+  const [organizeLabels, setOrganizeLabels] = useState<OrganizeLabelSummary | null>(null);
+  const organizeActive = isOrganizeRunActive(organizeRun);
+  const organizePercent = organizeRun?.totalItems
+    ? Math.min(100, Math.round((organizeRun.processedItems / organizeRun.totalItems) * 100))
+    : null;
 
   useEffect(() => {
     let active = true;
@@ -1169,6 +1179,20 @@ function SenderFilingPanel({
     });
     return () => { active = false; };
   }, [api, onError]);
+
+  // Picks up a run started before this dialog was opened - or before the page was reloaded - so the
+  // progress bar is there rather than an idle button while a worker is halfway through.
+  useEffect(() => {
+    let active = true;
+    void Promise.all([api.getOrganizeRun(), api.getOrganizeLabels(archiveId || undefined)])
+      .then(([run, labels]) => {
+        if (!active) return;
+        setOrganizeRun(run);
+        setOrganizeLabels(labels);
+      })
+      .catch(() => { /* Labels are a convenience; never block the panel on them. */ });
+    return () => { active = false; };
+  }, [api, archiveId]);
 
   const loadStatus = useCallback(async (selectedArchiveId: string) => {
     if (!selectedArchiveId) {
@@ -1273,6 +1297,50 @@ function SenderFilingPanel({
       onBusy(false);
     }
   };
+
+  // Organize labels rather than files: it never moves a message, so unlike the top-20 pass it has
+  // nothing to undo and no folder tree to reshape.
+  const startOrganize = async () => {
+    if (!window.confirm(
+      "Label every message by sender, kind, importance and how commercial it is?"
+      + "\n\nRules handle most of it for free. Anything they cannot settle is sent to your AI provider"
+      + " in batches, which uses your API credit. Nothing is moved or deleted."
+    )) return;
+    onError("");
+    try {
+      setOrganizeRun(await api.startOrganize(archiveId ? { archiveId } : {}));
+    } catch (organizeError) {
+      onError(errorText(organizeError));
+    }
+  };
+
+  const stopOrganize = async () => {
+    try {
+      setOrganizeRun(await api.cancelOrganize());
+    } catch (organizeError) {
+      onError(errorText(organizeError));
+    }
+  };
+
+  // Follows the run wherever the user goes in Settings; the work itself is on a worker.
+  useEffect(() => {
+    if (!isOrganizeRunActive(organizeRun)) return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const run = await api.getOrganizeRun();
+          setOrganizeRun(run);
+          if (isOrganizeRunActive(run)) return;
+          setOrganizeLabels(await api.getOrganizeLabels(archiveId || undefined));
+          if (run?.status === "completed") onNotice(run.message);
+          else if (run?.status === "failed") onError(`Organize failed: ${run.message}`);
+        } catch {
+          // A missed poll is not worth a message; the next tick tries again.
+        }
+      })();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [api, archiveId, organizeRun, onNotice, onError]);
 
   const changeRuleFolder = async (rule: SenderFilingStatus["rules"][number], folderId: string) => {
     if (folderId === rule.folderId) return;
@@ -1398,11 +1466,24 @@ function SenderFilingPanel({
       </form>
       <div className="settings-form">
         <h4>Automatic suggestions</h4>
-        <small>Create local folders for up to 20 of the most frequent senders in the selected archive's Inbox.</small>
+        <small>
+          <strong>Organize top 20</strong> files mail into folders for the selected archive's most frequent
+          Inbox senders. <strong>Organize</strong> leaves every message where it is and labels it instead —
+          by sender, kind, importance, and how commercial it is.
+        </small>
         <div className="settings-button-row">
           <button type="button" className="primary-button compact" disabled={busy || loading || !archiveId} onClick={() => void organize()}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <ListFilter size={16} />} Organize top 20
           </button>
+          {organizeActive ? (
+            <button type="button" className="secondary-button" onClick={() => void stopOrganize()}>
+              <X size={16} /> Stop organizing
+            </button>
+          ) : (
+            <button type="button" className="primary-button compact" disabled={busy || loading} onClick={() => void startOrganize()}>
+              <Tags size={16} /> Organize
+            </button>
+          )}
           {status?.enabled && (
             <button type="button" className="danger-button" disabled={busy} onClick={() => void disable()}><Power size={16} /> Disable rules</button>
           )}
@@ -1412,6 +1493,48 @@ function SenderFilingPanel({
         </div>
         {status?.lastRunAt && (
           <small>Last run {formatDate(status.lastRunAt)} · moved {status.lastRunMovedMessages.toLocaleString()} · created {status.lastRunCreatedFolders.toLocaleString()} folders</small>
+        )}
+        {organizeActive && (
+          <div className="organize-progress" role="status" aria-live="polite">
+            <div className="organize-progress-heading">
+              <LoaderCircle className="spin" size={15} />
+              <span>{organizeRun?.message || "Labelling messages"}</span>
+              {organizePercent !== null && <strong>{organizePercent}%</strong>}
+            </div>
+            <div className="organize-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={organizePercent ?? undefined}>
+              <span style={organizePercent === null ? undefined : { width: `${organizePercent}%` }} />
+            </div>
+            <small>Runs in the background — you can close Settings. Nothing is moved or deleted.</small>
+          </div>
+        )}
+        {!organizeActive && organizeRun?.status === "completed" && (
+          <small>
+            Organized {organizeRun.processedItems.toLocaleString()} · {organizeRun.labelledByRules.toLocaleString()} by rules
+            {organizeRun.labelledByAi > 0
+              ? ` · ${organizeRun.labelledByAi.toLocaleString()} by AI in ${organizeRun.aiRequests.toLocaleString()} request${organizeRun.aiRequests === 1 ? "" : "s"}`
+              : " · no AI needed"}
+          </small>
+        )}
+        {organizeLabels && !organizeActive && (
+          <div className="organize-label-summary">
+            {(["type", "importance", "commercial"] as const).map((axis) => (
+              organizeLabels[axis].length === 0 ? null : (
+                <div key={axis}>
+                  <strong>{axis}</strong>
+                  <div className="organize-chips">
+                    {organizeLabels[axis].slice(0, 8).map((entry) => (
+                      <span key={entry.value} className={`organize-chip axis-${axis} value-${entry.value}`}>
+                        {entry.value.replace(/_/g, " ")} <em>{entry.count.toLocaleString()}</em>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )
+            ))}
+            {organizeLabels.unlabelled > 0 && (
+              <small>{organizeLabels.unlabelled.toLocaleString()} messages are not organized yet.</small>
+            )}
+          </div>
         )}
       </div>
       {loading && !status ? (

@@ -11613,3 +11613,105 @@ textarea:focus-visible {
     padding: 12px;
   }
 }
+
+/* --- Organize: labels rather than folders --- */
+
+.organize-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.organize-progress-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.organize-progress-heading strong {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.organize-progress small { color: var(--faint); font-size: 0.74rem; }
+
+.organize-progress-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.organize-progress-bar span {
+  display: block;
+  height: 100%;
+  width: 35%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.organize-label-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 4px;
+}
+
+.organize-label-summary > div > strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+
+.organize-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+
+/* Shared by the summary chips in Settings and the inline chips on a message row. */
+.organize-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-muted, var(--surface));
+  color: var(--faint);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.organize-chip em { font-style: normal; opacity: 0.7; font-variant-numeric: tabular-nums; }
+
+.organize-chip.importance-critical,
+.organize-chip.value-critical {
+  color: var(--red-dark, #b42318);
+  background: var(--red-soft, rgba(217, 45, 32, 0.1));
+  border-color: transparent;
+}
+
+.organize-chip.importance-high,
+.organize-chip.value-high {
+  color: var(--amber-dark, #b54708);
+  background: var(--amber-soft, rgba(247, 144, 9, 0.12));
+  border-color: transparent;
+}
+
+.organize-chip.commercial-advertising,
+.organize-chip.commercial-promotional,
+.organize-chip.value-advertising,
+.organize-chip.value-promotional {
+  color: var(--faint);
+  background: transparent;
+}

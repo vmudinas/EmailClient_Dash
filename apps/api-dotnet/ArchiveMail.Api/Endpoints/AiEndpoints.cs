@@ -43,6 +43,19 @@ public static class AiEndpoints
         app.MapPost("/api/ai/duplicates/scan/cancel",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
             await duplicates.CancelScanAsync(Session(context).User.Id,token) is{} scan?Results.Ok(scan):Results.NotFound(new{error="No duplicate scan is running"})).WithTags("AI duplicates");
 
+        // Organize: labels every message by person, type, importance and how commercial it is.
+        // Enqueue only; OrganizeCoordinator does the work.
+        app.MapPost("/api/ai/organize",async(JsonElement input,HttpContext context,OrganizeService organize,CancellationToken token)=>
+        {try{var archiveId=input.ValueKind==JsonValueKind.Object&&input.TryGetProperty("archiveId",out var archive)&&archive.ValueKind==JsonValueKind.String?archive.GetString():null;
+        var useAi=!(input.ValueKind==JsonValueKind.Object&&input.TryGetProperty("useAi",out var flag)&&flag.ValueKind==JsonValueKind.False);
+        return Results.Accepted(value:await organize.EnqueueAsync(archiveId,useAi,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI organize");
+        app.MapGet("/api/ai/organize",async(HttpContext context,OrganizeService organize,CancellationToken token)=>
+            Results.Ok(await organize.LatestRunAsync(Session(context).User.Id,token))).WithTags("AI organize");
+        app.MapPost("/api/ai/organize/cancel",async(HttpContext context,OrganizeService organize,CancellationToken token)=>
+            await organize.CancelAsync(Session(context).User.Id,token) is{} run?Results.Ok(run):Results.NotFound(new{error="No organize run is active"})).WithTags("AI organize");
+        app.MapGet("/api/ai/organize/labels",async(string? archiveId,HttpContext context,OrganizeService organize,CancellationToken token)=>
+            Results.Ok(await organize.SummaryAsync(Session(context).User.Id,archiveId,token))).WithTags("AI organize");
+
         app.MapGet("/api/admin/ai-schedules",async(HttpContext context,AiService ai,CancellationToken token)=>Admin(context)?Results.Ok(await ai.ListSchedulesAsync(Session(context).User.Id,token)):Results.Forbid()).WithTags("AI schedules");
         app.MapPost("/api/admin/ai-schedules",async(JsonElement input,HttpContext context,AiService ai,CancellationToken token)=>
         {if(!Admin(context))return Results.Forbid();try{return Results.Ok(await ai.CreateScheduleAsync(input,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI schedules");

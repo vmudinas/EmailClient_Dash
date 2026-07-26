@@ -8,6 +8,7 @@ import type {
   AuthSessionInfo,
   Folder,
   GmailConnection,
+  OrganizeLabelSummary,
   SenderFilingStatus,
   SmartMailRule,
   SmartMailRuleRunTask,
@@ -1457,7 +1458,9 @@ describe("SettingsDialog", () => {
       listFolders: vi.fn().mockResolvedValue(folders),
       senderFilingStatus: vi.fn().mockResolvedValue(initialStatus),
       organizeTopSenders: vi.fn().mockResolvedValue(organizedStatus),
-      updateSenderFilingRuleFolder: vi.fn().mockResolvedValue(updatedStatus)
+      updateSenderFilingRuleFolder: vi.fn().mockResolvedValue(updatedStatus),
+      getOrganizeRun: vi.fn().mockResolvedValue(null),
+      getOrganizeLabels: vi.fn().mockResolvedValue(EMPTY_ORGANIZE_LABELS)
     } as unknown as ApiClient;
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -1550,7 +1553,9 @@ describe("SettingsDialog", () => {
         createdRules: 1,
         createdFolders: 1,
         movedMessages: 17
-      })
+      }),
+      getOrganizeRun: vi.fn().mockResolvedValue(null),
+      getOrganizeLabels: vi.fn().mockResolvedValue(EMPTY_ORGANIZE_LABELS)
     } as unknown as ApiClient;
 
     render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
@@ -1677,6 +1682,11 @@ function smartRuleTask(overrides: Partial<SmartMailRuleRunTask> = {}): SmartMail
     ...overrides
   };
 }
+
+/** The Sender rules panel loads the organize run and its label counts on mount. */
+const EMPTY_ORGANIZE_LABELS: OrganizeLabelSummary = {
+  person: [], type: [], importance: [], commercial: [], unlabelled: 0
+};
 
 const USERS: UserSummary[] = [{
   id: "user-1",

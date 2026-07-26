@@ -622,6 +622,19 @@ const MessageRow = memo(function MessageRow({
             {message.attachmentCount > 0 && !hit && (
               <span className="attachment-count"><Paperclip size={12} />{message.attachmentCount}</span>
             )}
+            {/* Organize labels. Only the two that change how a row should be read are shown here:
+                importance above normal, and mail that is selling something. The kind and the sender
+                are already legible from the subject and the From line. */}
+            {message.labels?.importance && message.labels.importance !== "normal" && (
+              <span className={`organize-chip importance-${message.labels.importance}`}>
+                {message.labels.importance}
+              </span>
+            )}
+            {(message.labels?.commercial === "advertising" || message.labels?.commercial === "promotional") && (
+              <span className={`organize-chip commercial-${message.labels.commercial}`}>
+                {message.labels.commercial === "advertising" ? "ad" : "promo"}
+              </span>
+            )}
           </span>
         </span>
       </div>

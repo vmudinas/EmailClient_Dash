@@ -299,6 +299,9 @@ public sealed class DatabaseInitializer(
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS raw_sha256 TEXT;
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS simhash BIGINT;
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS fingerprinted_at TEXT;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS organized_at TEXT;
+        CREATE INDEX IF NOT EXISTS messages_organize_pending_idx ON messages(created_at)
+          WHERE organized_at IS NULL;
         CREATE INDEX IF NOT EXISTS messages_content_hash_idx ON messages(content_sha256)
           WHERE content_sha256 IS NOT NULL;
         CREATE INDEX IF NOT EXISTS messages_internet_id_idx ON messages(archive_id, internet_message_id)
@@ -895,6 +898,48 @@ public sealed class DatabaseInitializer(
         -- already running instead of queueing a second pass over the same mail.
         CREATE UNIQUE INDEX IF NOT EXISTS ai_duplicate_scans_active_idx
           ON ai_duplicate_scans(owner_user_id) WHERE status IN ('queued', 'running');
+
+        -- "Organize": four labels per message - who it is from, what kind of mail it is, how much it
+        -- matters, and whether it is selling something. One row per axis rather than four columns on
+        -- messages, so a new axis is a new value and not a migration of the largest table.
+        CREATE TABLE IF NOT EXISTS ai_message_labels (
+          message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          axis TEXT NOT NULL CHECK(axis IN ('person', 'type', 'importance', 'commercial')),
+          value TEXT NOT NULL,
+          confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+          -- Which half of the hybrid decided this, so a later pass can revisit the cheap guesses
+          -- without paying for the ones a model already looked at.
+          source TEXT NOT NULL DEFAULT 'rules' CHECK(source IN ('rules', 'ai')),
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(message_id, axis)
+        );
+        CREATE INDEX IF NOT EXISTS ai_message_labels_value_idx ON ai_message_labels(axis, value);
+
+        CREATE TABLE IF NOT EXISTS ai_organize_runs (
+          id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          archive_id TEXT REFERENCES archives(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN (
+            'queued', 'running', 'completed', 'failed', 'cancelled'
+          )),
+          phase TEXT NOT NULL DEFAULT 'queued' CHECK(phase IN ('queued', 'labelling', 'done')),
+          processed_items BIGINT NOT NULL DEFAULT 0,
+          total_items BIGINT,
+          labelled_by_rules BIGINT NOT NULL DEFAULT 0,
+          labelled_by_ai BIGINT NOT NULL DEFAULT 0,
+          ai_requests BIGINT NOT NULL DEFAULT 0,
+          use_ai BIGINT NOT NULL DEFAULT 1,
+          message TEXT NOT NULL DEFAULT '',
+          worker_id TEXT,
+          lease_until TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS ai_organize_runs_owner_idx
+          ON ai_organize_runs(owner_user_id, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS ai_organize_runs_active_idx
+          ON ai_organize_runs(owner_user_id) WHERE status IN ('queued', 'running');
 
         CREATE TABLE IF NOT EXISTS ai_questions (
           id TEXT PRIMARY KEY,

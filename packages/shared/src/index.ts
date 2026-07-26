@@ -177,6 +177,8 @@ export interface MessageSummary {
   hasPendingFollowUp?: boolean;
   hasReply?: boolean;
   shipment?: ShipmentSummary;
+  /** Set once "Organize" has labelled the message; absent until then. */
+  labels?: MessageLabels | null;
   state: LocalMessageState;
 }
 
@@ -353,6 +355,63 @@ export interface AiAnalysisStart {
 export interface AiMessageState {
   job: AiJob | null;
   analysis: MessageAnalysis | null;
+}
+
+/**
+ * "Organize" — four labels per message. Rules decide what headers and the subject can settle for
+ * free; only what they cannot is sent to the AI provider, so labelling a whole archive does not
+ * cost a token per message.
+ */
+export type MessageLabelType =
+  | "personal" | "work" | "financial" | "travel" | "shopping"
+  | "health" | "legal" | "notification" | "newsletter" | "social" | "other";
+export type MessageLabelImportance = "critical" | "high" | "normal" | "low";
+export type MessageLabelCommercial = "advertising" | "promotional" | "transactional" | "not_commercial";
+
+export interface MessageLabels {
+  /** Who the mail is from, as a person or an organization. Open-ended, not an enum. */
+  person: string | null;
+  type: MessageLabelType | null;
+  importance: MessageLabelImportance | null;
+  commercial: MessageLabelCommercial | null;
+}
+
+export type OrganizeRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type OrganizeRunPhase = "queued" | "labelling" | "done";
+
+export interface OrganizeRun {
+  id: string;
+  archiveId: string | null;
+  status: OrganizeRunStatus;
+  phase: OrganizeRunPhase;
+  processedItems: number;
+  totalItems: number | null;
+  labelledByRules: number;
+  labelledByAi: number;
+  /** Provider requests made. Batched, so far fewer than the messages the model looked at. */
+  aiRequests: number;
+  useAi: boolean;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+}
+
+export interface OrganizeLabelCount {
+  value: string;
+  count: number;
+}
+
+export interface OrganizeLabelSummary {
+  person: OrganizeLabelCount[];
+  type: OrganizeLabelCount[];
+  importance: OrganizeLabelCount[];
+  commercial: OrganizeLabelCount[];
+  unlabelled: number;
+}
+
+export function isOrganizeRunActive(run: OrganizeRun | null | undefined): boolean {
+  return run != null && (run.status === "queued" || run.status === "running");
 }
 
 /** Which deterministic tier formed a duplicate group. No tier deletes anything. */
