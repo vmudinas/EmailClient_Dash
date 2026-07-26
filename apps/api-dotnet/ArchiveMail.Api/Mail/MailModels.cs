@@ -57,7 +57,18 @@ public sealed record MessageSummaryDto(
     bool HasPendingFollowUp,
     bool HasReply,
     LocalMessageStateDto State,
-    ShipmentSummaryDto? Shipment = null);
+    ShipmentSummaryDto? Shipment = null,
+    MessageLabelsDto? Labels = null);
+
+/// <summary>
+/// What "Organize" decided about a message: who it is from, what kind of mail it is, how much it
+/// matters, and whether it is selling something. Null until the message has been organized.
+/// </summary>
+public sealed record MessageLabelsDto(
+    string? Person,
+    string? Type,
+    string? Importance,
+    string? Commercial);
 
 public sealed record AttachmentDto(
     string Id,

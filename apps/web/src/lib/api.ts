@@ -17,6 +17,8 @@ import type {
   DuplicateGroupPatch,
   DuplicateReviewStatus,
   DuplicateScan,
+  OrganizeLabelSummary,
+  OrganizeRun,
   AiSchedule,
   AiScheduleCreate,
   AiScheduleUpdate,
@@ -898,6 +900,24 @@ export class ApiClient {
 
   cancelDuplicateScan(): Promise<DuplicateScan> {
     return this.request("/api/ai/duplicates/scan/cancel", { method: "POST" });
+  }
+
+  /** Queues an organize run and returns at once; poll {@link getOrganizeRun} for progress. */
+  startOrganize(input: { archiveId?: string; useAi?: boolean } = {}): Promise<OrganizeRun> {
+    return this.request("/api/ai/organize", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  getOrganizeRun(): Promise<OrganizeRun | null> {
+    return this.request("/api/ai/organize");
+  }
+
+  cancelOrganize(): Promise<OrganizeRun> {
+    return this.request("/api/ai/organize/cancel", { method: "POST" });
+  }
+
+  getOrganizeLabels(archiveId?: string): Promise<OrganizeLabelSummary> {
+    const query = archiveId ? `?archiveId=${encodeURIComponent(archiveId)}` : "";
+    return this.request(`/api/ai/organize/labels${query}`);
   }
 
   getAiJob(jobId: string): Promise<AiJob> {
