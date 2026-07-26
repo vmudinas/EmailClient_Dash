@@ -333,14 +333,13 @@ public sealed class MailRepository(NpgsqlDataSource database)
         while (await reader.ReadAsync(cancellationToken))
         {
             var message = ReadSummary(reader);
-            // Offset by SummaryColumns' own count; the organize labels are its last column.
             hits.Add(new(
                 message,
-                reader.GetDouble(24),
-                reader.GetString(25),
-                reader.IsDBNull(26) ? null : reader.GetString(26),
-                reader.IsDBNull(27) ? null : reader.GetString(27),
-                reader.IsDBNull(28) ? "" : reader.GetString(28)));
+                reader.GetDouble(ExtraColumn),
+                reader.GetString(ExtraColumn + 1),
+                reader.IsDBNull(ExtraColumn + 2) ? null : reader.GetString(ExtraColumn + 2),
+                reader.IsDBNull(ExtraColumn + 3) ? null : reader.GetString(ExtraColumn + 3),
+                reader.IsDBNull(ExtraColumn + 4) ? "" : reader.GetString(ExtraColumn + 4)));
         }
         var hasMore = hits.Count > limit;
         if (hasMore) hits.RemoveAt(hits.Count - 1);
@@ -363,11 +362,11 @@ public sealed class MailRepository(NpgsqlDataSource database)
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
         var summary = ReadSummary(reader);
-        var cc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(23) ? null : reader.GetString(23), []);
-        var bcc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(24) ? null : reader.GetString(24), []);
-        var bodyText = reader.IsDBNull(25) ? "" : reader.GetString(25);
-        var bodyHtml = EmailHtmlSanitizer.Sanitize(reader.IsDBNull(26) ? null : reader.GetString(26));
-        var headers = ParseJson<Dictionary<string, string>>(reader.IsDBNull(27) ? null : reader.GetString(27), []);
+        var cc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(ExtraColumn) ? null : reader.GetString(ExtraColumn), []);
+        var bcc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(ExtraColumn + 1) ? null : reader.GetString(ExtraColumn + 1), []);
+        var bodyText = reader.IsDBNull(ExtraColumn + 2) ? "" : reader.GetString(ExtraColumn + 2);
+        var bodyHtml = EmailHtmlSanitizer.Sanitize(reader.IsDBNull(ExtraColumn + 3) ? null : reader.GetString(ExtraColumn + 3));
+        var headers = ParseJson<Dictionary<string, string>>(reader.IsDBNull(ExtraColumn + 4) ? null : reader.GetString(ExtraColumn + 4), []);
         await reader.CloseAsync();
         var attachments = await ListAttachmentsAsync(id, cancellationToken);
         return new(
@@ -666,7 +665,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
             new(reader.GetInt64(18) != 0, reader.GetInt64(19) != 0,
                 ParseJson<string[]>(reader.GetString(20), []), reader.GetString(21), reader.IsDBNull(22) ? null : reader.GetString(22)),
             ShipmentExtractor.Extract(senderName, senderAddress, subject, body, receivedAt, sentAt),
-            ReadLabels(reader.IsDBNull(23) ? null : reader.GetString(23)));
+            ReadLabels(reader.IsDBNull(LabelColumn) ? null : reader.GetString(LabelColumn)));
     }
 
     /// <summary>
@@ -874,7 +873,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private const string SummaryColumns = """
+    internal const string SummaryColumns = """
         m.id, m.archive_id, m.folder_id, f.path, m.subject, m.sender_name, m.sender_address, m.to_json,
         m.sent_at, m.received_at, m.created_at, substring(m.body_text FROM 1 FOR 2000),
         (SELECT COUNT(*) FROM attachments sa WHERE sa.message_id = m.id AND
@@ -888,6 +887,19 @@ public sealed class MailRepository(NpgsqlDataSource database)
         (SELECT string_agg(l.axis || '=' || l.value, E'\n' ORDER BY l.axis)
          FROM ai_message_labels l WHERE l.message_id = m.id) AS organize_labels
         """;
+
+    /// <summary>
+    /// Index of the first column a query appends after <see cref="SummaryColumns"/>, and so the
+    /// count of columns in that list. Callers that select extras - the search hit fields, the detail
+    /// body and headers - read from here rather than from literals, because a column added to the
+    /// list silently shifted every one of those reads by one: the message body started coming back
+    /// as the bcc JSON and the headers were dropped entirely. Adding a column now means changing
+    /// this number, and the tests below pin it to the list.
+    /// </summary>
+    internal const int ExtraColumn = 24;
+
+    /// <summary>Last column of <see cref="SummaryColumns"/>: the aggregated organize labels.</summary>
+    private const int LabelColumn = ExtraColumn - 1;
 
     private const string SummaryJoins = """
         FROM messages m

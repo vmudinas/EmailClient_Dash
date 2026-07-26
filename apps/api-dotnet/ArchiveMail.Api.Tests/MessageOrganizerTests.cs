@@ -36,10 +36,24 @@ public sealed class MessageOrganizerTests
     [Fact]
     public void Marketing_is_never_rated_above_low_however_urgent_it_sounds()
     {
-        var labels = MessageOrganizer.Classify(
+        var bulk = MessageOrganizer.Classify(
             "Store", "promo@store.com", "URGENT: final notice — sale ends today!",
             "Act now, last chance.", Headers(("list-unsubscribe", "<mailto:x@store.com>")));
-        Assert.Equal("low", labels.Importance);
+        Assert.Equal("low", bulk.Importance);
+
+        // Marketing without bulk headers. Gmail's own CATEGORY_PROMOTIONS is the evidence here, and
+        // the manufactured urgency in the subject is exactly what this axis exists to see through -
+        // checking urgency first rated this critical.
+        var promotions = MessageOrganizer.Classify(
+            "Store", "hello@store.com", "URGENT: 50% off, offer ends today",
+            "Shop now and save big.",
+            Headers(("x-archive-mail-gmail-label-ids", "CATEGORY_PROMOTIONS")));
+        Assert.Equal("advertising", promotions.Commercial);
+        Assert.Equal("low", promotions.Importance);
+
+        // And it must not be handed to the model either: a confident "low" that then gets overridden
+        // upward by an AI reading the same urgent subject would reopen the same hole.
+        Assert.True(promotions.Confidence >= MessageOrganizer.ConfidentEnough);
     }
 
     [Fact]
@@ -137,6 +151,43 @@ public sealed class MessageOrganizerTests
     {
         Assert.Contains("ALTER TABLE messages ADD COLUMN IF NOT EXISTS organized_at TEXT;",
             DatabaseInitializer.CoreSchemaSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Appended_detail_and_search_columns_start_after_every_summary_column()
+    {
+        // Adding organize_labels to SummaryColumns shifted every read a query makes after that list:
+        // the message detail returned bcc_json as its body and dropped headers entirely. The offset
+        // is a constant now, and this pins it to the list so the next added column fails here rather
+        // than in the reader.
+        var columns = SplitTopLevel(MailRepository.SummaryColumns);
+        Assert.Equal(MailRepository.ExtraColumn, columns.Count);
+        Assert.EndsWith("AS organize_labels", columns[^1], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Counts select-list entries, ignoring commas inside the parentheses of the subselects and
+    /// function calls the column list is full of.
+    /// </summary>
+    private static List<string> SplitTopLevel(string selectList)
+    {
+        var columns = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var index = 0; index < selectList.Length; index++)
+        {
+            var character = selectList[index];
+            if (character == '(') depth++;
+            else if (character == ')') depth--;
+            else if (character == ',' && depth == 0)
+            {
+                columns.Add(selectList[start..index].Trim());
+                start = index + 1;
+            }
+        }
+        var last = selectList[start..].Trim();
+        if (last.Length > 0) columns.Add(last);
+        return columns;
     }
 
     [Fact]

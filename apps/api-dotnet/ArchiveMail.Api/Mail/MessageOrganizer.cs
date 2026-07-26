@@ -153,9 +153,13 @@ public static partial class MessageOrganizer
     private static (string Value, double Confidence) Importance(
         string type, string commercial, string haystack, bool bulk)
     {
-        if (Urgent().IsMatch(haystack) && !bulk) return ("critical", 0.85);
+        // Marketing first, urgency second. Checking urgency first let a non-bulk promotion - a Gmail
+        // CATEGORY_PROMOTIONS message subjected "URGENT: 50% off" - come out critical, which is
+        // exactly the manufactured urgency this axis exists to see through. Marketing is never above
+        // low, and "not bulk" is not evidence that it isn't marketing.
         if (commercial is "advertising" or "promotional") return ("low", 0.88);
         if (type == "newsletter") return ("low", 0.85);
+        if (Urgent().IsMatch(haystack) && !bulk) return ("critical", 0.85);
         if (type is "financial" or "legal" or "health") return ("high", 0.8);
         if (type == "notification") return ("normal", 0.78);
         // Everything else is a judgement about what this owner cares about, which rules cannot make.

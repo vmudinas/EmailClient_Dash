@@ -175,6 +175,11 @@ public sealed class OrganizeService(
             for (var offset = 0; offset < uncertain.Count; offset += AiBatchSize)
             {
                 token.ThrowIfCancellationRequested();
+                // Stop before spending, not after. A cancel only flips the database row, and this
+                // token belongs to the host, so without a status check here Stop was ignored until
+                // the batch finished - up to 16 more billed provider requests the owner had already
+                // asked not to make.
+                await EnsureStillRunningAsync(runId, lease, token);
                 var slice = uncertain.Skip(offset).Take(AiBatchSize).ToList();
                 requests++;
                 var refined = await RefineAsync(slice, token);
@@ -426,6 +431,23 @@ public sealed class OrganizeService(
         command.Parameters.AddWithValue(total);
         command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
         await command.ExecuteNonQueryAsync(token);
+    }
+
+    /// <summary>
+    /// Renews the lease and confirms the run is still ours, throwing if it is not. Called before each
+    /// billed provider request so a cancel takes effect at the next request rather than the next
+    /// batch. It is the lease renewal too, so a long run of AI batches cannot look stale meanwhile.
+    /// </summary>
+    private async Task EnsureStillRunningAsync(string runId, TimeSpan lease, CancellationToken token)
+    {
+        var now = DateTimeOffset.UtcNow;
+        await using var command = database.CreateCommand(
+            "UPDATE ai_organize_runs SET lease_until=$2,updated_at=$3 WHERE id=$1 AND status='running'");
+        command.Parameters.AddWithValue(runId);
+        command.Parameters.AddWithValue(now.Add(lease).ToString("O"));
+        command.Parameters.AddWithValue(now.ToString("O"));
+        if (await command.ExecuteNonQueryAsync(token) != 1)
+            throw new OperationCanceledException("This organize run is no longer running");
     }
 
     /// <summary>Scoped to status = 'running', which is how a cancel reaches the worker.</summary>
