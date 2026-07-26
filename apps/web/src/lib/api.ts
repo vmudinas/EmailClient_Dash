@@ -44,6 +44,7 @@ import type {
   GmailAuthRequest,
   GmailAuthStart,
   GmailConnection,
+  GmailConnectionDestination,
   GmailSendAsAlias,
   GmailSendRequest,
   GmailSendResult,
@@ -592,6 +593,16 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify(request)
     });
+  }
+
+  async moveGmailConnection(
+    connectionId: string,
+    destination: GmailConnectionDestination
+  ): Promise<GmailConnection> {
+    return normalizeGmailConnection(await this.request(`/api/gmail/connections/${encodeURIComponent(connectionId)}/destination`, {
+      method: "PATCH",
+      body: JSON.stringify(destination)
+    }));
   }
 
   async syncGmail(connectionId: string, options: { full?: boolean } = {}): Promise<GmailConnection> {

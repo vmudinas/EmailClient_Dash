@@ -46,6 +46,7 @@ import type {
   Folder,
   GmailAuthRequest,
   GmailConnection,
+  GmailConnectionDestination,
   GmailSendRequest,
   ImportJob,
   InboxCategory,
@@ -87,6 +88,7 @@ import {
   ImportDialog,
   GmailDialog,
   MailboxDropDialog,
+  MoveGmailConnectionDialog,
   RenameDialog,
   type UiSearchFilters
 } from "./components/Dialogs.js";
@@ -273,6 +275,9 @@ export function App() {
   const [gmailLoading, setGmailLoading] = useState(false);
   const [gmailBusy, setGmailBusy] = useState(false);
   const [gmailError, setGmailError] = useState("");
+  const [gmailMoveConnection, setGmailMoveConnection] = useState<GmailConnection | null>(null);
+  const [gmailMoveBusy, setGmailMoveBusy] = useState(false);
+  const [gmailMoveError, setGmailMoveError] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeConnectionId, setComposeConnectionId] = useState<string | null>(null);
   const [composeDraft, setComposeDraft] = useState<ComposeDraft | null>(null);
@@ -2097,6 +2102,26 @@ export function App() {
     });
   };
 
+  const moveGmailConnection = async (destination: GmailConnectionDestination) => {
+    if (!api || readOnly || !gmailMoveConnection) return;
+    setGmailMoveBusy(true);
+    setGmailMoveError("");
+    try {
+      const connection = await api.moveGmailConnection(gmailMoveConnection.id, destination);
+      setGmailConnections((current) => current.map((item) => item.id === connection.id ? connection : item));
+      setGmailMoveConnection(null);
+      // The destination mailbox may have just been created, so the loaded tree does not know
+      // about it yet.
+      await refreshArchives();
+      if (connection.archiveId === selectedArchiveId) setFolders(await api.listFolders(connection.archiveId));
+      showError(`${connection.email} now syncs into ${connection.archiveName} / ${connection.folderPath}`);
+    } catch (error) {
+      setGmailMoveError(error instanceof Error ? error.message : "The Gmail destination could not be moved");
+    } finally {
+      setGmailMoveBusy(false);
+    }
+  };
+
   const syncGmail = async (connectionId: string, options: { full?: boolean } = {}) => {
     if (!api || readOnly) return;
     setGmailError("");
@@ -2739,7 +2764,20 @@ export function App() {
           openCompose(connection);
         }}
         onReauthorize={reauthorizeGmail}
+        onMoveDestination={(connection) => {
+          setGmailMoveError("");
+          setGmailMoveConnection(connection);
+        }}
         onDisconnect={(connection) => void disconnectGmail(connection)}
+      />
+      <MoveGmailConnectionDialog
+        connection={gmailMoveConnection}
+        archives={archives}
+        busy={gmailMoveBusy}
+        error={gmailMoveError}
+        onClose={() => { if (!gmailMoveBusy) setGmailMoveConnection(null); }}
+        onLoadFolders={loadFoldersForGmail}
+        onMove={(destination) => void moveGmailConnection(destination)}
       />
       <ComposeDialog
         open={composeOpen}

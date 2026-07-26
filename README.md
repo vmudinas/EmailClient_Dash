@@ -99,6 +99,10 @@ ARCHIVE_MAIL_IMPORT_LEASE_SECONDS=120
 
 Progress is persisted in PostgreSQL. A running job whose lease expires can be claimed by the replacement C# process from its last committed version-2 checkpoint.
 
+Combining archives and combining mailboxes both run as jobs on the same progress model, and both carry any connected Google account across with them: the merged archive keeps syncing, and merged messages keep the source keys their Gmail account dedupes against, so a later full pull does not re-import the mailbox.
+
+To point a connected account somewhere else without merging anything, use **Move** on the account in the Gmail dialog. This changes only where future syncs are filed — the Google grant is untouched, so nothing is reauthorized, and mail already downloaded stays in the archive it landed in. Reauthorizing deliberately cannot do this: it pins the connection's existing destination so that finishing an authorization can never redirect an account's mail.
+
 ## Database configuration
 
 PostgreSQL can be configured by environment variables or through Admin settings. Saved connection settings are protected outside the mail database so the app can reconnect on startup. The settings UI can test PostgreSQL and Microsoft SQL Server connection strings, but PostgreSQL is the only activatable runtime provider today; SQL Server requires a complete schema, search, and bulk-import adapter before activation is safe.

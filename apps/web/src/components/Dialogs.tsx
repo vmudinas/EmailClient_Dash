@@ -9,6 +9,7 @@ import {
   Download,
   Filter,
   FolderPlus,
+  FolderSymlink,
   FolderTree,
   KeyRound,
   LoaderCircle,
@@ -28,7 +29,8 @@ import type {
   DiagnosticsSnapshot,
   Folder,
   GmailAuthRequest,
-  GmailConnection
+  GmailConnection,
+  GmailConnectionDestination
 } from "@email-client/shared";
 import type { UploadProgress } from "../lib/api.js";
 import { importEmailCountLabel, importProgressPercent } from "../lib/import-progress.js";
@@ -418,6 +420,144 @@ export function MailboxDropDialog({
   );
 }
 
+interface MoveGmailConnectionDialogProps {
+  connection: GmailConnection | null;
+  archives: ArchiveModel[];
+  busy: boolean;
+  error: string;
+  onClose(): void;
+  onLoadFolders(archiveId: string): Promise<Folder[]>;
+  onMove(destination: GmailConnectionDestination): void;
+}
+
+/**
+ * Changes which archive a connected Google account fills. This is not a reauthorization - the
+ * Google grant is untouched - which is exactly why it needs its own control: reauthorizing pins
+ * the connection's current destination, so before this there was no way to redirect an account
+ * short of disconnecting it and granting access again.
+ */
+export function MoveGmailConnectionDialog({
+  connection,
+  archives,
+  busy,
+  error,
+  onClose,
+  onLoadFolders,
+  onMove
+}: MoveGmailConnectionDialogProps) {
+  const targets = archives.filter((archive) => archive.status !== "importing" && archive.status !== "failed");
+  const currentMailboxName = connection?.folderPath.split("/").at(-1) || "Gmail";
+  const [archiveId, setArchiveId] = useState("");
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [useExistingMailbox, setUseExistingMailbox] = useState(false);
+  const [folderChoice, setFolderChoice] = useState("");
+  const [folderName, setFolderName] = useState("Gmail");
+
+  useEffect(() => {
+    if (!connection) return;
+    setArchiveId(targets.find((archive) => archive.id !== connection.archiveId)?.id ?? connection.archiveId);
+    setUseExistingMailbox(false);
+    setFolderChoice("");
+    setFolderName(connection.folderPath.split("/").at(-1) || "Gmail");
+  }, [connection?.id]);
+
+  useEffect(() => {
+    let active = true;
+    if (!connection || !archiveId) {
+      setFolders([]);
+      return;
+    }
+    void onLoadFolders(archiveId).then((loaded) => {
+      if (!active) return;
+      setFolders(loaded);
+      setFolderChoice((current) => loaded.some((folder) => folder.id === current) ? current : loaded[0]?.id ?? "");
+    }).catch(() => {
+      if (active) setFolders([]);
+    });
+    return () => { active = false; };
+  }, [connection?.id, archiveId, onLoadFolders]);
+
+  if (!connection) return null;
+  const target = targets.find((archive) => archive.id === archiveId);
+  const ready = Boolean(archiveId) && (useExistingMailbox ? Boolean(folderChoice) : Boolean(folderName.trim()));
+  const unchanged = archiveId === connection.archiveId
+    && useExistingMailbox && folderChoice === connection.folderId;
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onClose(); }}>
+      <section className="dialog combine-dialog" role="dialog" aria-modal="true" aria-labelledby="move-gmail-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="dialog-header">
+          <div><FolderSymlink size={20} /><h2 id="move-gmail-title">Move Gmail destination</h2></div>
+          <button className="icon-button" disabled={busy} onClick={onClose} title="Close" aria-label="Close"><X size={18} /></button>
+        </header>
+        <div className="dialog-body">
+          <div className="combine-source">
+            <span>Move from</span>
+            <strong>{connection.archiveName} / {connection.folderPath}</strong>
+            <small>{connection.email} stays authorized with Google. Nothing is reauthorized.</small>
+          </div>
+          <label className="rename-field">
+            <span>Destination archive</span>
+            <select value={archiveId} onChange={(event) => { setArchiveId(event.target.value); setFolderChoice(""); }}>
+              {targets.map((archive) => <option key={archive.id} value={archive.id}>{archive.name}</option>)}
+            </select>
+          </label>
+          <div className="gmail-destination-modes" role="group" aria-label="Destination mailbox">
+            <button
+              type="button"
+              className={useExistingMailbox ? "" : "selected"}
+              aria-pressed={!useExistingMailbox}
+              onClick={() => setUseExistingMailbox(false)}
+            ><FolderPlus size={16} /><span>New mailbox</span></button>
+            <button
+              type="button"
+              className={useExistingMailbox ? "selected" : ""}
+              aria-pressed={useExistingMailbox}
+              disabled={folders.length === 0}
+              onClick={() => {
+                setUseExistingMailbox(true);
+                setFolderChoice((current) => folders.some((folder) => folder.id === current) ? current : folders[0]?.id ?? "");
+              }}
+            ><FolderTree size={16} /><span>Existing mailbox</span></button>
+          </div>
+          {useExistingMailbox ? (
+            <label className="rename-field">
+              <span>Mailbox</span>
+              <select value={folderChoice} onChange={(event) => setFolderChoice(event.target.value)}>
+                {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}
+              </select>
+            </label>
+          ) : (
+            <label className="rename-field">
+              <span>New mailbox name</span>
+              <input value={folderName} maxLength={120} onChange={(event) => setFolderName(event.target.value)} />
+            </label>
+          )}
+          {target && (
+            <small className="combine-result">
+              Future syncs land in {target.name}. Mail already downloaded stays in {connection.archiveName} / {connection.folderPath} — move it with Combine mailboxes if you want it to follow.
+            </small>
+          )}
+          {unchanged && <small className="combine-result">This is already where {connection.email} syncs.</small>}
+          {targets.length === 0 && <div className="import-error"><CircleAlert size={18} /><div><strong>No destination available</strong><span>Import or create another archive first.</span></div></div>}
+          {error && <div className="import-error" role="alert"><CircleAlert size={18} /><div><strong>Move failed</strong><span>{error}</span></div></div>}
+        </div>
+        <footer className="dialog-footer">
+          <button className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>
+          <button
+            className="primary-button"
+            disabled={busy || !ready || unchanged}
+            onClick={() => onMove(useExistingMailbox
+              ? { archiveId, folderId: folderChoice }
+              : { archiveId, folderName: folderName.trim() || currentMailboxName })}
+          >
+            {busy ? <LoaderCircle className="spin" size={17} /> : <FolderSymlink size={17} />} Move
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 interface GmailDialogProps {
   open: boolean;
   archives: ArchiveModel[];
@@ -435,6 +575,7 @@ interface GmailDialogProps {
   onReorganize(connectionId: string): void;
   onCompose(connection: GmailConnection): void;
   onReauthorize(connection: GmailConnection): void;
+  onMoveDestination(connection: GmailConnection): void;
   onDisconnect(connection: GmailConnection): void;
 }
 
@@ -457,6 +598,7 @@ export function GmailDialog({
   onReorganize,
   onCompose,
   onReauthorize,
+  onMoveDestination,
   onDisconnect
 }: GmailDialogProps) {
   const readyArchives = archives.filter((archive) => archive.status !== "importing" && archive.status !== "failed");
@@ -571,6 +713,15 @@ export function GmailDialog({
                             ><FolderTree size={15} /></button>
                           </>
                         )}
+                        <button
+                          className="icon-button"
+                          disabled={connection.status === "syncing"}
+                          onClick={() => onMoveDestination(connection)}
+                          title={connection.status === "syncing"
+                            ? "Stop the sync before moving this account"
+                            : "Move this account to another archive or mailbox"}
+                          aria-label={`Move ${connection.email} to another archive`}
+                        ><FolderSymlink size={15} /></button>
                         <button
                           className="secondary-button compact gmail-reauthorize-button"
                           onClick={() => onReauthorize(connection)}

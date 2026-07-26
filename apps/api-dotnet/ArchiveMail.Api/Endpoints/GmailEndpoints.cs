@@ -28,6 +28,10 @@ public static class GmailEndpoints
                 return Results.Content(Page("Gmail was not connected",exception.Message,false),"text/html",Encoding.UTF8,400);
             }
         }).WithName("FinishGmailOAuth").WithTags("Gmail");
+        // Moving a connection is not a reauthorization: the Google grant stays exactly as it is and
+        // only the archive and mailbox future syncs land in change. Reauthorizing deliberately
+        // cannot do this - it pins the connection's existing destination - so this is the route.
+        app.MapMethods("/api/gmail/connections/{connectionId}/destination",["PATCH"],async(string connectionId,JsonElement request,HttpContext context,GmailService gmail,CancellationToken token)=>{try{return Results.Ok(await gmail.MoveAsync(connectionId,Session(context).User.Id,request,token));}catch(Exception error){return Failure(error);}}).WithName("MoveGmailConnection").WithTags("Gmail");
         app.MapPost("/api/gmail/connections/{connectionId}/sync",async(string connectionId,JsonElement request,HttpContext context,GmailService gmail,CancellationToken token)=>{try{return Results.Ok(await gmail.StartSyncAsync(connectionId,Session(context).User.Id,request.ValueKind==JsonValueKind.Object&&request.TryGetProperty("full",out var full)&&full.ValueKind==JsonValueKind.True,token));}catch(Exception error){return Failure(error);}}).WithName("SyncGmail").WithTags("Gmail");
         app.MapPost("/api/gmail/connections/{connectionId}/cancel",async(string connectionId,HttpContext context,GmailService gmail,CancellationToken token)=>{try{return Results.Ok(await gmail.CancelAsync(connectionId,Session(context).User.Id,token));}catch(Exception error){return Failure(error);}}).WithName("CancelGmailSync").WithTags("Gmail");
         app.MapPost("/api/gmail/connections/{connectionId}/reconcile",async(string connectionId,HttpContext context,GmailService gmail,CancellationToken token)=>{try{return Results.Ok(await gmail.StartSyncAsync(connectionId,Session(context).User.Id,false,token));}catch(Exception error){return Failure(error);}}).WithName("ReconcileGmail").WithTags("Gmail");

@@ -2,6 +2,7 @@ using ArchiveMail.Api.Mail;
 using ArchiveMail.Api.Security;
 using ArchiveMail.Api.Imports;
 using Microsoft.Extensions.Options;
+using Npgsql;
 
 namespace ArchiveMail.Api.Endpoints;
 
@@ -278,11 +279,24 @@ public static class MailEndpoints
     private static int? Integer(IQueryCollection query, string key) =>
         int.TryParse(Text(query, key), out var value) ? value : null;
 
-    private static IResult MailError(Exception error) => error switch
+    internal const string DatabaseBusyMessage =
+        "The mail database is busy or briefly unreachable. A running import or combine is the usual cause; this clears on its own.";
+
+    internal static IResult MailError(Exception error) => error switch
     {
         MailNotFoundException => Results.NotFound(new { error = error.Message }),
         MailConflictException => Results.Conflict(new { error = error.Message }),
         ArgumentException => Results.BadRequest(new { error = error.Message }),
+
+        // A combine keeps the database saturated for as long as it runs, and restarting the API
+        // under one leaves a window where connections are refused outright. Both reached the
+        // browser as a bare 500 with no body, which reads as a broken application rather than
+        // something that resolves itself. PostgresException stays out of this on purpose: there
+        // the server understood the statement and rejected it, which is a bug, and it stays loud.
+        TimeoutException => Results.Json(
+            new { error = DatabaseBusyMessage }, statusCode: StatusCodes.Status503ServiceUnavailable),
+        NpgsqlException and not PostgresException => Results.Json(
+            new { error = DatabaseBusyMessage }, statusCode: StatusCodes.Status503ServiceUnavailable),
         _ => throw error
     };
 

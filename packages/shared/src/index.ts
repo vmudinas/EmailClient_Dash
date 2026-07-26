@@ -2399,6 +2399,20 @@ export const gmailAuthRequestSchema = z.object({
 
 export type GmailAuthRequest = z.infer<typeof gmailAuthRequestSchema>;
 
+/**
+ * Re-points an existing connection at another archive or mailbox. Deliberately not part of the
+ * authorization request: the Google grant does not change, and the reauthorization path pins the
+ * connection's current destination so that finishing an authorization cannot redirect an account's
+ * mail. Omit folderId to create (or reuse) a mailbox named folderName in the destination archive.
+ */
+export const gmailConnectionDestinationSchema = z.object({
+  archiveId: z.string().uuid(),
+  folderId: z.string().uuid().nullable().optional(),
+  folderName: displayNameSchema.optional()
+}).strict();
+
+export type GmailConnectionDestination = z.infer<typeof gmailConnectionDestinationSchema>;
+
 export const gmailSyncRequestSchema = z.object({
   full: z.boolean().default(false)
 }).strict();
