@@ -105,6 +105,7 @@ import {
   usePollingRegistry,
   type PollingSettings
 } from "./lib/polling.js";
+import { removeByMessageId, restoreRemoved } from "./lib/optimisticList.js";
 import {
   navigateGoogleAuthorizationPopup,
   openGoogleAuthorizationPopup,
@@ -241,6 +242,11 @@ export function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [filters, setFilters] = useState<UiSearchFilters>(EMPTY_FILTERS);
   const [showReadMessages, setShowReadMessages] = usePersistentState<boolean>("showReadMessages", true);
+  // Identifies which list is on screen, so a rollback can tell whether the rows it is holding
+  // still belong to what the user is looking at.
+  const viewKey = JSON.stringify([selectedArchiveId, selectedFolderId, selectedSmartMailbox, filters, showReadMessages]);
+  const viewKeyRef = useRef(viewKey);
+  viewKeyRef.current = viewKey;
   const [folderPanelVisible, setFolderPanelVisible] = usePersistentState<boolean>("folderPanelVisible", true);
   const [sort, setSort] = useState<"relevance" | "newest">("relevance");
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -1659,12 +1665,86 @@ export function App() {
     });
   };
 
+  /**
+   * Drops rows out of the list the moment the user acts on them and returns a restore for when
+   * the server refuses. The list is what the user is looking at, so it answers the click rather
+   * than the round trip; a rejected move puts the rows back where they were.
+   */
+  /**
+   * Every row on screen that a sender-wide move will take, not just the one that was clicked.
+   * The server moves the sender's whole mailbox, so leaving the siblings visible would let the
+   * user act on mail that is already on its way out.
+   */
+  const visibleIdsFromSender = (senderAddress: string, messageId: string) => {
+    const address = senderAddress.trim().toLowerCase();
+    if (!address) return [messageId];
+    const matches = items
+      .filter((item) => item.message.sender.address.trim().toLowerCase() === address)
+      .map((item) => item.message.id);
+    return matches.includes(messageId) ? matches : [...matches, messageId];
+  };
+
+  const removeListItems = (messageIds: readonly string[]) => {
+    const { remaining, removed } = removeByMessageId(items, messageIds);
+    setItems(remaining);
+    // The rows only belong to the view they were taken from. If the user moved to another
+    // folder, search or filter while the request was in flight, putting them back would
+    // inject them into a list they were never part of; reload that view instead.
+    const origin = viewKey;
+    return () => {
+      if (viewKeyRef.current !== origin) {
+        void loadMessages(false);
+        return;
+      }
+      setItems((current) => restoreRemoved(current, removed));
+    };
+  };
+
+  /**
+   * The optimistic half of a bulk action: rows go, the selection clears, and the reader closes
+   * if it was showing one of them. All of it is snapshotted, because a rejected request has to
+   * hand the user back exactly what they had rather than a cleared selection and a shut reader.
+   */
+  const beginBulkRemoval = (messageIds: readonly string[]) => {
+    const previousSelection = bulkSelectedIds;
+    const previousMessage = message;
+    const previousSelectedId = selectedMessageId;
+    const restoreRows = removeListItems(messageIds);
+    const closedReader = Boolean(message && messageIds.includes(message.id));
+    if (closedReader) {
+      setSelectedMessageId(null);
+      setMessage(null);
+    }
+    setBulkSelectedIds(new Set());
+    return () => {
+      restoreRows();
+      setBulkSelectedIds(previousSelection);
+      if (closedReader) {
+        setSelectedMessageId(previousSelectedId);
+        setMessage(previousMessage);
+      }
+    };
+  };
+
+  /**
+   * Counts, folder totals and the server's ordering still have to catch up after a move, but
+   * the list already shows the outcome, so these must never sit in front of the confirmation.
+   */
+  const refreshAfterMove = () => {
+    void Promise.all([
+      refreshArchives(),
+      loadMessages(false),
+      selectedArchiveId && api ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
+    ]).catch(() => undefined);
+  };
+
   const moveMessage = async (messageId: string, folderId: string) => {
     if (!api || readOnly) return;
     const source = message?.id === messageId
       ? message
       : items.find((item) => item.message.id === messageId)?.message ?? draggedMessage;
     setMoveBusy(true);
+    let restore: (() => void) | null = null;
     try {
       let destination = folders.find((folder) => folder.id === folderId) ?? null;
       if (!destination && source) {
@@ -1680,35 +1760,34 @@ export function App() {
         if (!window.confirm(
           `Move this message and every Inbox message from ${senderAddress || "this sender"} to Spam, and automatically send future imported Inbox messages from this sender to Spam? If Gmail mailbox sync is enabled, current Gmail messages move too.`
         )) return;
+        restore = removeListItems(visibleIdsFromSender(senderAddress, messageId));
+        setMoveBusy(false);
         const result = await api.markSenderAsSpam(messageId);
         if (message?.id === messageId) setMessage(result.message);
-        await Promise.all([
-          refreshArchives(),
-          loadMessages(false),
-          selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
-        ]);
         showError(
           `${result.senderAddress} will now go to ${result.spamFolderPath}. Moved ${result.movedMessages.toLocaleString()} matching message${result.movedMessages === 1 ? "" : "s"}.`
         );
+        refreshAfterMove();
         return;
       }
       const moveAllFromSender = Boolean(senderAddress && destination) && window.confirm(
         `Move every email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there. If Gmail mailbox sync is enabled, current Gmail messages move too.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
       );
+      restore = removeListItems(moveAllFromSender
+        ? visibleIdsFromSender(senderAddress, messageId)
+        : [messageId]);
+      setMoveBusy(false);
       const result = moveAllFromSender
         ? await api.moveSenderMessagesToFolder(messageId, folderId)
         : null;
       const moved = result?.message ?? await api.moveMessage(messageId, folderId);
       if (message?.id === messageId) setMessage(moved);
-      await Promise.all([
-        refreshArchives(),
-        loadMessages(false),
-        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
-      ]);
       showError(result
         ? `Moved ${result.movedMessages.toLocaleString()} email${result.movedMessages === 1 ? "" : "s"} from ${result.senderAddress} to ${result.folderPath}. Future Inbox email from this sender will be filed there.`
         : `Moved to ${moved.folderPath}`);
+      refreshAfterMove();
     } catch (error) {
+      restore?.();
       showError(error instanceof Error ? error.message : "Message could not be moved");
     } finally {
       setMoveBusy(false);
@@ -1718,6 +1797,7 @@ export function App() {
   const archiveMessage = async (target: MessageSummary) => {
     if (!api || readOnly) return;
     setMoveBusy(true);
+    let restore: (() => void) | null = null;
     try {
       let availableFolders = target.archiveId === selectedArchiveId
         ? folders
@@ -1738,11 +1818,14 @@ export function App() {
           setFolders(await api.listFolders(target.archiveId));
         }
       }
+      restore = removeListItems([target.id]);
+      setMoveBusy(false);
       const moved = await api.moveMessage(target.id, destination.id);
       if (message?.id === target.id) setMessage(moved);
-      await Promise.all([refreshArchives(), loadMessages(false)]);
       showError(`Moved to ${moved.folderPath}`);
+      void Promise.all([refreshArchives(), loadMessages(false)]).catch(() => undefined);
     } catch (error) {
+      restore?.();
       showError(error instanceof Error ? error.message : "Message could not be archived");
     } finally {
       setMoveBusy(false);
@@ -1920,24 +2003,18 @@ export function App() {
       : `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${messageIds.length.toLocaleString()} selected message${messageIds.length === 1 ? "" : "s"}? They will be moved to ${noun}.`;
     if (!window.confirm(confirmation)) return;
     setBulkActionBusy(true);
+    const restore = beginBulkRemoval(messageIds);
+    setBulkActionBusy(false);
     try {
       const result = await api.bulkMoveMessages(messageIds, destination);
-      if (message && messageIds.includes(message.id)) {
-        setSelectedMessageId(null);
-        setMessage(null);
-      }
-      setBulkSelectedIds(new Set());
-      await Promise.all([
-        refreshArchives(),
-        loadMessages(false),
-        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
-      ]);
       showError(destination === "spam"
         ? `Moved ${result.moved.toLocaleString()} matching message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || noun}; enabled ${result.senderRules.toLocaleString()} sender rule${result.senderRules === 1 ? "" : "s"}`
           + (result.failed ? `; ${result.failed.toLocaleString()} could not be processed` : "")
         : `Moved ${result.moved.toLocaleString()} message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || noun}`
           + (result.failed ? `, ${result.failed} could not be moved` : ""));
+      refreshAfterMove();
     } catch (error) {
+      restore();
       showError(error instanceof Error ? error.message : "Selected messages could not be moved");
     } finally {
       setBulkActionBusy(false);
@@ -2057,20 +2134,12 @@ export function App() {
     if (!window.confirm(confirmation)) return;
 
     setMoveBusy(true);
+    const restore = beginBulkRemoval(messageIds);
+    setMoveBusy(false);
     try {
       const result = isSpamDestination
         ? await api.bulkMoveMessages(messageIds, "spam")
         : await api.bulkMoveMessagesToFolder(messageIds, folderId);
-      if (message && messageIds.includes(message.id)) {
-        setSelectedMessageId(null);
-        setMessage(null);
-      }
-      setBulkSelectedIds(new Set());
-      await Promise.all([
-        refreshArchives(),
-        loadMessages(false),
-        selectedArchiveId ? api.listFolders(selectedArchiveId).then(setFolders) : Promise.resolve()
-      ]);
       showError("folderPaths" in result
         ? `Moved ${result.moved.toLocaleString()} matching message${result.moved === 1 ? "" : "s"} to ${result.folderPaths.join(", ") || destination.path}; enabled ${result.senderRules.toLocaleString()} sender rule${result.senderRules === 1 ? "" : "s"}`
           + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} selected already there` : "")
@@ -2078,7 +2147,9 @@ export function App() {
         : `Moved ${result.moved.toLocaleString()} selected message${result.moved === 1 ? "" : "s"} to ${result.folderPath}`
           + (result.alreadyThere ? `; ${result.alreadyThere.toLocaleString()} already there` : "")
           + (result.failed ? `; ${result.failed.toLocaleString()} could not be moved` : ""));
+      refreshAfterMove();
     } catch (error) {
+      restore();
       showError(error instanceof Error ? error.message : "Selected messages could not be moved");
     } finally {
       setMoveBusy(false);
