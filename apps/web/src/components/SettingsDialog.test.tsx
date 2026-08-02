@@ -134,95 +134,6 @@ describe("SettingsDialog", () => {
     confirm.mockRestore();
   });
 
-  it("saves the Lithuanian trainer key separately from the mail AI providers", async () => {
-    const updateLithuanianSettings = vi.fn().mockResolvedValue({
-      ...SETTINGS,
-      lithuanian: { ...SETTINGS.lithuanian, apiKeyConfigured: true, source: "admin" }
-    });
-    const api = {
-      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
-      listUsers: vi.fn().mockResolvedValue(USERS),
-      updateLithuanianSettings
-    } as unknown as ApiClient;
-
-    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Lithuanian" }));
-
-    // The upload of a child's voice to a third party has to be stated, not buried.
-    expect(screen.getByText(/uploaded to OpenAI for transcription/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("OpenAI API key"), { target: { value: "  sk-test-key  " } });
-    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
-
-    await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
-      apiKey: "sk-test-key",
-      model: "gpt-4o-transcribe",
-      hintModel: "gpt-5-mini",
-      translationModel: "gpt-5-mini",
-      speechModel: "gpt-4o-mini-tts",
-      speechVoice: "alloy",
-      passMark: 85
-    }));
-    // Cleared from the form so it is never re-submitted or left on screen.
-    expect((screen.getByLabelText("OpenAI API key") as HTMLInputElement).value).toBe("");
-  });
-
-  it("does not send an empty key when only the model changes", async () => {
-    const updateLithuanianSettings = vi.fn().mockResolvedValue(SETTINGS);
-    const api = {
-      adminSettings: vi.fn().mockResolvedValue({
-        ...SETTINGS,
-        lithuanian: { ...SETTINGS.lithuanian, apiKeyConfigured: true }
-      }),
-      listUsers: vi.fn().mockResolvedValue(USERS),
-      updateLithuanianSettings
-    } as unknown as ApiClient;
-
-    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Lithuanian" }));
-    fireEvent.change(screen.getByLabelText("Transcription model"), { target: { value: "whisper-1" } });
-    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
-
-    // An empty apiKey field must not wipe the stored key.
-    await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
-      model: "whisper-1",
-      hintModel: "gpt-5-mini",
-      translationModel: "gpt-5-mini",
-      speechModel: "gpt-4o-mini-tts",
-      speechVoice: "alloy",
-      passMark: 85
-    }));
-  });
-
-  it("lets an administrator move the pass mark and refuses one out of range", async () => {
-    const updateLithuanianSettings = vi.fn().mockResolvedValue(SETTINGS);
-    const api = {
-      adminSettings: vi.fn().mockResolvedValue(SETTINGS),
-      listUsers: vi.fn().mockResolvedValue(USERS),
-      updateLithuanianSettings
-    } as unknown as ApiClient;
-
-    render(<SettingsDialog open api={api} session={SESSION} onClose={vi.fn()} onSignedOut={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Lithuanian" }));
-
-    // The input's own min/max stops an out-of-range mark from ever reaching the server; the
-    // handler's range check behind it is the backstop, and the server clamps regardless.
-    fireEvent.change(screen.getByLabelText("Pass mark (%)"), { target: { value: "5" } });
-    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
-    await waitFor(() => expect(updateLithuanianSettings).not.toHaveBeenCalled());
-
-    fireEvent.change(screen.getByLabelText("Pass mark (%)"), { target: { value: "60" } });
-    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
-
-    await waitFor(() => expect(updateLithuanianSettings).toHaveBeenCalledWith({
-      model: "gpt-4o-transcribe",
-      hintModel: "gpt-5-mini",
-      translationModel: "gpt-5-mini",
-      speechModel: "gpt-4o-mini-tts",
-      speechVoice: "alloy",
-      passMark: 60
-    }));
-  });
-
   it("configures the default draft sender and placeholder name", async () => {
     const updatedSettings: AdminSettings = {
       ...SETTINGS,
@@ -1777,28 +1688,6 @@ const SETTINGS: AdminSettings = {
     enabledSources: ["cnn", "bbc", "aljazeera", "foxnews"],
     secondsPerHeadline: 8,
     settingsPath: "/tmp/news-settings.json",
-    configurationError: null
-  },
-  lithuanian: {
-    apiKeyConfigured: false,
-    environmentManaged: false,
-    source: "none",
-    model: "gpt-4o-transcribe",
-    defaultModel: "gpt-4o-transcribe",
-    hintModel: "gpt-5-mini",
-    defaultHintModel: "gpt-5-mini",
-    translationModel: "gpt-5-mini",
-    defaultTranslationModel: "gpt-5-mini",
-    speechModel: "gpt-4o-mini-tts",
-    defaultSpeechModel: "gpt-4o-mini-tts",
-    speechVoice: "alloy",
-    defaultSpeechVoice: "alloy",
-    passMark: 85,
-    defaultPassMark: 85,
-    minimumPassMark: 50,
-    maximumPassMark: 100,
-    learnerCount: 1,
-    settingsPath: "/tmp/app-settings.protected.json",
     configurationError: null
   },
   ai: {

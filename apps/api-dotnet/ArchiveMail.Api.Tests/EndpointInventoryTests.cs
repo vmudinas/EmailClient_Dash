@@ -40,7 +40,6 @@ public sealed class EndpointInventoryTests
         app.MapSmartRuleEndpoints();
         app.MapCalendarEndpoints();
         app.MapPropertyEndpoints();
-        app.MapLithuanianEndpoints();
         app.MapAdminEndpoints();
 
         var endpoints = ((IEndpointRouteBuilder)app).DataSources

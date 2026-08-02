@@ -120,22 +120,6 @@ public static class DatabaseSettingsEndpoints
             application.UpdateAi(request);
             return Results.Ok(await admin.ViewAsync(token));
         }).WithName("UpdateAiSettings").WithTags("Admin settings");
-        // The trainer's speech-to-text key is kept apart from the mail AI providers: it pays for a
-        // child's practice recordings and can be revoked without disturbing mail analysis.
-        app.MapMethods("/api/admin/settings/lithuanian", ["PATCH"], async (JsonElement request, HttpContext context,
-            AppSettingsService application, AdminSettingsViewService admin, CancellationToken token) =>
-        {
-            if (!IsAdmin(context)) return Results.Forbid();
-            application.UpdateLithuanian(request);
-            return Results.Ok(await admin.ViewAsync(token));
-        }).WithName("UpdateLithuanianSettings").WithTags("Admin settings");
-        app.MapDelete("/api/admin/settings/lithuanian/key", async (HttpContext context,
-            AppSettingsService application, AdminSettingsViewService admin, CancellationToken token) =>
-        {
-            if (!IsAdmin(context)) return Results.Forbid();
-            application.ClearLithuanianKey();
-            return Results.Ok(await admin.ViewAsync(token));
-        }).WithName("ClearLithuanianKey").WithTags("Admin settings");
         app.MapPost("/api/admin/settings/ai/active", async (JsonElement request, HttpContext context,
             AppSettingsService application, AdminSettingsViewService admin, CancellationToken token) =>
         {

@@ -35,23 +35,19 @@ public sealed class DatabaseInitializer(
             await command.ExecuteNonQueryAsync(cancellationToken);
         await using (var command = SchemaCommand(PropertySchemaSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
-        await using (var command = SchemaCommand(LearningSchemaSql, connection))
+        await using (var command = SchemaCommand(LearningTeardownSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
 
         var schemaContract = DatabaseSchemaContract.FromSql(
             CoreSchemaSql,
             ConnectedServicesSchemaSql,
-            PropertySchemaSql,
-            LearningSchemaSql);
+            PropertySchemaSql);
         await using (var command = SchemaCommand(schemaContract.DefaultRepairSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
 
         await EnsureDefaultAdministratorAsync(connection, cancellationToken);
         await using (var command = SchemaCommand(LegacyOwnershipRepairSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
-        // After the ownership repair: that query hands orphaned rows to the earliest account,
-        // and the learner must never be a candidate for them.
-        await EnsureLithuanianLearnerAsync(connection, cancellationToken);
         await schemaContract.ValidateAsync(connection, schema, cancellationToken);
         logger.LogInformation("C# PostgreSQL schema is ready in {Schema}", schema);
     }
@@ -83,90 +79,12 @@ public sealed class DatabaseInitializer(
         await insert.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    /// <summary>
-    /// Lucas signs in to the Lithuanian trainer and nothing else, so the account is created for
-    /// every installation rather than only on a fresh database. An existing lucas account -- and
-    /// any PIN already chosen for it -- is left untouched.
-    /// </summary>
-    private static async Task EnsureLithuanianLearnerAsync(
-        NpgsqlConnection connection,
-        CancellationToken cancellationToken)
-    {
-        await using var existing = new NpgsqlCommand(
-            "SELECT 1 FROM users WHERE lower(username) = 'lucas' LIMIT 1", connection);
-        if (await existing.ExecuteScalarAsync(cancellationToken) is not null) return;
-
-        var (hash, salt) = AuthService.HashSecret("2332");
-        var now = DateTimeOffset.UtcNow.ToString("O");
-        const string sql = """
-            INSERT INTO users (
-              id, username, display_name, role, pin_hash, pin_salt,
-              is_active, must_change_pin, allowed_screens, created_at, updated_at
-            ) VALUES (@id, 'lucas', 'Lucas', 'lucas', @hash, @salt, 1, 0, '[]', @now, @now)
-            ON CONFLICT DO NOTHING;
-            """;
-        await using var insert = new NpgsqlCommand(sql, connection);
-        insert.Parameters.AddWithValue("id", Guid.NewGuid().ToString());
-        insert.Parameters.AddWithValue("hash", hash);
-        insert.Parameters.AddWithValue("salt", salt);
-        insert.Parameters.AddWithValue("now", now);
-        await insert.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    internal const string LearningSchemaSql = """
-        CREATE TABLE IF NOT EXISTS lithuanian_words (
-          id TEXT PRIMARY KEY,
-          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          lithuanian TEXT NOT NULL,
-          english TEXT NOT NULL,
-          kind TEXT NOT NULL DEFAULT 'word' CHECK(kind IN ('word', 'phrase')),
-          hints_json TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS lithuanian_words_owner_idx ON lithuanian_words(owner_user_id, created_at DESC);
-        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'word';
-        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS hints_json TEXT;
-        -- The cached reference pronunciation. Null until one is generated, which is why every
-        -- read has to cope with its absence rather than assuming a file is there.
-        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS pronunciation_key TEXT;
-        ALTER TABLE lithuanian_words ADD COLUMN IF NOT EXISTS pronunciation_type TEXT;
-        ALTER TABLE lithuanian_words DROP CONSTRAINT IF EXISTS lithuanian_words_kind_check;
-        ALTER TABLE lithuanian_words ADD CONSTRAINT lithuanian_words_kind_check
-          CHECK(kind IN ('word', 'phrase'));
-        CREATE UNIQUE INDEX IF NOT EXISTS lithuanian_words_owner_pair_unique
-          ON lithuanian_words (owner_user_id, lower(lithuanian), lower(english));
-
-        -- One finished game. Only the numbers are kept: the questions were drawn from the words
-        -- table and are not worth replaying, but the best score is what the learner comes back for.
-        CREATE TABLE IF NOT EXISTS lithuanian_games (
-          id TEXT PRIMARY KEY,
-          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          score BIGINT NOT NULL DEFAULT 0,
-          best_combo BIGINT NOT NULL DEFAULT 0,
-          played_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS lithuanian_games_owner_idx
-          ON lithuanian_games(owner_user_id, score DESC);
-
-        CREATE TABLE IF NOT EXISTS lithuanian_recordings (
-          id TEXT PRIMARY KEY,
-          word_id TEXT NOT NULL REFERENCES lithuanian_words(id) ON DELETE CASCADE,
-          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          content_type TEXT NOT NULL,
-          size_bytes BIGINT NOT NULL DEFAULT 0,
-          duration_ms BIGINT NOT NULL DEFAULT 0,
-          transcript TEXT,
-          score BIGINT,
-          storage_key TEXT NOT NULL,
-          recorded_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS lithuanian_recordings_word_idx ON lithuanian_recordings(word_id, recorded_at DESC);
-        ALTER TABLE lithuanian_recordings ADD COLUMN IF NOT EXISTS transcript TEXT;
-        ALTER TABLE lithuanian_recordings ADD COLUMN IF NOT EXISTS score BIGINT;
-        -- Only Lithuanian is recorded now; a development database from the first cut of this
-        -- feature still has the NOT NULL language column, which would reject every insert.
-        ALTER TABLE lithuanian_recordings DROP COLUMN IF EXISTS language;
+    // The Lithuanian trainer was removed. Dropping in dependency order rather than with CASCADE
+    // so an unexpected dependant surfaces as an error instead of being silently destroyed.
+    internal const string LearningTeardownSql = """
+        DROP TABLE IF EXISTS lithuanian_recordings;
+        DROP TABLE IF EXISTS lithuanian_games;
+        DROP TABLE IF EXISTS lithuanian_words;
         """;
 
     internal const string LegacyOwnershipRepairSql = """
@@ -186,7 +104,7 @@ public sealed class DatabaseInitializer(
           id TEXT PRIMARY KEY,
           username TEXT NOT NULL,
           display_name TEXT NOT NULL,
-          role TEXT NOT NULL CHECK(role IN ('admin', 'user', 'renter', 'lucas')),
+          role TEXT NOT NULL CHECK(role IN ('admin', 'user', 'renter')),
           pin_hash TEXT NOT NULL,
           pin_salt TEXT NOT NULL,
           is_active BIGINT NOT NULL DEFAULT 1,
@@ -198,13 +116,16 @@ public sealed class DatabaseInitializer(
         );
         CREATE UNIQUE INDEX IF NOT EXISTS users_username_nocase_unique ON users (lower(username));
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+        -- The Lithuanian trainer and its learner account were removed; the rows must go before
+        -- the narrowed constraint is applied or the ALTER rejects them.
+        DELETE FROM users WHERE role='lucas';
         ALTER TABLE users ADD CONSTRAINT users_role_check
-          CHECK(role IN ('admin', 'user', 'renter', 'lucas'));
+          CHECK(role IN ('admin', 'user', 'renter'));
 
         CREATE TABLE IF NOT EXISTS auth_sessions (
           id TEXT PRIMARY KEY,
           user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          effective_role TEXT NOT NULL CHECK(effective_role IN ('admin', 'user', 'renter', 'lucas')),
+          effective_role TEXT NOT NULL CHECK(effective_role IN ('admin', 'user', 'renter')),
           token_hash TEXT NOT NULL UNIQUE,
           ip_address TEXT NOT NULL,
           user_agent TEXT,
@@ -215,10 +136,10 @@ public sealed class DatabaseInitializer(
         );
         CREATE INDEX IF NOT EXISTS auth_sessions_expiry_idx ON auth_sessions(expires_at);
         CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id, created_at DESC);
-        DELETE FROM auth_sessions WHERE effective_role='viewer';
+        DELETE FROM auth_sessions WHERE effective_role IN ('viewer', 'lucas');
         ALTER TABLE auth_sessions DROP CONSTRAINT IF EXISTS auth_sessions_effective_role_check;
         ALTER TABLE auth_sessions ADD CONSTRAINT auth_sessions_effective_role_check
-          CHECK(effective_role IN ('admin', 'user', 'renter', 'lucas'));
+          CHECK(effective_role IN ('admin', 'user', 'renter'));
 
         CREATE TABLE IF NOT EXISTS archives (
           id TEXT PRIMARY KEY,
