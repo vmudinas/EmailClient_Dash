@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CircleAlert, FileEdit, LoaderCircle, MailPlus, Paperclip, Save, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import type { GmailConnection, GmailSendAsAlias, GmailSendRequest } from "@email-client/shared";
+import { SENDING_ADDRESSES, defaultSendingAddress, isAllowedSendingAddress } from "../lib/sendingIdentity.js";
 
 export interface ComposeDraft {
   id?: string;
@@ -79,20 +80,20 @@ export function ComposeDialog({
       setAliases([]);
       return;
     }
-    const connection = senders.find((entry) => entry.id === connectionId);
-    setFromAddress(initialDraft?.fromAddress || connection?.email || "");
-    setAliases(connection ? [{ email: connection.email, displayName: "", isPrimary: true, isDefault: true }] : []);
+    // The server accepts only the configured addresses, so those are the choices offered here
+    // rather than whatever the connected account happens to expose. Gmail's own aliases are still
+    // fetched, but only to label the ones it recognises -- an address Gmail has not verified will
+    // be refused by Google at send time, and saying so up front beats a failed send.
+    setFromAddress(initialDraft?.fromAddress && isAllowedSendingAddress(initialDraft.fromAddress)
+      ? initialDraft.fromAddress
+      : defaultSendingAddress(Boolean(initialDraft?.resumeId)));
+    setAliases([]);
     let active = true;
     void onLoadSendAsAliases(connectionId).then((loaded) => {
-      if (active && loaded.length > 0) {
-        setAliases(loaded);
-        setFromAddress((current) => loaded.some((alias) => alias.email === current)
-          ? current
-          : loaded.find((alias) => alias.isDefault)?.email ?? loaded[0]!.email);
-      }
+      if (active) setAliases(loaded);
     });
     return () => { active = false; };
-  }, [open, connectionId, senders, onLoadSendAsAliases]);
+  }, [open, connectionId, senders, onLoadSendAsAliases, initialDraft]);
 
   if (!open) return null;
   const selectedConnection = senders.find((connection) => connection.id === connectionId);
@@ -102,7 +103,10 @@ export function ComposeDialog({
     bcc: parseRecipients(bcc),
     subject,
     bodyText,
-    ...(fromAddress && fromAddress !== selectedConnection?.email ? { fromAddress } : {}),
+    // Always sent, even when it matches the connected account: the address is now a deliberate
+    // choice rather than a deviation from the account default, and omitting it would hand the
+    // server a blank to fill in.
+    ...(fromAddress ? { fromAddress } : {}),
     ...(initialDraft?.sourceMessageId ? { sourceMessageId: initialDraft.sourceMessageId } : {})
   };
   const ready = Boolean(connectionId)
@@ -132,8 +136,9 @@ export function ComposeDialog({
           ) : (
             <>
               <label className="compose-line"><span>From</span><select value={connectionId} onChange={(event) => setConnectionId(event.target.value)}>{senders.map((connection) => <option key={connection.id} value={connection.id}>{connection.email}</option>)}</select></label>
-              {aliases.length > 1 && (
-                <label className="compose-line"><span>Send as</span><select value={fromAddress} onChange={(event) => setFromAddress(event.target.value)}>{aliases.map((alias) => <option key={alias.email} value={alias.email}>{alias.displayName ? `${alias.displayName} <${alias.email}>` : alias.email}</option>)}</select></label>
+              <label className="compose-line"><span>Send as</span><select value={fromAddress} onChange={(event) => setFromAddress(event.target.value)}>{SENDING_ADDRESSES.map((entry) => <option key={entry.email} value={entry.email}>{`${entry.email} — ${entry.label}`}</option>)}</select></label>
+              {aliases.length > 0 && !aliases.some((alias) => alias.email.trim().toLowerCase() === fromAddress.trim().toLowerCase()) && (
+                <p className="compose-line compose-hint">Gmail has not verified {fromAddress} as a send-as alias on {selectedConnection?.email}. Google will refuse the send until it is added there.</p>
               )}
               <label className="compose-line"><span>To</span><input autoFocus value={to} onChange={(event) => setTo(event.target.value)} placeholder="name@example.com" /></label>
               {!showCopies ? (

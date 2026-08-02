@@ -8,6 +8,7 @@ using System.Globalization;
 using System.Text.Json;
 using ArchiveMail.Api.Imports;
 using ArchiveMail.Api.Infrastructure;
+using ArchiveMail.Api.Mail;
 using MimeKit;
 using Npgsql;
 using NpgsqlTypes;
@@ -182,7 +183,15 @@ public sealed class GmailService(
 
     public async Task<object> SendAsync(string id,string owner,JsonElement input,CancellationToken token)
     {
-        var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");if(!connection.Public.CanSend)throw new InvalidOperationException("Reconnect this account to grant Gmail send permission");var accessToken=await AccessTokenAsync(connection,token);var message=new MimeMessage();message.From.Add(MailboxAddress.Parse(Text(input,"fromAddress")??connection.Public.Email));foreach(var value in Strings(input,"to"))message.To.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"cc"))message.Cc.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"bcc"))message.Bcc.Add(MailboxAddress.Parse(value));message.Subject=Text(input,"subject")??"";message.Body=new TextPart("plain"){Text=Text(input,"bodyText")??""};await using var stream=new MemoryStream();await message.WriteToAsync(stream,token);var payload=JsonSerializer.SerializeToElement(new{raw=Base64Url(stream.ToArray())});var sent=await GoogleJsonAsync($"{GmailApi}/users/me/messages/send",accessToken,HttpMethod.Post,payload,token);return new{id=sent.GetProperty("id").GetString(),threadId=sent.TryGetProperty("threadId",out var thread)?thread.GetString():null,localCopyImported=false};
+        var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");if(!connection.Public.CanSend)throw new InvalidOperationException("Reconnect this account to grant Gmail send permission");var accessToken=await AccessTokenAsync(connection,token);var message=new MimeMessage();
+        // Last gate before the message leaves. Every send path reaches this line, so refusing an
+        // address here is what makes the allowlist a guarantee rather than a UI default. The
+        // connection's own address is not a fallback: it is exactly the address we do not want
+        // mail arriving from.
+        // Callers that care about the recruiter/development split resolve it when the draft is
+        // written, where the flag lives; anything arriving here without a choice is general mail.
+        var fromAddress=SendingIdentity.Resolve(Text(input,"fromAddress"),developmentRelated:false);
+        message.From.Add(MailboxAddress.Parse(fromAddress));foreach(var value in Strings(input,"to"))message.To.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"cc"))message.Cc.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"bcc"))message.Bcc.Add(MailboxAddress.Parse(value));message.Subject=Text(input,"subject")??"";message.Body=new TextPart("plain"){Text=Text(input,"bodyText")??""};await using var stream=new MemoryStream();await message.WriteToAsync(stream,token);var payload=JsonSerializer.SerializeToElement(new{raw=Base64Url(stream.ToArray())});var sent=await GoogleJsonAsync($"{GmailApi}/users/me/messages/send",accessToken,HttpMethod.Post,payload,token);return new{id=sent.GetProperty("id").GetString(),threadId=sent.TryGetProperty("threadId",out var thread)?thread.GetString():null,localCopyImported=false};
     }
 
     public async Task<IReadOnlyList<object>> SendAsAsync(string id,string owner,CancellationToken token){var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");var accessToken=await AccessTokenAsync(connection,token);var json=await GoogleJsonAsync($"{GmailApi}/users/me/settings/sendAs",accessToken,HttpMethod.Get,null,token);if(!json.TryGetProperty("sendAs",out var values)||values.ValueKind!=JsonValueKind.Array)return[];return values.EnumerateArray().Where(item=>item.TryGetProperty("sendAsEmail",out _)).Select(item=>(object)new{email=item.GetProperty("sendAsEmail").GetString(),displayName=item.TryGetProperty("displayName",out var display)?display.GetString()??"":"",isPrimary=item.TryGetProperty("isPrimary",out var primary)&&primary.GetBoolean(),isDefault=item.TryGetProperty("isDefault",out var fallback)&&fallback.GetBoolean()}).ToArray();}
