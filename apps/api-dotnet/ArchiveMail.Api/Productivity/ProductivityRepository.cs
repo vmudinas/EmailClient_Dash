@@ -49,7 +49,12 @@ public sealed class ProductivityRepository(NpgsqlDataSource database, ActiveData
             """;
         await using var command = database.CreateCommand(sql);
         command.Parameters.AddWithValue(id); command.Parameters.AddWithValue(connectionId);
-        AddNullable(command, Source(input, "sourceMessageId")); AddNullable(command, Source(input, "fromAddress"));
+        // A draft carrying a resume is a reply about engineering work, so it goes out from the
+        // development address; anything else defaults to the automated one. Storing the resolved
+        // address rather than null means the draft shows the user which identity it will use.
+        var developmentRelated = Source(input, "resumeId") is { Length: > 0 };
+        AddNullable(command, Source(input, "sourceMessageId"));
+        command.Parameters.AddWithValue(SendingIdentity.Resolve(Source(input, "fromAddress"), developmentRelated));
         command.Parameters.AddWithValue(JsonSerializer.Serialize(Strings(input, "to"), JsonOptions));
         command.Parameters.AddWithValue(JsonSerializer.Serialize(Strings(input, "cc"), JsonOptions));
         command.Parameters.AddWithValue(JsonSerializer.Serialize(Strings(input, "bcc"), JsonOptions));
@@ -69,12 +74,15 @@ public sealed class ProductivityRepository(NpgsqlDataSource database, ActiveData
               subject=$7,body_text=$8,resume_id=$9,updated_at=$10 WHERE id=$1
             """;
         await using var command = database.CreateCommand(sql); command.Parameters.AddWithValue(id); command.Parameters.AddWithValue(connectionId);
-        AddNullable(command, input.TryGetProperty("fromAddress", out _) ? Source(input, "fromAddress") : current.FromAddress);
+        var editedResumeId = input.TryGetProperty("resumeId", out _) ? Source(input, "resumeId") : current.ResumeId;
+        command.Parameters.AddWithValue(SendingIdentity.Resolve(
+            input.TryGetProperty("fromAddress", out _) ? Source(input, "fromAddress") : current.FromAddress,
+            editedResumeId is { Length: > 0 }));
         command.Parameters.AddWithValue(JsonSerializer.Serialize(input.TryGetProperty("to", out _) ? Strings(input, "to") : current.To, JsonOptions));
         command.Parameters.AddWithValue(JsonSerializer.Serialize(input.TryGetProperty("cc", out _) ? Strings(input, "cc") : current.Cc, JsonOptions));
         command.Parameters.AddWithValue(JsonSerializer.Serialize(input.TryGetProperty("bcc", out _) ? Strings(input, "bcc") : current.Bcc, JsonOptions));
         command.Parameters.AddWithValue(Source(input, "subject") ?? current.Subject); command.Parameters.AddWithValue(Source(input, "bodyText") ?? current.BodyText);
-        AddNullable(command, input.TryGetProperty("resumeId", out _) ? Source(input, "resumeId") : current.ResumeId); command.Parameters.AddWithValue(now);
+        AddNullable(command, editedResumeId); command.Parameters.AddWithValue(now);
         await command.ExecuteNonQueryAsync(token); return (await GetDraftAsync(id, owner, token))!;
     }
 

@@ -60,11 +60,13 @@ describe("ComposeDialog", () => {
       cc: [],
       bcc: [],
       subject: "Archive Mail test",
-      bodyText: "Sent from the local client."
+      bodyText: "Sent from the local client.",
+      // Always sent, and defaulting to the automated address rather than the connected account.
+      fromAddress: "ai@vitas.work"
     });
   });
 
-  it("lets a verified send-as alias be chosen as the From address", async () => {
+  it("offers only the configured sending addresses, not the account's own aliases", async () => {
     const onSend = vi.fn();
     const onLoadSendAsAliases = vi.fn().mockResolvedValue([
       { email: "owner@example.test", displayName: "", isPrimary: true, isDefault: true },
@@ -85,10 +87,19 @@ describe("ComposeDialog", () => {
       />
     );
 
-    await screen.findByRole("combobox", { name: "Send as" });
-    fireEvent.change(screen.getByRole("combobox", { name: "Send as" }), {
-      target: { value: "alias@example.test" }
-    });
+    const sendAs = await screen.findByRole("combobox", { name: "Send as" });
+    const offered = [...sendAs.querySelectorAll("option")].map((option) => option.value);
+    expect(offered).toEqual([
+      "ai@vitas.work",
+      "code@vitas.work",
+      "me@vitas.work",
+      "gliukaz@gmail.com"
+    ]);
+    // Gmail's own aliases are not choices: the server refuses anything outside the list above.
+    expect(offered).not.toContain("alias@example.test");
+    expect(offered).not.toContain("owner@example.test");
+
+    fireEvent.change(sendAs, { target: { value: "code@vitas.work" } });
     fireEvent.change(screen.getByRole("textbox", { name: "To" }), {
       target: { value: "recipient@example.test" }
     });
@@ -98,8 +109,31 @@ describe("ComposeDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     expect(onSend).toHaveBeenCalledWith(CONNECTION.id, expect.objectContaining({
-      fromAddress: "alias@example.test"
+      fromAddress: "code@vitas.work"
     }));
+  });
+
+  it("warns when Gmail has not verified the chosen address on that account", async () => {
+    const onLoadSendAsAliases = vi.fn().mockResolvedValue([
+      { email: "owner@example.test", displayName: "", isPrimary: true, isDefault: true }
+    ]);
+    render(
+      <ComposeDialog
+        open
+        connections={[CONNECTION]}
+        initialConnectionId={CONNECTION.id}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onOpenGmail={vi.fn()}
+        onLoadSendAsAliases={onLoadSendAsAliases}
+        onSave={vi.fn()}
+        onSend={vi.fn()}
+      />
+    );
+
+    // Google rejects an unverified From at send time, so the dialog says so before the attempt.
+    expect(await screen.findByText(/has not verified ai@vitas.work/i)).toBeTruthy();
   });
 
   it("directs read-only OAuth connections back to Gmail authorization", () => {
