@@ -23,7 +23,6 @@ public sealed class AdminSettingsViewService(
         var stocks = application.StocksValue;
         var news = application.NewsValue;
         var ai = application.AiValue;
-        var lithuanian = application.LithuanianValue;
         var polling = application.PollingValue;
         // Merge the catalog with saved overrides so the admin screen gets labels, defaults
         // and effective values in one payload and never has to hardcode the loop list.
@@ -115,34 +114,6 @@ public sealed class AdminSettingsViewService(
             drafts = new { drafts.DefaultFromAddress, drafts.SenderName, settingsPath = appSettings.SettingsPath, configurationError = (string?)null },
             stocks = new { symbols = stocks.Symbols ?? Array.Empty<string>(), stocks.SecondsPerSymbol, settingsPath = appSettings.SettingsPath, configurationError = (string?)null },
             news = new { enabledSources = news.EnabledSources ?? Array.Empty<string>(), news.SecondsPerHeadline, settingsPath = appSettings.SettingsPath, configurationError = (string?)null },
-            lithuanian = new
-            {
-                apiKeyConfigured = lithuanian.ApiKey.Length > 0,
-                environmentManaged = !string.IsNullOrWhiteSpace(
-                    Environment.GetEnvironmentVariable(LithuanianDefaults.ApiKeyVariable)),
-                source = lithuanian.ApiKey.Length == 0
-                    ? "none"
-                    : !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(LithuanianDefaults.ApiKeyVariable))
-                        ? "environment"
-                        : "admin",
-                model = lithuanian.Model,
-                defaultModel = LithuanianDefaults.TranscriptionModel,
-                hintModel = lithuanian.HintModel,
-                defaultHintModel = LithuanianDefaults.HintModel,
-                translationModel = lithuanian.TranslationModel,
-                defaultTranslationModel = LithuanianDefaults.TranslationModel,
-                speechModel = lithuanian.SpeechModel,
-                defaultSpeechModel = LithuanianDefaults.SpeechModel,
-                speechVoice = lithuanian.SpeechVoice,
-                defaultSpeechVoice = LithuanianDefaults.SpeechVoice,
-                passMark = lithuanian.PassMark,
-                defaultPassMark = LithuanianDefaults.PassMark,
-                minimumPassMark = LithuanianDefaults.MinimumPassMark,
-                maximumPassMark = LithuanianDefaults.MaximumPassMark,
-                learnerCount = users.Count(user => user.Role == "lucas"),
-                settingsPath = appSettings.SettingsPath,
-                configurationError = (string?)null
-            },
             ai = new
             {
                 ai.ActiveProvider,

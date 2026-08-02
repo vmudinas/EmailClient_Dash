@@ -170,7 +170,7 @@ function GuideContent({ section }: { section: GuideSection }) {
         <p>Every application launch requires a named Archive Mail user and PIN. Change the bootstrap administrator PIN under Admin settings and Security before the service is reachable by anyone else.</p>
         <ul>
           <li>PINs are salted and hashed. Session tokens are stored as hashes, bound to the login IP address, and revoked when the service restarts.</li>
-          <li>Administrators can create standard, renter, or Lithuanian learner accounts, change roles, disable or delete access, reset PINs, and review or export the audit history. Renter accounts are restricted to their linked tenant portal, and Lithuanian learner accounts to the practice screen.</li>
+          <li>Administrators can create standard or renter accounts, change roles, disable or delete access, reset PINs, and review or export the audit history. Renter accounts are restricted to their linked tenant portal.</li>
           <li>Audit entries include user, time, action, result, IP address, route, and user agent. PINs, tokens, and email bodies are excluded.</li>
         </ul>
         <h4>Database adapters</h4>

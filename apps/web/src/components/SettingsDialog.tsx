@@ -90,7 +90,7 @@ import {
 import type { ApiClient } from "../lib/api.js";
 import { formatBytes } from "../lib/format.js";
 
-type SettingsSection = "tools" | "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "inbox-tabs" | "ai" | "lithuanian" | "resumes" | "insights" | "users" | "security" | "audit";
+type SettingsSection = "tools" | "database" | "gmail" | "calendars" | "drafts" | "stocks" | "news" | "reply-styles" | "sender-filing" | "smart-rules" | "inbox-tabs" | "ai" | "resumes" | "insights" | "users" | "security" | "audit";
 
 const AI_PROVIDER_LABELS: Record<AiProviderId, string> = { openai: "OpenAI", deepseek: "DeepSeek" };
 const AI_PROVIDER_ENV_VARS: Record<AiProviderId, string> = { openai: "OPENAI_API_KEY", deepseek: "DEEPSEEK_API_KEY" };
@@ -145,7 +145,6 @@ const MENU: Array<{ id: SettingsSection; label: string; icon: typeof Database }>
   { id: "smart-rules", label: "Smart rules", icon: MailCheck },
   { id: "inbox-tabs", label: "Inbox tabs", icon: ListFilter },
   { id: "ai", label: "AI", icon: BrainCircuit },
-  { id: "lithuanian", label: "Lithuanian", icon: Languages },
   { id: "resumes", label: "Resumes", icon: Paperclip },
   { id: "insights", label: "Insights", icon: BarChart3 },
   { id: "users", label: "Users", icon: Users },
@@ -330,17 +329,6 @@ export function SettingsDialog({
                     onError={setError}
                     onNotice={showNotice}
                     onChanged={onNewsSettingsChanged}
-                  />
-                )}
-                {section === "lithuanian" && settings && (
-                  <LithuanianSettingsPanel
-                    api={api!}
-                    settings={settings}
-                    busy={busy}
-                    onBusy={setBusy}
-                    onSettings={setSettings}
-                    onError={setError}
-                    onNotice={showNotice}
                   />
                 )}
                 {section === "sender-filing" && (
@@ -2443,233 +2431,6 @@ function StockSettingsPanel({
   );
 }
 
-/**
- * Speech-to-text credentials for the Lithuanian trainer, kept apart from the mail AI providers:
- * this key is spent on a child's practice recordings and can be revoked on its own.
- */
-function LithuanianSettingsPanel({
-  api,
-  settings,
-  busy,
-  onBusy,
-  onSettings,
-  onError,
-  onNotice
-}: {
-  api: ApiClient;
-  settings: AdminSettings;
-  busy: boolean;
-  onBusy(value: boolean): void;
-  onSettings(value: AdminSettings): void;
-  onError(value: string): void;
-  onNotice(value: string): void;
-}) {
-  const trainer = settings.lithuanian;
-  const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState(trainer.model || trainer.defaultModel);
-  const [hintModel, setHintModel] = useState(trainer.hintModel || trainer.defaultHintModel);
-  const [translationModel, setTranslationModel] = useState(
-    trainer.translationModel || trainer.defaultTranslationModel
-  );
-  const [speechModel, setSpeechModel] = useState(trainer.speechModel || trainer.defaultSpeechModel);
-  const [speechVoice, setSpeechVoice] = useState(trainer.speechVoice || trainer.defaultSpeechVoice);
-  const [passMark, setPassMark] = useState(String(trainer.passMark));
-
-  useEffect(() => {
-    setSpeechModel(trainer.speechModel || trainer.defaultSpeechModel);
-    setSpeechVoice(trainer.speechVoice || trainer.defaultSpeechVoice);
-  }, [trainer.speechModel, trainer.defaultSpeechModel, trainer.speechVoice, trainer.defaultSpeechVoice]);
-
-  useEffect(() => {
-    setModel(trainer.model || trainer.defaultModel);
-    setHintModel(trainer.hintModel || trainer.defaultHintModel);
-    setTranslationModel(trainer.translationModel || trainer.defaultTranslationModel);
-    setPassMark(String(trainer.passMark));
-  }, [
-    trainer.model, trainer.defaultModel, trainer.hintModel, trainer.defaultHintModel,
-    trainer.translationModel, trainer.defaultTranslationModel, trainer.passMark
-  ]);
-
-  const parsedPassMark = Number.parseInt(passMark, 10);
-  const passMarkValid = Number.isInteger(parsedPassMark)
-    && parsedPassMark >= trainer.minimumPassMark
-    && parsedPassMark <= trainer.maximumPassMark;
-
-  const save = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!passMarkValid) {
-      onError(`The pass mark must be between ${trainer.minimumPassMark} and ${trainer.maximumPassMark}.`);
-      return;
-    }
-    onBusy(true);
-    onError("");
-    try {
-      onSettings(await api.updateLithuanianSettings({
-        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-        model: model.trim() || trainer.defaultModel,
-        hintModel: hintModel.trim() || trainer.defaultHintModel,
-        translationModel: translationModel.trim() || trainer.defaultTranslationModel,
-        speechModel: speechModel.trim() || trainer.defaultSpeechModel,
-        speechVoice: speechVoice.trim() || trainer.defaultSpeechVoice,
-        passMark: parsedPassMark
-      }));
-      setApiKey("");
-      onNotice("Lithuanian trainer settings saved.");
-    } catch (saveError) {
-      onError(errorText(saveError));
-    } finally {
-      onBusy(false);
-    }
-  };
-
-  const clearKey = async () => {
-    if (!window.confirm("Remove the stored key? Recordings will be saved without a score until a new key is added.")) return;
-    onBusy(true);
-    onError("");
-    try {
-      onSettings(await api.clearLithuanianApiKey());
-      onNotice("Stored key removed.");
-    } catch (clearError) {
-      onError(errorText(clearError));
-    } finally {
-      onBusy(false);
-    }
-  };
-
-  return (
-    <>
-      <h3>Lithuanian trainer</h3>
-      <p>
-        Learner accounts record themselves saying a Lithuanian word. The recording is transcribed
-        with OpenAI speech-to-text and scored against the word; {trainer.passMark}% or higher passes.
-        {" "}{trainer.learnerCount === 0
-          ? "No learner accounts exist yet — create one under Users with the Lithuanian learner role."
-          : `${trainer.learnerCount} learner ${trainer.learnerCount === 1 ? "account uses" : "accounts use"} this.`}
-      </p>
-      <p className="settings-warning neutral">
-        Practice recordings are uploaded to OpenAI for transcription. This key is separate from the
-        mail AI providers, so removing it stops those uploads without affecting mail analysis.
-        Without a key, recordings are still saved with their date but are left unscored.
-      </p>
-      <form className="settings-form" onSubmit={(event) => void save(event)}>
-        <label>
-          OpenAI API key
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-            placeholder={trainer.apiKeyConfigured ? "Stored — enter a new key to replace it" : "sk-…"}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={busy || trainer.environmentManaged}
-          />
-        </label>
-        <small>
-          {trainer.environmentManaged
-            ? "Set by the LITHUANIAN_OPENAI_API_KEY environment variable, which wins over anything saved here."
-            : trainer.apiKeyConfigured
-              ? `Stored encrypted in ${trainer.settingsPath}. It is never shown again after saving.`
-              : `Saved encrypted to ${trainer.settingsPath}, outside the repository.`}
-        </small>
-        <label>
-          Transcription model
-          <input
-            value={model}
-            onChange={(event) => setModel(event.target.value)}
-            placeholder={trainer.defaultModel}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={busy}
-          />
-        </label>
-        <small>Default {trainer.defaultModel}. Change this if OpenAI retires or renames the model.</small>
-        <label>
-          Hint model
-          <input
-            value={hintModel}
-            onChange={(event) => setHintModel(event.target.value)}
-            placeholder={trainer.defaultHintModel}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={busy}
-          />
-        </label>
-        <small>Writes the word-by-word breakdown for phrases. Default {trainer.defaultHintModel}.</small>
-        <label>
-          Translation model
-          <input
-            value={translationModel}
-            onChange={(event) => setTranslationModel(event.target.value)}
-            placeholder={trainer.defaultTranslationModel}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={busy}
-          />
-        </label>
-        <small>
-          Turns the English Lucas types into the Lithuanian he practises.
-          Default {trainer.defaultTranslationModel}.
-        </small>
-        <label>
-          Speech model
-          <input
-            value={speechModel}
-            onChange={(event) => setSpeechModel(event.target.value)}
-            placeholder={trainer.defaultSpeechModel}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={busy}
-          />
-        </label>
-        <label>
-          Speech voice
-          <input
-            value={speechVoice}
-            onChange={(event) => setSpeechVoice(event.target.value)}
-            placeholder={trainer.defaultSpeechVoice}
-            autoComplete="off"
-            spellCheck={false}
-            disabled={busy}
-          />
-        </label>
-        <small>
-          Says each word once when it is added, so every device plays the same recording instead of
-          relying on a Lithuanian voice being installed. Default {trainer.defaultSpeechModel} and
-          {" "}{trainer.defaultSpeechVoice} — how good a voice is at Lithuanian is a question for
-          the ear, so both are changeable here rather than fixed in a deploy.
-        </small>
-        <label>
-          Pass mark (%)
-          <input
-            type="number"
-            inputMode="numeric"
-            min={trainer.minimumPassMark}
-            max={trainer.maximumPassMark}
-            value={passMark}
-            onChange={(event) => setPassMark(event.target.value)}
-            disabled={busy}
-          />
-        </label>
-        <small>
-          A take at or above this scores a pass. {trainer.minimumPassMark}–{trainer.maximumPassMark}, default {trainer.defaultPassMark}.
-          Lower it while a learner is starting out; single isolated words are the hardest case for
-          speech recognition. Existing recordings are re-judged against the new mark.
-        </small>
-        <div className="settings-button-row">
-          <button className="primary-button compact" disabled={busy}>
-            {busy ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />} Save
-          </button>
-          {trainer.apiKeyConfigured && !trainer.environmentManaged && (
-            <button type="button" className="danger-button" disabled={busy} onClick={() => void clearKey()}>
-              <Trash2 size={16} /> Remove key
-            </button>
-          )}
-        </div>
-      </form>
-    </>
-  );
-}
-
 function NewsSettingsPanel({
   api,
   settings,
@@ -3866,7 +3627,6 @@ function UsersPanel({
 
   const screenAccessLabel = (user: UserSummary): string => {
     if (user.role === "renter") return "Tenant portal only";
-    if (user.role === "lucas") return "Lithuanian trainer only";
     if (user.role === "admin" || user.allowedScreens === null) return "All screens";
     return `Mail + ${user.allowedScreens.length} of ${USER_SCREENS.length}`;
   };
@@ -3885,9 +3645,7 @@ function UsersPanel({
         // screens added in future versions.
         allowedScreens: role === "renter"
           ? ["properties"]
-          : role === "lucas"
-            ? []
-            : role === "admin" || createScreens.length === USER_SCREENS.length ? null : createScreens
+          : role === "admin" || createScreens.length === USER_SCREENS.length ? null : createScreens
       });
       onUsers([...users, created].sort((a, b) => a.username.localeCompare(b.username)));
       setUsername("");
@@ -3896,9 +3654,7 @@ function UsersPanel({
       setCreateScreens(USER_SCREENS.map((screen) => screen.id));
       onNotice(role === "renter"
         ? `Renter ${created.username} created with tenant-portal-only access.`
-        : role === "lucas"
-          ? `Lithuanian learner ${created.username} created with access to the practice screen only.`
-          : `User ${created.username} created with an empty private mail and calendar workspace.`);
+        : `User ${created.username} created with an empty private mail and calendar workspace.`);
     } catch (createError) {
       onError(errorText(createError));
     } finally {
@@ -3958,7 +3714,7 @@ function UsersPanel({
   return (
     <>
       <h3>Users</h3>
-      <p>Administrators have full control, users receive private mail and calendar workspaces, renters can only open their linked tenant portal, and Lithuanian learners only open the practice screen.</p>
+      <p>Administrators have full control, users receive private mail and calendar workspaces, and renters can only open their linked tenant portal.</p>
       <div className="settings-table-wrap">
         <table className="settings-table">
           <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Access</th><th>Last login</th><th>Actions</th></tr></thead>
@@ -3968,7 +3724,7 @@ function UsersPanel({
                 <td><strong>{user.displayName}</strong><small>{user.username}{user.id === currentUserId ? " · current" : ""}</small></td>
                 <td>
                   <select value={user.role} disabled={busy} onChange={(event) => void update(user, { role: event.target.value as AccountRole })} aria-label={`Role for ${user.username}`}>
-                    <option value="user">User</option><option value="renter">Renter</option><option value="lucas">Lithuanian learner</option><option value="admin">Admin</option>
+                    <option value="user">User</option><option value="renter">Renter</option><option value="admin">Admin</option>
                   </select>
                 </td>
                 <td><span className={`status-text ${user.isActive ? "active" : "inactive"}`}>{user.isActive ? "Active" : "Disabled"}</span></td>
@@ -4036,7 +3792,7 @@ function UsersPanel({
         <div className="settings-form-grid">
           <label>Username<input value={username} onChange={(event) => setUsername(event.target.value.toLowerCase())} pattern="[a-z0-9][a-z0-9._-]{2,63}" required /></label>
           <label>Display name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={120} required /></label>
-          <label>Role<select value={role} onChange={(event) => setRole(event.target.value as AccountRole)}><option value="user">User</option><option value="renter">Renter</option><option value="lucas">Lithuanian learner</option><option value="admin">Admin</option></select></label>
+          <label>Role<select value={role} onChange={(event) => setRole(event.target.value as AccountRole)}><option value="user">User</option><option value="renter">Renter</option><option value="admin">Admin</option></select></label>
           <label>PIN<input type="password" inputMode="numeric" pattern="[0-9]{4,12}" value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 12))} required /></label>
         </div>
         {role === "user" && (
@@ -4061,7 +3817,6 @@ function UsersPanel({
           </fieldset>
         )}
         {role === "renter" && <p className="settings-warning neutral">Renter accounts can only access linked leases, charges, payments, documents, and maintenance conversations in the tenant portal.</p>}
-        {role === "lucas" && <p className="settings-warning neutral">Lithuanian learner accounts open one screen: word pairs, spoken pronunciation, and their own saved recordings.</p>}
         <button className="primary-button" disabled={busy || username.length < 3 || !displayName.trim() || pin.length < 4}><UserPlus size={16} /> Create user</button>
       </form>
     </>

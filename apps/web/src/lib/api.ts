@@ -55,16 +55,6 @@ import type {
   InboxTabReclassifyResult,
   InboxTabSettings,
   InboxTabSettingsUpdate,
-  LithuanianPractice,
-  LithuanianRecording,
-  LithuanianGameInput,
-  LithuanianGameResult,
-  LithuanianPhraseSuggestions,
-  LithuanianSettingsPatch,
-  LithuanianTranslateInput,
-  LithuanianTranslation,
-  LithuanianWord,
-  LithuanianWordCreate,
   LocalMessageState,
   LocalMessageStatePatch,
   MailboxMoveResult,
@@ -152,11 +142,6 @@ import type {
   UserUpdate,
   DatabaseSettingsPatch,
   DatabaseConnectionTestResult
-} from "@email-client/shared";
-import {
-  LITHUANIAN_MAX_PASS_MARK,
-  LITHUANIAN_MIN_PASS_MARK,
-  LITHUANIAN_PASS_MARK
 } from "@email-client/shared";
 
 export interface UploadProgress {
@@ -269,81 +254,6 @@ export class ApiClient {
     });
     this.setAccessToken(result.accessToken);
     return result;
-  }
-
-  async updateLithuanianSettings(input: LithuanianSettingsPatch): Promise<AdminSettings> {
-    return normalizeAdminSettings(await this.request("/api/admin/settings/lithuanian", {
-      method: "PATCH",
-      body: JSON.stringify(input)
-    }));
-  }
-
-  async clearLithuanianApiKey(): Promise<AdminSettings> {
-    return normalizeAdminSettings(await this.request("/api/admin/settings/lithuanian/key", { method: "DELETE" }));
-  }
-
-  lithuanianPractice(): Promise<LithuanianPractice> {
-    return this.request("/api/lithuanian/practice");
-  }
-
-  refreshLithuanianHints(wordId: string): Promise<LithuanianWord> {
-    return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}/hints`, { method: "POST" });
-  }
-
-  createLithuanianWord(input: LithuanianWordCreate): Promise<LithuanianWord> {
-    return this.request("/api/lithuanian/words", { method: "POST", body: JSON.stringify(input) });
-  }
-
-  translateLithuanian(input: LithuanianTranslateInput, signal?: AbortSignal): Promise<LithuanianTranslation> {
-    return this.request("/api/lithuanian/translate", { method: "POST", body: JSON.stringify(input), signal });
-  }
-
-  suggestLithuanianPhrases(english: string, signal?: AbortSignal): Promise<LithuanianPhraseSuggestions> {
-    return this.request("/api/lithuanian/phrases", {
-      method: "POST",
-      body: JSON.stringify({ english }),
-      signal
-    });
-  }
-
-  saveLithuanianGame(input: LithuanianGameInput): Promise<LithuanianGameResult> {
-    return this.request("/api/lithuanian/games", { method: "POST", body: JSON.stringify(input) });
-  }
-
-  lithuanianPronunciationBlob(wordId: string): Promise<Blob> {
-    return this.blobRequest(`/api/lithuanian/words/${encodeURIComponent(wordId)}/pronunciation`);
-  }
-
-  refreshLithuanianPronunciation(wordId: string): Promise<LithuanianWord> {
-    return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}/pronunciation`, { method: "POST" });
-  }
-
-  deleteLithuanianWord(wordId: string): Promise<void> {
-    return this.request(`/api/lithuanian/words/${encodeURIComponent(wordId)}`, { method: "DELETE" });
-  }
-
-  saveLithuanianRecording(
-    wordId: string,
-    audio: Blob,
-    durationMs: number,
-    transcript: string | null
-  ): Promise<LithuanianRecording> {
-    return this.request(
-      `/api/lithuanian/words/${encodeURIComponent(wordId)}/recordings?${queryString({ durationMs, transcript })}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": audio.type || "audio/webm" },
-        body: audio
-      }
-    );
-  }
-
-  lithuanianRecordingBlob(recordingId: string): Promise<Blob> {
-    return this.blobRequest(`/api/lithuanian/recordings/${encodeURIComponent(recordingId)}/content`);
-  }
-
-  deleteLithuanianRecording(recordingId: string): Promise<void> {
-    return this.request(`/api/lithuanian/recordings/${encodeURIComponent(recordingId)}`, { method: "DELETE" });
   }
 
   propertyOverview(): Promise<PropertyPortfolioOverview> {
@@ -1768,7 +1678,6 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
   const news = record(root.news);
   const ai = record(root.ai);
   const usage = record(ai.usage);
-  const lithuanian = record(root.lithuanian);
   const polling = record(root.polling);
 
   return {
@@ -1854,28 +1763,6 @@ function normalizeAdminSettings(value: unknown): AdminSettings {
       secondsPerHeadline: finiteNumber(news.secondsPerHeadline, 10),
       settingsPath: text(news.settingsPath),
       configurationError: nullableText(news.configurationError)
-    },
-    lithuanian: {
-      apiKeyConfigured: Boolean(lithuanian.apiKeyConfigured),
-      environmentManaged: Boolean(lithuanian.environmentManaged),
-      source: text(lithuanian.source, "none") as AdminSettings["lithuanian"]["source"],
-      model: text(lithuanian.model),
-      defaultModel: text(lithuanian.defaultModel),
-      hintModel: text(lithuanian.hintModel),
-      defaultHintModel: text(lithuanian.defaultHintModel),
-      translationModel: text(lithuanian.translationModel),
-      defaultTranslationModel: text(lithuanian.defaultTranslationModel),
-      speechModel: text(lithuanian.speechModel),
-      defaultSpeechModel: text(lithuanian.defaultSpeechModel),
-      speechVoice: text(lithuanian.speechVoice),
-      defaultSpeechVoice: text(lithuanian.defaultSpeechVoice),
-      passMark: finiteNumber(lithuanian.passMark, LITHUANIAN_PASS_MARK),
-      defaultPassMark: finiteNumber(lithuanian.defaultPassMark, LITHUANIAN_PASS_MARK),
-      minimumPassMark: finiteNumber(lithuanian.minimumPassMark, LITHUANIAN_MIN_PASS_MARK),
-      maximumPassMark: finiteNumber(lithuanian.maximumPassMark, LITHUANIAN_MAX_PASS_MARK),
-      learnerCount: finiteNumber(lithuanian.learnerCount),
-      settingsPath: text(lithuanian.settingsPath),
-      configurationError: nullableText(lithuanian.configurationError)
     },
     ai: {
       ...ai,
