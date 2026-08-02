@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CircleAlert, FileEdit, LoaderCircle, MailPlus, Paperclip, Save, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
-import type { GmailConnection, GmailSendAsAlias, GmailSendRequest } from "@email-client/shared";
-import { SENDING_ADDRESSES, defaultSendingAddress, isAllowedSendingAddress } from "../lib/sendingIdentity.js";
+import type { GmailConnection, GmailSendAsAlias, GmailSendRequest, ResumeAsset } from "@email-client/shared";
+import { DEVELOPMENT_FROM_ADDRESS, SENDING_ADDRESSES, defaultSendingAddress, isAllowedSendingAddress } from "../lib/sendingIdentity.js";
 
 export interface ComposeDraft {
   id?: string;
@@ -27,9 +27,12 @@ interface ComposeDialogProps {
   onClose(): void;
   onOpenGmail(): void;
   onLoadSendAsAliases(connectionId: string): Promise<GmailSendAsAlias[]>;
+  onLoadResumes?(): Promise<ResumeAsset[]>;
   onDelete?(): void;
-  onSave(connectionId: string, message: GmailSendRequest): void;
-  onSend(connectionId: string, message: GmailSendRequest): void;
+  // resumeId is passed alongside the message rather than inside it: GmailSendRequest is the
+  // payload Gmail itself receives, and a resume is an Archive Mail concept the draft carries.
+  onSave(connectionId: string, message: GmailSendRequest, resumeId: string | null): void;
+  onSend(connectionId: string, message: GmailSendRequest, resumeId: string | null): void;
 }
 
 export function ComposeDialog({
@@ -42,6 +45,7 @@ export function ComposeDialog({
   onClose,
   onOpenGmail,
   onLoadSendAsAliases,
+  onLoadResumes,
   onDelete,
   onSave,
   onSend
@@ -56,9 +60,12 @@ export function ComposeDialog({
   const [showCopies, setShowCopies] = useState(false);
   const [subject, setSubject] = useState("");
   const [bodyText, setBodyText] = useState("");
+  const [resumes, setResumes] = useState<ResumeAsset[]>([]);
+  const [resumeId, setResumeId] = useState("");
 
   useEffect(() => {
     if (!open) return;
+    setResumeId(initialDraft?.resumeId ?? "");
     setConnectionId(
       initialConnectionId && senders.some((connection) => connection.id === initialConnectionId)
         ? initialConnectionId
@@ -94,6 +101,17 @@ export function ComposeDialog({
     });
     return () => { active = false; };
   }, [open, connectionId, senders, onLoadSendAsAliases, initialDraft]);
+
+  useEffect(() => {
+    if (!open || !onLoadResumes) return;
+    let active = true;
+    // A failed load leaves the list empty rather than blocking the dialog: composing without a
+    // resume is the common case, and losing the attachment picker should not stop an email.
+    void onLoadResumes()
+      .then((loaded) => { if (active) setResumes(loaded); })
+      .catch(() => { if (active) setResumes([]); });
+    return () => { active = false; };
+  }, [open, onLoadResumes]);
 
   if (!open) return null;
   const selectedConnection = senders.find((connection) => connection.id === connectionId);
@@ -151,8 +169,22 @@ export function ComposeDialog({
               )}
               <label className="compose-line"><span>Subject</span><input value={subject} maxLength={998} onChange={(event) => setSubject(event.target.value)} /></label>
               <label className="compose-message"><span className="visually-hidden">Message</span><textarea value={bodyText} maxLength={1_000_000} onChange={(event) => setBodyText(event.target.value)} placeholder="Write a message" /></label>
-              {initialDraft?.resumeFilename && (
+              {resumes.length > 0 ? (
+                <label className="compose-line"><span>Résumé</span>
+                  <select value={resumeId} onChange={(event) => setResumeId(event.target.value)} disabled={busy}>
+                    <option value="">No résumé</option>
+                    {resumes.map((resume) => (
+                      <option key={resume.id} value={resume.id}>{resume.name} · {resume.filename}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : initialDraft?.resumeFilename ? (
+                // The picker needs the list; without it, still show what the draft already carries
+                // rather than implying nothing is attached.
                 <div className="compose-attachment"><Paperclip size={16} /><span>{initialDraft.resumeFilename}</span><small>Attached when this draft is sent</small></div>
+              ) : null}
+              {resumeId && (
+                <p className="compose-line compose-hint">Attached when this draft is sent, and mail with a résumé goes out from {DEVELOPMENT_FROM_ADDRESS} unless you choose otherwise above.</p>
               )}
             </>
           )}
@@ -161,10 +193,10 @@ export function ComposeDialog({
         <footer className="dialog-footer">
           {editing && onDelete && <button className="danger-button compose-delete-button" disabled={busy} onClick={onDelete}><Trash2 size={17} /> Delete draft</button>}
           <button className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button>
-          <button className="secondary-button" disabled={busy || !saveReady} onClick={() => onSave(connectionId, message)}>
+          <button className="secondary-button" disabled={busy || !saveReady} onClick={() => onSave(connectionId, message, resumeId || null)}>
             {busy ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />} Save draft
           </button>
-          <button className="primary-button" disabled={busy || !ready} onClick={() => onSend(connectionId, message)}>
+          <button className="primary-button" disabled={busy || !ready} onClick={() => onSend(connectionId, message, resumeId || null)}>
             {busy ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />} Send
           </button>
         </footer>

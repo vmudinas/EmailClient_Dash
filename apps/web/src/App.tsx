@@ -843,6 +843,15 @@ export function App() {
     }
   }, [api]);
 
+  const loadAvailableResumes = useCallback(async () => {
+    if (!api) return [];
+    try {
+      return await api.listAvailableResumes();
+    } catch {
+      return [];
+    }
+  }, [api]);
+
   const refreshGmailConnections = useCallback(async (showLoading = false) => {
     if (!api || readOnly) return;
     if (showLoading) setGmailLoading(true);
@@ -2269,7 +2278,7 @@ export function App() {
     }
   };
 
-  const sendGmailMessage = async (connectionId: string, message: GmailSendRequest) => {
+  const sendGmailMessage = async (connectionId: string, message: GmailSendRequest, resumeId: string | null = null) => {
     if (!api || readOnly) return;
     setComposeBusy(true);
     setComposeError("");
@@ -2285,7 +2294,7 @@ export function App() {
           subject: message.subject,
           bodyText: message.bodyText,
           fromAddress: message.fromAddress ?? null,
-          resumeId: composeDraft.resumeId ?? null
+          resumeId
         });
         result = await api.sendDraft(composeDraft.id);
         setDrafts((current) => current.filter((entry) => entry.id !== composeDraft.id));
@@ -2307,7 +2316,7 @@ export function App() {
     }
   };
 
-  const saveComposeDraft = async (connectionId: string, message: GmailSendRequest) => {
+  const saveComposeDraft = async (connectionId: string, message: GmailSendRequest, resumeId: string | null = null) => {
     if (!api || readOnly) return;
     setComposeBusy(true);
     setComposeError("");
@@ -2320,7 +2329,7 @@ export function App() {
         subject: message.subject,
         bodyText: message.bodyText,
         fromAddress: message.fromAddress ?? null,
-        resumeId: composeDraft?.resumeId ?? null
+        resumeId
       };
       const saved = composeDraft?.id
         ? await api.updateDraft(composeDraft.id, input)
@@ -2875,9 +2884,10 @@ export function App() {
           openGmail();
         }}
         onLoadSendAsAliases={loadSendAsAliases}
+        onLoadResumes={loadAvailableResumes}
         onDelete={composeDraft?.id && !readOnly ? () => void deleteOpenDraft() : undefined}
-        onSave={(connectionId, outgoing) => void saveComposeDraft(connectionId, outgoing)}
-        onSend={(connectionId, outgoing) => void sendGmailMessage(connectionId, outgoing)}
+        onSave={(connectionId, outgoing, resumeId) => void saveComposeDraft(connectionId, outgoing, resumeId)}
+        onSend={(connectionId, outgoing, resumeId) => void sendGmailMessage(connectionId, outgoing, resumeId)}
       />
       <DraftsDialog
         open={draftsOpen}

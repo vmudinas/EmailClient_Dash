@@ -63,7 +63,7 @@ describe("ComposeDialog", () => {
       bodyText: "Sent from the local client.",
       // Always sent, and defaulting to the automated address rather than the connected account.
       fromAddress: "ai@vitas.work"
-    });
+    }, null);
   });
 
   it("offers only the configured sending addresses, not the account's own aliases", async () => {
@@ -110,7 +110,7 @@ describe("ComposeDialog", () => {
 
     expect(onSend).toHaveBeenCalledWith(CONNECTION.id, expect.objectContaining({
       fromAddress: "code@vitas.work"
-    }));
+    }), null);
   });
 
   it("warns when Gmail has not verified the chosen address on that account", async () => {
@@ -199,9 +199,92 @@ describe("ComposeDialog", () => {
       to: ["recruiter@example.test"],
       bodyText: "Updated reply.",
       sourceMessageId: "11111111-1111-4111-8111-111111111111"
-    }));
+    }), "resume-1");
     expect(onSend).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Delete draft" }));
     expect(onDelete).toHaveBeenCalledOnce();
+  });
+
+  const RESUMES = [
+    { id: "resume-1", name: "Engineering", filename: "engineering-resume.pdf", contentType: "application/pdf", sizeBytes: 1, createdAt: "", updatedAt: "" },
+    { id: "resume-2", name: "Platform", filename: "platform-resume.pdf", contentType: "application/pdf", sizeBytes: 1, createdAt: "", updatedAt: "" }
+  ];
+
+  it("lets a resume be attached to a manually composed draft", async () => {
+    const onSave = vi.fn();
+    render(
+      <ComposeDialog
+        open
+        connections={[CONNECTION]}
+        initialConnectionId={CONNECTION.id}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onOpenGmail={vi.fn()}
+        onLoadSendAsAliases={vi.fn().mockResolvedValue([])}
+        onLoadResumes={vi.fn().mockResolvedValue(RESUMES)}
+        onSave={onSave}
+        onSend={vi.fn()}
+      />
+    );
+
+    // Before this existed a manual draft could never carry a resume, which also meant it could
+    // never reach the code@ default.
+    const picker = await screen.findByRole("combobox", { name: "Résumé" });
+    fireEvent.change(picker, { target: { value: "resume-2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+
+    expect(onSave).toHaveBeenCalledWith(CONNECTION.id, expect.anything(), "resume-2");
+  });
+
+  it("preselects the resume a draft already carries and can detach it", async () => {
+    const onSave = vi.fn();
+    render(
+      <ComposeDialog
+        open
+        connections={[CONNECTION]}
+        initialConnectionId={CONNECTION.id}
+        initialDraft={{ id: "draft-1", source: "ai", resumeId: "resume-1", resumeFilename: "engineering-resume.pdf" }}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onOpenGmail={vi.fn()}
+        onLoadSendAsAliases={vi.fn().mockResolvedValue([])}
+        onLoadResumes={vi.fn().mockResolvedValue(RESUMES)}
+        onSave={onSave}
+        onSend={vi.fn()}
+      />
+    );
+
+    const picker = await screen.findByRole("combobox", { name: "Résumé" }) as HTMLSelectElement;
+    expect(picker.value).toBe("resume-1");
+
+    fireEvent.change(picker, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+
+    // Detaching has to reach the server as null, not as the value the draft opened with.
+    expect(onSave).toHaveBeenCalledWith(CONNECTION.id, expect.anything(), null);
+  });
+
+  it("still shows an attached resume when the list cannot be loaded", async () => {
+    render(
+      <ComposeDialog
+        open
+        connections={[CONNECTION]}
+        initialConnectionId={CONNECTION.id}
+        initialDraft={{ id: "draft-1", source: "ai", resumeId: "resume-1", resumeFilename: "engineering-resume.pdf" }}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onOpenGmail={vi.fn()}
+        onLoadSendAsAliases={vi.fn().mockResolvedValue([])}
+        onLoadResumes={vi.fn().mockRejectedValue(new Error("offline"))}
+        onSave={vi.fn()}
+        onSend={vi.fn()}
+      />
+    );
+
+    // A failed load must not imply the draft has no resume attached.
+    expect(await screen.findByText("engineering-resume.pdf")).toBeTruthy();
   });
 });
