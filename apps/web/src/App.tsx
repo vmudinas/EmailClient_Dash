@@ -242,6 +242,11 @@ export function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [filters, setFilters] = useState<UiSearchFilters>(EMPTY_FILTERS);
   const [showReadMessages, setShowReadMessages] = usePersistentState<boolean>("showReadMessages", true);
+  // Identifies which list is on screen, so a rollback can tell whether the rows it is holding
+  // still belong to what the user is looking at.
+  const viewKey = JSON.stringify([selectedArchiveId, selectedFolderId, selectedSmartMailbox, filters, showReadMessages]);
+  const viewKeyRef = useRef(viewKey);
+  viewKeyRef.current = viewKey;
   const [folderPanelVisible, setFolderPanelVisible] = usePersistentState<boolean>("folderPanelVisible", true);
   const [sort, setSort] = useState<"relevance" | "newest">("relevance");
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -1665,10 +1670,60 @@ export function App() {
    * the server refuses. The list is what the user is looking at, so it answers the click rather
    * than the round trip; a rejected move puts the rows back where they were.
    */
+  /**
+   * Every row on screen that a sender-wide move will take, not just the one that was clicked.
+   * The server moves the sender's whole mailbox, so leaving the siblings visible would let the
+   * user act on mail that is already on its way out.
+   */
+  const visibleIdsFromSender = (senderAddress: string, messageId: string) => {
+    const address = senderAddress.trim().toLowerCase();
+    if (!address) return [messageId];
+    const matches = items
+      .filter((item) => item.message.sender.address.trim().toLowerCase() === address)
+      .map((item) => item.message.id);
+    return matches.includes(messageId) ? matches : [...matches, messageId];
+  };
+
   const removeListItems = (messageIds: readonly string[]) => {
     const { remaining, removed } = removeByMessageId(items, messageIds);
     setItems(remaining);
-    return () => setItems((current) => restoreRemoved(current, removed));
+    // The rows only belong to the view they were taken from. If the user moved to another
+    // folder, search or filter while the request was in flight, putting them back would
+    // inject them into a list they were never part of; reload that view instead.
+    const origin = viewKey;
+    return () => {
+      if (viewKeyRef.current !== origin) {
+        void loadMessages(false);
+        return;
+      }
+      setItems((current) => restoreRemoved(current, removed));
+    };
+  };
+
+  /**
+   * The optimistic half of a bulk action: rows go, the selection clears, and the reader closes
+   * if it was showing one of them. All of it is snapshotted, because a rejected request has to
+   * hand the user back exactly what they had rather than a cleared selection and a shut reader.
+   */
+  const beginBulkRemoval = (messageIds: readonly string[]) => {
+    const previousSelection = bulkSelectedIds;
+    const previousMessage = message;
+    const previousSelectedId = selectedMessageId;
+    const restoreRows = removeListItems(messageIds);
+    const closedReader = Boolean(message && messageIds.includes(message.id));
+    if (closedReader) {
+      setSelectedMessageId(null);
+      setMessage(null);
+    }
+    setBulkSelectedIds(new Set());
+    return () => {
+      restoreRows();
+      setBulkSelectedIds(previousSelection);
+      if (closedReader) {
+        setSelectedMessageId(previousSelectedId);
+        setMessage(previousMessage);
+      }
+    };
   };
 
   /**
@@ -1705,7 +1760,7 @@ export function App() {
         if (!window.confirm(
           `Move this message and every Inbox message from ${senderAddress || "this sender"} to Spam, and automatically send future imported Inbox messages from this sender to Spam? If Gmail mailbox sync is enabled, current Gmail messages move too.`
         )) return;
-        restore = removeListItems([messageId]);
+        restore = removeListItems(visibleIdsFromSender(senderAddress, messageId));
         setMoveBusy(false);
         const result = await api.markSenderAsSpam(messageId);
         if (message?.id === messageId) setMessage(result.message);
@@ -1718,7 +1773,9 @@ export function App() {
       const moveAllFromSender = Boolean(senderAddress && destination) && window.confirm(
         `Move every email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there. If Gmail mailbox sync is enabled, current Gmail messages move too.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
       );
-      restore = removeListItems([messageId]);
+      restore = removeListItems(moveAllFromSender
+        ? visibleIdsFromSender(senderAddress, messageId)
+        : [messageId]);
       setMoveBusy(false);
       const result = moveAllFromSender
         ? await api.moveSenderMessagesToFolder(messageId, folderId)
@@ -1946,12 +2003,7 @@ export function App() {
       : `${verb.charAt(0).toUpperCase()}${verb.slice(1)} ${messageIds.length.toLocaleString()} selected message${messageIds.length === 1 ? "" : "s"}? They will be moved to ${noun}.`;
     if (!window.confirm(confirmation)) return;
     setBulkActionBusy(true);
-    const restore = removeListItems(messageIds);
-    if (message && messageIds.includes(message.id)) {
-      setSelectedMessageId(null);
-      setMessage(null);
-    }
-    setBulkSelectedIds(new Set());
+    const restore = beginBulkRemoval(messageIds);
     setBulkActionBusy(false);
     try {
       const result = await api.bulkMoveMessages(messageIds, destination);
@@ -2082,12 +2134,7 @@ export function App() {
     if (!window.confirm(confirmation)) return;
 
     setMoveBusy(true);
-    const restore = removeListItems(messageIds);
-    if (message && messageIds.includes(message.id)) {
-      setSelectedMessageId(null);
-      setMessage(null);
-    }
-    setBulkSelectedIds(new Set());
+    const restore = beginBulkRemoval(messageIds);
     setMoveBusy(false);
     try {
       const result = isSpamDestination
