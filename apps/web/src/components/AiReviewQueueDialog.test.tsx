@@ -44,6 +44,14 @@ describe("AiReviewQueueDialog", () => {
     const onMarkAnalysisReviewed = vi.fn();
     const onMarkAllAnalysesReviewed = vi.fn();
     const onCompleteFollowUp = vi.fn();
+    const onCreateDraft = vi.fn();
+    const onReviewAndArchive = vi.fn();
+    const onDeleteAnalyses = vi.fn();
+    const onMoveAnalyses = vi.fn();
+    const onAiFileAnalyses = vi.fn();
+    const onGenerateFilingProposals = vi.fn();
+    const onApproveFilingProposal = vi.fn();
+    const onDeclineFilingProposal = vi.fn();
     const analysisItem = {
       message: {
         id: "message-2",
@@ -78,7 +86,13 @@ describe("AiReviewQueueDialog", () => {
         contentHash: "content-hash",
         createdAt: "2026-07-16T12:01:00.000Z",
         updatedAt: "2026-07-16T12:01:00.000Z"
-      }
+      },
+      filingSuggestions: [{
+        folderId: "folder-projects",
+        folderPath: "Projects",
+        reason: "Previous messages from this sender were filed here.",
+        confidence: 0.78
+      }]
     };
     const urgentAnalysisItem = {
       message: {
@@ -111,13 +125,35 @@ describe("AiReviewQueueDialog", () => {
         updatedAt: "2026-07-16T13:01:00.000Z"
       }
     };
+    const filingProposal = {
+      id: "message-2:folder-projects",
+      messageId: "message-2",
+      subject: "Approve the launch plan",
+      sender: analysisItem.message.sender,
+      currentFolderId: "folder-1",
+      currentFolderPath: "Inbox",
+      proposedFolderId: "folder-projects",
+      proposedFolderPath: "Projects",
+      reason: "AI category matches this existing folder.",
+      confidence: 0.78
+    };
     render(
       <AiReviewQueueDialog
         open
-        queue={{ drafts: [draft], analyses: [analysisItem, urgentAnalysisItem, newerHighAnalysisItem], followUps: [followUp], totalItems: 5 }}
+        queue={{
+          drafts: [draft],
+          analyses: [analysisItem, urgentAnalysisItem, newerHighAnalysisItem],
+          followUps: [followUp],
+          folders: [{ id: "folder-projects", archiveId: "archive-1", parentId: null, name: "Projects", path: "Projects", messageCount: 4, unreadCount: 0 }],
+          totalItems: 5
+        }}
         loading={false}
         busyItemId={null}
         reviewAllBusy={false}
+        bulkBusy={false}
+        filingProposals={[filingProposal]}
+        proposalsLoading={false}
+        proposalBusyId={null}
         planningAction={null}
         readOnly={false}
         onClose={vi.fn()}
@@ -126,6 +162,14 @@ describe("AiReviewQueueDialog", () => {
         onDeleteDraft={onDeleteDraft}
         onOpenMessage={vi.fn()}
         onCreateAction={onCreateAction}
+        onCreateDraft={onCreateDraft}
+        onReviewAndArchive={onReviewAndArchive}
+        onDeleteAnalyses={onDeleteAnalyses}
+        onMoveAnalyses={onMoveAnalyses}
+        onAiFileAnalyses={onAiFileAnalyses}
+        onGenerateFilingProposals={onGenerateFilingProposals}
+        onApproveFilingProposal={onApproveFilingProposal}
+        onDeclineFilingProposal={onDeclineFilingProposal}
         onMarkAnalysisReviewed={onMarkAnalysisReviewed}
         onMarkAllAnalysesReviewed={onMarkAllAnalysesReviewed}
         onCompleteFollowUp={onCompleteFollowUp}
@@ -152,6 +196,23 @@ describe("AiReviewQueueDialog", () => {
     expect(onCreateAction).toHaveBeenCalledWith(analysisItem, "todo");
     fireEvent.click(screen.getByRole("button", { name: "Mark Approve the launch plan reviewed" }));
     expect(onMarkAnalysisReviewed).toHaveBeenCalledWith(analysisItem);
+    fireEvent.click(screen.getByRole("button", { name: "Create draft for Approve the launch plan" }));
+    expect(onCreateDraft).toHaveBeenCalledWith(analysisItem);
+    fireEvent.click(screen.getByRole("button", { name: "Mark Approve the launch plan reviewed and archive" }));
+    expect(onReviewAndArchive).toHaveBeenCalledWith([analysisItem]);
+    fireEvent.click(screen.getByRole("button", { name: /Projects78%/ }));
+    expect(onMoveAnalyses).toHaveBeenCalledWith([analysisItem], "folder-projects");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Approve the launch plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "AI file" }));
+    expect(onAiFileAnalyses).toHaveBeenCalledWith([analysisItem]);
+    fireEvent.click(screen.getByRole("button", { name: "Recategorize with AI" }));
+    expect(onGenerateFilingProposals).toHaveBeenCalledWith([analysisItem]);
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(onApproveFilingProposal).toHaveBeenCalledWith(filingProposal);
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    expect(onDeclineFilingProposal).toHaveBeenCalledWith(filingProposal);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(onDeleteAnalyses).toHaveBeenCalledWith([analysisItem]);
     fireEvent.click(screen.getByRole("button", { name: "Mark follow-up complete" }));
     expect(onCompleteFollowUp).toHaveBeenCalledWith(followUp);
   });

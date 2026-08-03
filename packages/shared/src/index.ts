@@ -699,6 +699,7 @@ export type ReplyStylePatch = z.infer<typeof replyStylePatchSchema>;
 export interface AiReviewAnalysisItem {
   message: MessageSummary;
   analysis: MessageAnalysis;
+  filingSuggestions?: MessageFilingSuggestionOption[];
 }
 
 export interface AiAnalysisReview {
@@ -715,7 +716,28 @@ export interface AiReviewQueue {
   drafts: EmailDraft[];
   analyses: AiReviewAnalysisItem[];
   followUps: MessageFollowUp[];
+  folders?: Folder[];
   totalItems: number;
+}
+
+export interface AiFilingProposal {
+  id: string;
+  messageId: string;
+  subject: string;
+  sender: EmailAddress;
+  currentFolderId: string;
+  currentFolderPath: string;
+  proposedFolderId: string;
+  proposedFolderPath: string;
+  reason: string;
+  confidence: number;
+}
+
+export interface AiFilingProposalResult {
+  proposals: AiFilingProposal[];
+  considered: number;
+  skipped: number;
+  generatedAt: string;
 }
 
 export interface SmartMailRuleConditions {
@@ -2180,6 +2202,13 @@ export const bulkFilingSuggestionRequestSchema = z.object({
 
 export type BulkFilingSuggestionRequest = z.infer<typeof bulkFilingSuggestionRequestSchema>;
 
+export interface MessageFilingSuggestionOption {
+  folderId: string;
+  folderPath: string;
+  reason: string;
+  confidence: number;
+}
+
 export interface MessageFilingSuggestion {
   folderId: string | null;
   folderPath: string | null;
@@ -2188,6 +2217,7 @@ export interface MessageFilingSuggestion {
   messageCount: number;
   provider: AiProviderId;
   model: string;
+  suggestions?: MessageFilingSuggestionOption[];
 }
 
 export const senderFilingArchiveSchema = z.object({

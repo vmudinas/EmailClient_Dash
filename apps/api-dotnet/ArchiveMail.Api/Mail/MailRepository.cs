@@ -256,6 +256,24 @@ public sealed class MailRepository(NpgsqlDataSource database)
             hasMore && rows.Count > 0 ? EncodeMessageCursor(rows[^1]) : null);
     }
 
+    public async Task<IReadOnlyList<MessageSummaryDto>> GetMessageSummariesAsync(
+        IEnumerable<string> ids,
+        string ownerUserId,
+        CancellationToken cancellationToken)
+    {
+        var uniqueIds = ids.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().Take(500).ToArray();
+        if (uniqueIds.Length == 0) return [];
+        var sql = $"""
+            SELECT {SummaryColumns}
+            {SummaryJoins}
+            WHERE m.id = ANY(@ids) AND owner_archive.owner_user_id = @owner
+            """;
+        await using var command = database.CreateCommand(sql);
+        command.Parameters.AddWithValue("ids", uniqueIds);
+        command.Parameters.AddWithValue("owner", ownerUserId);
+        return await ReadSummariesAsync(command, cancellationToken);
+    }
+
     public async Task<InboxCategoryCountsDto> CountCategoriesAsync(
         MessageFilters filters,
         string ownerUserId,

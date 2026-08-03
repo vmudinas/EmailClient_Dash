@@ -40,6 +40,7 @@ import type {
   Archive as ArchiveModel,
   AiReviewAnalysisItem,
   AiReviewQueue,
+  AiFilingProposal,
   AuthSessionInfo,
   BulkMoveDestination,
   DiagnosticsSnapshot,
@@ -322,6 +323,10 @@ export function App() {
   const [duplicateBusyId, setDuplicateBusyId] = useState<string | null>(null);
   const [reviewActionBusyId, setReviewActionBusyId] = useState<string | null>(null);
   const [reviewAllBusy, setReviewAllBusy] = useState(false);
+  const [reviewBulkBusy, setReviewBulkBusy] = useState(false);
+  const [reviewFilingProposals, setReviewFilingProposals] = useState<AiFilingProposal[]>([]);
+  const [reviewProposalsLoading, setReviewProposalsLoading] = useState(false);
+  const [reviewProposalBusyId, setReviewProposalBusyId] = useState<string | null>(null);
   const [reviewPlanningAction, setReviewPlanningAction] = useState<{ messageId: string; action: ReviewAction } | null>(null);
   const [reviewActionDraft, setReviewActionDraft] = useState<{
     item: AiReviewAnalysisItem;
@@ -1416,7 +1421,10 @@ export function App() {
     if (!api || !aiScreenAllowed) return;
     setReviewQueueLoading(true);
     try {
-      setReviewQueue(await api.getAiReviewQueue());
+      const nextQueue = await api.getAiReviewQueue();
+      setReviewQueue(nextQueue);
+      const availableIds = new Set(nextQueue.analyses.map((item) => item.message.id));
+      setReviewFilingProposals((current) => current.filter((proposal) => availableIds.has(proposal.messageId)));
     } catch (error) {
       showError(error instanceof Error ? error.message : "AI review queue could not be loaded");
     } finally {
@@ -1642,6 +1650,88 @@ export function App() {
     } finally {
       setReviewAllBusy(false);
     }
+  };
+
+  const fileReviewAnalyses = async (
+    selected: AiReviewAnalysisItem[],
+    action: { kind: "archive" | "trash" | "ai" } | { kind: "folder"; folderId: string }
+  ) => {
+    if (!api || readOnly || selected.length === 0) return false;
+    if (action.kind === "trash" && !window.confirm(
+      `Delete ${selected.length.toLocaleString()} selected message${selected.length === 1 ? "" : "s"}? They will be moved to Trash and removed from this review queue.`
+    )) return false;
+    const messageIds = selected.map((item) => item.message.id);
+    setReviewBulkBusy(true);
+    if (messageIds.length === 1) setReviewActionBusyId(messageIds[0]!);
+    try {
+      let destinationLabel = "Archive";
+      if (action.kind === "ai") {
+        const suggestion = await api.suggestBulkFilingFolder(messageIds);
+        if (!suggestion.folderId || !suggestion.folderPath) {
+          showError(`AI could not find a confident folder: ${suggestion.reason}`);
+          return false;
+        }
+        if (!window.confirm(
+          `AI recommends “${suggestion.folderPath}” for ${selected.length.toLocaleString()} message${selected.length === 1 ? "" : "s"} (${Math.round(suggestion.confidence * 100)}% confidence). Move and mark reviewed?`
+        )) return false;
+        await api.bulkMoveMessagesToFolder(messageIds, suggestion.folderId);
+        destinationLabel = suggestion.folderPath;
+      } else if (action.kind === "folder") {
+        const result = await api.bulkMoveMessagesToFolder(messageIds, action.folderId);
+        destinationLabel = result.folderPath;
+      } else {
+        const result = await api.bulkMoveMessages(messageIds, action.kind === "archive" ? "archived" : "trash");
+        destinationLabel = result.folderPaths.join(", ") || (action.kind === "archive" ? "Archive" : "Trash");
+      }
+
+      const reviews = await Promise.allSettled(messageIds.map((messageId) => api.markMessageAnalysisReviewed(messageId)));
+      const failedReviews = reviews.filter((result) => result.status === "rejected").length;
+      if (message && messageIds.includes(message.id)) {
+        setSelectedMessageId(null);
+        setMessage(null);
+      }
+      await refreshReviewQueue();
+      refreshAfterMove();
+      showError(
+        `Moved ${messageIds.length.toLocaleString()} message${messageIds.length === 1 ? "" : "s"} to ${destinationLabel} and marked reviewed`
+        + (failedReviews ? `; ${failedReviews.toLocaleString()} review status update${failedReviews === 1 ? "" : "s"} failed` : "")
+      );
+      return true;
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Review messages could not be filed");
+      return false;
+    } finally {
+      setReviewActionBusyId(null);
+      setReviewBulkBusy(false);
+    }
+  };
+
+  const generateReviewFilingProposals = async (selected: AiReviewAnalysisItem[]) => {
+    if (!api || readOnly || selected.length === 0) return;
+    setReviewProposalsLoading(true);
+    try {
+      const result = await api.proposeReviewFiling(selected.map((item) => item.message.id));
+      setReviewFilingProposals(result.proposals);
+      showError(result.proposals.length
+        ? `AI prepared ${result.proposals.length.toLocaleString()} folder proposal${result.proposals.length === 1 ? "" : "s"} for review.`
+        : "AI did not find a stronger folder for these messages.");
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "AI folder proposals could not be prepared");
+    } finally {
+      setReviewProposalsLoading(false);
+    }
+  };
+
+  const approveReviewFilingProposal = async (proposal: AiFilingProposal) => {
+    const item = reviewQueue?.analyses.find((entry) => entry.message.id === proposal.messageId);
+    if (!item) {
+      setReviewFilingProposals((current) => current.filter((entry) => entry.id !== proposal.id));
+      return;
+    }
+    setReviewProposalBusyId(proposal.id);
+    const moved = await fileReviewAnalyses([item], { kind: "folder", folderId: proposal.proposedFolderId });
+    if (moved) setReviewFilingProposals((current) => current.filter((entry) => entry.id !== proposal.id));
+    setReviewProposalBusyId(null);
   };
 
   const createReviewAnalysisAction = async (item: AiReviewAnalysisItem, action: ReviewAction) => {
@@ -3049,6 +3139,10 @@ export function App() {
         loading={reviewQueueLoading}
         busyItemId={reviewActionBusyId}
         reviewAllBusy={reviewAllBusy}
+        bulkBusy={reviewBulkBusy}
+        filingProposals={reviewFilingProposals}
+        proposalsLoading={reviewProposalsLoading}
+        proposalBusyId={reviewProposalBusyId}
         planningAction={reviewPlanningAction}
         readOnly={readOnly}
         onClose={() => setReviewQueueOpen(false)}
@@ -3063,6 +3157,22 @@ export function App() {
           void openMessage(target);
         }}
         onCreateAction={(item, action) => void createReviewAnalysisAction(item, action)}
+        onCreateDraft={(item) => {
+          setReviewQueueOpen(false);
+          openCompose(null, {
+            source: "manual",
+            sourceMessageId: item.message.id,
+            to: item.message.sender.address,
+            subject: item.message.subject.match(/^re:/i) ? item.message.subject : `Re: ${item.message.subject}`
+          });
+        }}
+        onReviewAndArchive={(selected) => void fileReviewAnalyses(selected, { kind: "archive" })}
+        onDeleteAnalyses={(selected) => void fileReviewAnalyses(selected, { kind: "trash" })}
+        onMoveAnalyses={(selected, folderId) => void fileReviewAnalyses(selected, { kind: "folder", folderId })}
+        onAiFileAnalyses={(selected) => void fileReviewAnalyses(selected, { kind: "ai" })}
+        onGenerateFilingProposals={(selected) => void generateReviewFilingProposals(selected)}
+        onApproveFilingProposal={(proposal) => void approveReviewFilingProposal(proposal)}
+        onDeclineFilingProposal={(proposal) => setReviewFilingProposals((current) => current.filter((entry) => entry.id !== proposal.id))}
         onMarkAnalysisReviewed={(item) => void markReviewAnalysisReviewed(item)}
         onMarkAllAnalysesReviewed={() => void markAllReviewAnalysesReviewed()}
         onCompleteFollowUp={(followUp) => void completeReviewFollowUp(followUp.id, followUp.messageId)}

@@ -2,6 +2,7 @@ import type {
   AdminInsights,
   AdminSettings,
   AiAnalysisStart,
+  AiFilingProposalResult,
   AiJob,
   AiMessageState,
   AiModelOption,
@@ -830,6 +831,13 @@ export class ApiClient {
 
   markAllMessageAnalysesReviewed(): Promise<AiAnalysisReviewAllResult> {
     return this.request("/api/ai/review-queue/review-all", { method: "POST" });
+  }
+
+  proposeReviewFiling(messageIds: string[]): Promise<AiFilingProposalResult> {
+    return this.request("/api/ai/review-queue/filing-proposals", {
+      method: "POST",
+      body: JSON.stringify({ messageIds })
+    });
   }
 
   listReplyStyles(): Promise<ReplyStyle[]> {
