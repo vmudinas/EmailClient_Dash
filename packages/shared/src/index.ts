@@ -985,6 +985,8 @@ export interface GmailSendRequest {
   bodyText: string;
   fromAddress?: string;
   sourceMessageId?: string;
+  /** Attached to the outgoing message by the server, which reads the stored file. */
+  resumeId?: string | null;
 }
 
 export interface GmailSendResult {
