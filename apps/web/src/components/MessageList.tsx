@@ -47,6 +47,8 @@ interface MessageListProps {
   loading: boolean;
   searching: boolean;
   hasMore: boolean;
+  rangeLabel?: string;
+  loadMoreLabel?: string;
   readOnly: boolean;
   onSelect(message: MessageSummary): void;
   onDragStart(message: MessageSummary, messageIds: string[]): void;
@@ -97,6 +99,8 @@ export function MessageList({
   loading,
   searching,
   hasMore,
+  rangeLabel,
+  loadMoreLabel = "Load more",
   readOnly,
   onSelect,
   onDragStart,
@@ -232,7 +236,10 @@ export function MessageList({
             )}
             <div>
               <h2>{title}</h2>
-              <span>{items.length.toLocaleString()}{hasMore ? "+" : ""} shown</span>
+              <span>
+                {items.length.toLocaleString()}{hasMore ? "+" : ""} shown
+                {rangeLabel && <small className="message-range-label"> · {rangeLabel}</small>}
+              </span>
             </div>
           </>
         )}
@@ -332,12 +339,18 @@ export function MessageList({
         )}
 
         {loading && (
-          <div className="list-loading"><LoaderCircle className="spin" size={20} /> Loading messages</div>
+          items.length === 0 ? (
+            <div className="message-list-skeleton" role="status" aria-label="Loading messages">
+              {Array.from({ length: 6 }, (_, index) => <span key={index} />)}
+            </div>
+          ) : (
+            <div className="list-loading"><LoaderCircle className="spin" size={20} /> Loading messages</div>
+          )
         )}
 
         {hasMore && !loading && (
           <button className="load-more" onClick={onLoadMore}>
-            <ChevronDown size={16} /> Load more
+            <ChevronDown size={16} /> {loadMoreLabel}
           </button>
         )}
       </div>

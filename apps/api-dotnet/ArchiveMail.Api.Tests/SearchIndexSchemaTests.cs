@@ -90,6 +90,19 @@ public sealed class SearchIndexSchemaTests
     }
 
     [Fact]
+    public void MailListIndexesMatchTheCoalescedActivitySortAndInboxCounts()
+    {
+        Assert.Contains("CREATE INDEX IF NOT EXISTS messages_archive_activity_idx", Schema, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS messages_folder_activity_idx", Schema, StringComparison.Ordinal);
+        Assert.Contains("(COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC", Schema, StringComparison.Ordinal);
+        Assert.Contains("DROP INDEX IF EXISTS messages_archive_category_idx", Schema, StringComparison.Ordinal);
+        Assert.Contains("DROP INDEX IF EXISTS messages_folder_category_idx", Schema, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS messages_archive_category_activity_idx", Schema, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS messages_folder_category_activity_idx", Schema, StringComparison.Ordinal);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS message_calendar_events_message_idx", Schema, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void LegacyUnboundedIndexesAreDroppedByName()
     {
         // The replacements use new names, so the old ones must be dropped explicitly.

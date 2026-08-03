@@ -292,6 +292,55 @@ describe("MessageList drag and drop", () => {
     fireEvent.click(screen.getByRole("button", { name: "Archive Drag this message" }));
     expect(onArchive).toHaveBeenCalledWith(MESSAGE);
   });
+
+  it("explains the five-day window and offers older history on demand", () => {
+    const onLoadMore = vi.fn();
+    render(
+      <MessageList
+        items={[{ message: MESSAGE }]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading={false}
+        searching={false}
+        hasMore
+        rangeLabel="Last 5 days loaded"
+        loadMoreLabel="Load messages older than 5 days"
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={onLoadMore}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+      />
+    );
+
+    expect(screen.getByText(/Last 5 days loaded/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load messages older than 5 days" }));
+    expect(onLoadMore).toHaveBeenCalledOnce();
+  });
+
+  it("uses stable skeleton rows while the first message page loads", () => {
+    render(
+      <MessageList
+        items={[]}
+        selectedMessageId={null}
+        title="Inbox"
+        loading
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        {...BULK_SELECTION_PROPS}
+      />
+    );
+
+    expect(screen.getByRole("status", { name: "Loading messages" }).children).toHaveLength(6);
+  });
 });
 
 describe("MessageList bulk selection", () => {
