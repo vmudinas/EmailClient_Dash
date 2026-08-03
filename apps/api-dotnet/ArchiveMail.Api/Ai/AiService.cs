@@ -212,7 +212,7 @@ public sealed class AiService(
         }
     }
 
-    internal static bool CategoryMatchesFolder(string category,string folderName,string folderPath)=
+    internal static bool CategoryMatchesFolder(string category,string folderName,string folderPath)=>
         category.Equals(folderName,StringComparison.OrdinalIgnoreCase)||category.Equals(folderPath,StringComparison.OrdinalIgnoreCase);
 
     private async Task<Dictionary<string,object>> AnalysesAsync(string[] ids,CancellationToken token)
