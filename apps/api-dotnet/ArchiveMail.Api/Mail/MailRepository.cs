@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using ArchiveMail.Api.Imports;
 using Npgsql;
 
 namespace ArchiveMail.Api.Mail;
@@ -437,7 +436,10 @@ public sealed class MailRepository(NpgsqlDataSource database)
         var cc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(23) ? null : reader.GetString(23), []);
         var bcc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(24) ? null : reader.GetString(24), []);
         var bodyText = reader.IsDBNull(25) ? "" : reader.GetString(25);
-        var bodyHtml = EmailHtmlSanitizer.Sanitize(reader.IsDBNull(26) ? null : reader.GetString(26));
+        // HTML is sanitized before ImportBatchWriter persists it. Re-parsing a large newsletter
+        // with AngleSharp on every open was the dominant message-read cost; the web reader still
+        // applies DOMPurify as a second boundary before inserting this string into the document.
+        var bodyHtml = reader.IsDBNull(26) ? null : reader.GetString(26);
         var headers = ParseJson<Dictionary<string, string>>(reader.IsDBNull(27) ? null : reader.GetString(27), []);
         await reader.CloseAsync();
         var attachments = await ListAttachmentsAsync(id, cancellationToken);

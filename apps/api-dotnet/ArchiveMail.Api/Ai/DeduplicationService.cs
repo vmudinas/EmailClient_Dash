@@ -94,10 +94,11 @@ public sealed class DeduplicationService(NpgsqlDataSource database, MailReposito
         await using (var reader = await memberCommand.ExecuteReaderAsync(token))
             while (await reader.ReadAsync(token))
                 rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        var summaries = (await mail.GetMessageSummariesAsync(rows.Select(row => row.MessageId), owner, token))
+            .ToDictionary(message => message.Id, StringComparer.Ordinal);
         foreach (var row in rows)
         {
-            var message = await mail.GetMessageAsync(row.MessageId, owner, token);
-            if (message is not null)
+            if (summaries.TryGetValue(row.MessageId, out var message))
                 members.Add(new { message, relation = row.Relation, evidence = ParseArray(row.Evidence) });
         }
         return new { group, members };
