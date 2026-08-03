@@ -242,8 +242,12 @@ public sealed class DatabaseInitializer(
           archive_id, (COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS messages_folder_activity_idx ON messages(
           folder_id, (COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC);
-        CREATE INDEX IF NOT EXISTS messages_archive_category_idx ON messages(archive_id, inbox_category);
-        CREATE INDEX IF NOT EXISTS messages_folder_category_idx ON messages(folder_id, inbox_category);
+        DROP INDEX IF EXISTS messages_archive_category_idx;
+        DROP INDEX IF EXISTS messages_folder_category_idx;
+        CREATE INDEX IF NOT EXISTS messages_archive_category_activity_idx ON messages(
+          archive_id, inbox_category, (COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS messages_folder_category_activity_idx ON messages(
+          folder_id, inbox_category, (COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_address);
         CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(archive_id, conversation_key);
         DO $archive_mail$
@@ -563,6 +567,7 @@ public sealed class DatabaseInitializer(
           created_at TEXT NOT NULL,
           PRIMARY KEY(connection_id, event_id)
         );
+        CREATE INDEX IF NOT EXISTS message_calendar_events_message_idx ON message_calendar_events(message_id);
 
         CREATE OR REPLACE FUNCTION archive_mail_message_insert_batch() RETURNS trigger AS $$
         BEGIN

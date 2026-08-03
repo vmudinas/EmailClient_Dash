@@ -4,6 +4,7 @@ import {
   lazy,
   useMemo,
   useRef,
+  startTransition,
   Suspense,
   useState
 } from "react";
@@ -162,7 +163,9 @@ const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string
 
 const MAX_BULK_SELECTION = 500;
 const INITIAL_MAIL_WINDOW_DAYS = 5;
-const MESSAGE_PAGE_SIZE = 100;
+const INITIAL_MESSAGE_PAGE_SIZE = 50;
+const BACKGROUND_MESSAGE_PAGE_SIZE = 250;
+const HISTORY_MESSAGE_PAGE_SIZE = 100;
 const CalendarView = lazy(async () => {
   const module = await import("./components/CalendarView.js");
   return { default: module.CalendarView };
@@ -263,7 +266,7 @@ export function App() {
   const [initializing, setInitializing] = useState(true);
   const [startupError, setStartupError] = useState("");
   const [notice, setNotice] = useState("");
-  const [mobileView, setMobileView] = useState<MobileView>("folders");
+  const [mobileView, setMobileView] = useState<MobileView>("messages");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [viewMode, setViewMode] = useState<AppView>(() => viewForPath());
   const [visitedViews, setVisitedViews] = useState<Set<AppView>>(() => new Set([viewForPath()]));
@@ -820,7 +823,7 @@ export function App() {
             after: filters.after || undefined,
             before: filters.before || undefined,
             cursor: append ? nextCursor ?? undefined : undefined,
-            limit: MESSAGE_PAGE_SIZE
+            limit: HISTORY_MESSAGE_PAGE_SIZE
           });
           if (requestId !== messageListRequestRef.current) return;
           setItems((current) => append
@@ -834,7 +837,7 @@ export function App() {
             ...baseFilters,
             before: new Date(new Date(cutoff).getTime() - 1).toISOString(),
             cursor: historyStarted ? nextCursor ?? undefined : undefined,
-            limit: MESSAGE_PAGE_SIZE
+            limit: HISTORY_MESSAGE_PAGE_SIZE
           });
           if (requestId !== messageListRequestRef.current) return;
           setItems((current) => appendUniqueMessages(current, page.items.map(messageToItem)));
@@ -852,7 +855,7 @@ export function App() {
           let page = await api.listMessages({
             ...baseFilters,
             after: cutoff,
-            limit: MESSAGE_PAGE_SIZE
+            limit: INITIAL_MESSAGE_PAGE_SIZE
           });
           if (requestId !== messageListRequestRef.current) return;
           setItems(page.items.map(messageToItem));
@@ -864,10 +867,12 @@ export function App() {
               ...baseFilters,
               after: cutoff,
               cursor: page.nextCursor,
-              limit: MESSAGE_PAGE_SIZE
+              limit: BACKGROUND_MESSAGE_PAGE_SIZE
             });
             if (requestId !== messageListRequestRef.current) return;
-            setItems((current) => appendUniqueMessages(current, page.items.map(messageToItem)));
+            startTransition(() => {
+              setItems((current) => appendUniqueMessages(current, page.items.map(messageToItem)));
+            });
           }
         }
       }
