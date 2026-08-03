@@ -249,6 +249,8 @@ public sealed class DatabaseInitializer(
         CREATE INDEX IF NOT EXISTS messages_folder_category_activity_idx ON messages(
           folder_id, inbox_category, (COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_address);
+        CREATE INDEX IF NOT EXISTS messages_archive_sender_lower_folder_idx ON messages(
+          archive_id, lower(sender_address), folder_id);
         CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(archive_id, conversation_key);
         DO $archive_mail$
         BEGIN

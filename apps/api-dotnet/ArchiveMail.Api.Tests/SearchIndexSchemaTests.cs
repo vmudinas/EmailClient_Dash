@@ -103,6 +103,16 @@ public sealed class SearchIndexSchemaTests
     }
 
     [Fact]
+    public void ReviewFolderSuggestionsHaveACaseInsensitiveSenderIndex()
+    {
+        Assert.Contains(
+            "CREATE INDEX IF NOT EXISTS messages_archive_sender_lower_folder_idx",
+            Schema,
+            StringComparison.Ordinal);
+        Assert.Contains("archive_id, lower(sender_address), folder_id", Schema, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void LegacyUnboundedIndexesAreDroppedByName()
     {
         // The replacements use new names, so the old ones must be dropped explicitly.

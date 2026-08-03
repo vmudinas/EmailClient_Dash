@@ -20,6 +20,8 @@ public sealed class AiService(
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private sealed record FilingCandidate(string FolderId,string FolderPath,string Reason,double Confidence);
     private sealed record FilingProposal(string Id,string MessageId,string Subject,EmailAddressDto Sender,string CurrentFolderId,string CurrentFolderPath,string ProposedFolderId,string ProposedFolderPath,string Reason,double Confidence);
+    private sealed record FilingContext(string MessageId,string CategoriesJson,string ArchiveId,string CurrentFolderId);
+    private sealed record FilingFolder(string ArchiveId,string Id,string Path,string Name);
 
     public async Task<object> MessageStateAsync(string messageId,string owner,CancellationToken token)
     {
@@ -84,7 +86,7 @@ public sealed class AiService(
         await reader.CloseAsync();
         var summaryTask=mail.GetMessageSummariesAsync(ids,owner,token);
         var analysisTask=AnalysesAsync(ids.ToArray(),token);
-        var filingTask=FilingSuggestionsByMessageAsync(ids.ToArray(),owner,token);
+        var filingTask=SafeFilingSuggestionsByMessageAsync(ids.ToArray(),owner,token);
         var draftTask=productivity.ListDraftsAsync(owner,token);
         var followUpTask=followUps.ListAsync("pending",owner,token);
         await Task.WhenAll(summaryTask,analysisTask,filingTask,draftTask,followUpTask);
@@ -152,30 +154,66 @@ public sealed class AiService(
             suggestions.Add(Candidate(reader.GetString(1),reader.GetString(2),reader.GetInt64(3)));
         }
         await reader.CloseAsync();
-        const string categorySql="""
-            SELECT DISTINCT x.message_id,f.id,f.path
+        const string contextSql="""
+            SELECT x.message_id,x.categories_json,m.archive_id,m.folder_id
             FROM ai_message_analysis x
             JOIN messages m ON m.id=x.message_id
             JOIN archives a ON a.id=m.archive_id
-            CROSS JOIN LATERAL jsonb_array_elements_text(x.categories_json::jsonb) category
-            JOIN folders f ON f.archive_id=m.archive_id AND f.id<>m.folder_id
-                AND (lower(f.name)=lower(category.value) OR lower(f.path)=lower(category.value))
             WHERE x.message_id=ANY($1) AND a.owner_user_id=$2
-                AND lower(f.name) NOT IN ('trash','spam','junk','deleted')
-            ORDER BY x.message_id,f.path
             """;
-        await using var categoryCommand=database.CreateCommand(categorySql);categoryCommand.Parameters.AddWithValue(ids);categoryCommand.Parameters.AddWithValue(owner);
-        await using var categoryReader=await categoryCommand.ExecuteReaderAsync(token);
-        while(await categoryReader.ReadAsync(token))
+        var contexts=new List<FilingContext>();
+        await using var contextCommand=database.CreateCommand(contextSql);contextCommand.Parameters.AddWithValue(ids);contextCommand.Parameters.AddWithValue(owner);
+        await using var contextReader=await contextCommand.ExecuteReaderAsync(token);
+        while(await contextReader.ReadAsync(token))
+            contexts.Add(new(contextReader.GetString(0),contextReader.GetString(1),contextReader.GetString(2),contextReader.GetString(3)));
+        await contextReader.CloseAsync();
+        var archiveIds=contexts.Select(context=>context.ArchiveId).Distinct().ToArray();
+        if(archiveIds.Length==0)return result;
+        const string folderSql="""
+            SELECT f.archive_id,f.id,f.path,f.name
+            FROM folders f
+            JOIN archives a ON a.id=f.archive_id
+            WHERE f.archive_id=ANY($1) AND a.owner_user_id=$2
+                AND lower(f.name) NOT IN ('trash','spam','junk','deleted')
+            ORDER BY f.archive_id,f.path
+            """;
+        var folders=new List<FilingFolder>();
+        await using var folderCommand=database.CreateCommand(folderSql);folderCommand.Parameters.AddWithValue(archiveIds);folderCommand.Parameters.AddWithValue(owner);
+        await using var folderReader=await folderCommand.ExecuteReaderAsync(token);
+        while(await folderReader.ReadAsync(token))
+            folders.Add(new(folderReader.GetString(0),folderReader.GetString(1),folderReader.GetString(2),folderReader.GetString(3)));
+        var foldersByArchive=folders.ToLookup(folder=>folder.ArchiveId);
+        foreach(var context in contexts)
         {
-            var messageId=categoryReader.GetString(0);
-            if(!result.TryGetValue(messageId,out var suggestions)){suggestions=new List<FilingCandidate>();result[messageId]=suggestions;}
-            var folderId=categoryReader.GetString(1);
-            if(suggestions.Count<3&&!suggestions.Any(candidate=>candidate.FolderId==folderId))
-                suggestions.Add(new(folderId,categoryReader.GetString(2),"AI category matches this existing folder.",.68));
+            var categories=ParseArray(context.CategoriesJson);
+            if(categories.Length==0)continue;
+            if(!result.TryGetValue(context.MessageId,out var suggestions)){suggestions=new List<FilingCandidate>();result[context.MessageId]=suggestions;}
+            foreach(var folder in foldersByArchive[context.ArchiveId])
+            {
+                if(suggestions.Count>=3)break;
+                if(folder.Id==context.CurrentFolderId||suggestions.Any(candidate=>candidate.FolderId==folder.Id))continue;
+                if(categories.Any(category=>CategoryMatchesFolder(category,folder.Name,folder.Path)))
+                    suggestions.Add(new(folder.Id,folder.Path,"AI category matches this existing folder.",.68));
+            }
         }
         return result;
     }
+
+    private async Task<Dictionary<string,List<FilingCandidate>>> SafeFilingSuggestionsByMessageAsync(string[] ids,string owner,CancellationToken token)
+    {
+        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        try{return await FilingSuggestionsByMessageAsync(ids,owner,timeout.Token);}
+        catch(OperationCanceledException)when(token.IsCancellationRequested){throw;}
+        catch(Exception error)
+        {
+            logger.LogWarning(error,"Review queue folder suggestions failed; returning the queue without suggestions");
+            return new Dictionary<string,List<FilingCandidate>>();
+        }
+    }
+
+    internal static bool CategoryMatchesFolder(string category,string folderName,string folderPath)=
+        category.Equals(folderName,StringComparison.OrdinalIgnoreCase)||category.Equals(folderPath,StringComparison.OrdinalIgnoreCase);
 
     private async Task<Dictionary<string,object>> AnalysesAsync(string[] ids,CancellationToken token)
     {
@@ -250,7 +288,7 @@ public sealed class AiService(
     private static object Job(NpgsqlDataReader r)=>new{id=r["id"],messageId=r["message_id"],task=r["task"],scheduleId=r["schedule_id"] is DBNull?null:r["schedule_id"],scheduleRunId=(string?)null,gmailConnectionId=r["gmail_connection_id"] is DBNull?null:r["gmail_connection_id"],resumeId=r["resume_id"] is DBNull?null:r["resume_id"],status=r["status"],provider=r["provider"],model=r["model"],skills=ParseArray((string)r["skills_json"]),prompt=r["prompt"],promptVersion=r["prompt_version"],contentHash=r["content_hash"],attempts=r["attempts"],maxAttempts=r["max_attempts"],error=r["error"] is DBNull?null:r["error"],createdAt=r["created_at"],updatedAt=r["updated_at"],startedAt=r["started_at"] is DBNull?null:r["started_at"],completedAt=r["completed_at"] is DBNull?null:r["completed_at"]};
     private static object Schedule(NpgsqlDataReader r)=>new{id=r.GetString(0),name=r.GetString(1),task=r.GetString(2),folderId=r.GetString(3),folderPath=r.GetString(4),archiveId=r.GetString(5),archiveName=r.GetString(6),messageId=r.IsDBNull(7)?null:r.GetString(7),messageSubject=r.IsDBNull(8)?null:r.GetString(8),gmailConnectionId=r.IsDBNull(9)?null:r.GetString(9),gmailConnectionEmail=r.IsDBNull(10)?null:r.GetString(10),resumeId=r.IsDBNull(11)?null:r.GetString(11),resumeName=r.IsDBNull(12)?null:r.GetString(12),mode=r.GetString(13),intervalMinutes=r.GetInt64(14),enabled=r.GetBoolean(15),lastRunAt=r.IsDBNull(16)?null:r.GetString(16),lastRunSummary=r.IsDBNull(17)?null:r.GetString(17),provider=r.GetString(18),model=r.GetString(19),skills=ParseArray(r.GetString(20)),prompt=r.GetString(21),progress=(object?)null,createdAt=r.GetString(22),updatedAt=r.GetString(23)};
     private static string Id(object value)=>value.GetType().GetProperty("id")?.GetValue(value)?.ToString()??"";
-    private static string[] ParseArray(string value){try{return JsonSerializer.Deserialize<string[]>(value,JsonOptions)??[];}catch{return[];}}
+    internal static string[] ParseArray(string value){try{return JsonSerializer.Deserialize<string[]>(value,JsonOptions)??[];}catch{return[];}}
     private static string Required(JsonElement input,string name)=>String(input,name)??throw new ArgumentException($"{name} is required");
     private static string? String(JsonElement input,string name)=>input.ValueKind==JsonValueKind.Object&&input.TryGetProperty(name,out var value)&&value.ValueKind==JsonValueKind.String?value.GetString()?.Trim():null;
     private static object? NullableProperty(JsonElement input,string name)=>input.TryGetProperty(name,out var value)?value.ValueKind==JsonValueKind.Null?null:value.GetString():null;
