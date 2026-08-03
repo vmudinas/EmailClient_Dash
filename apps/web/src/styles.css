@@ -2698,6 +2698,12 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.message-range-label {
+  color: var(--green);
+  font-size: inherit;
+  font-weight: 700;
+}
+
 .message-selection-controls {
   display: flex;
   align-items: center;
@@ -3081,6 +3087,8 @@ textarea:focus-visible {
   position: relative;
   overflow: hidden;
   background: var(--surface);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 112px;
 }
 
 .message-swipe-shell .message-row {
@@ -3448,6 +3456,30 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   color: var(--muted);
+}
+
+.message-list-skeleton {
+  display: grid;
+}
+
+.message-list-skeleton span {
+  min-height: 112px;
+  border-bottom: 1px solid #e8ebe8;
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.72), transparent) -220px 0 / 220px 100% no-repeat,
+    radial-gradient(circle at 31px 31px, #e5eae6 0 17px, transparent 18px),
+    linear-gradient(#e5eae6 0 0) 62px 18px / 36% 12px no-repeat,
+    linear-gradient(#eef1ef 0 0) 62px 42px / 72% 10px no-repeat,
+    linear-gradient(#eef1ef 0 0) 62px 63px / 58% 10px no-repeat;
+  animation: message-skeleton-shimmer 1.3s ease-in-out infinite;
+}
+
+@keyframes message-skeleton-shimmer {
+  to { background-position: calc(100% + 220px) 0, 31px 31px, 62px 18px, 62px 42px, 62px 63px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-list-skeleton span { animation: none; }
 }
 
 .list-empty {

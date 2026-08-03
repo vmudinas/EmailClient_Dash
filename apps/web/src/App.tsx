@@ -77,7 +77,6 @@ import {
   MessageList,
   type MessageListItem
 } from "./components/MessageList.js";
-import { MessageReader } from "./components/MessageReader.js";
 import {
   ALL_MAIL_SEARCH_SCOPE,
   EMPTY_FILTERS,
@@ -111,15 +110,10 @@ import {
   openGoogleAuthorizationPopup,
   showGoogleAuthorizationError
 } from "./lib/googleOAuthPopup.js";
-import { ComposeDialog, type ComposeDraft } from "./components/ComposeDialog.js";
-import { DraftsDialog } from "./components/DraftsDialog.js";
-import { GuideDialog } from "./components/GuideDialog.js";
+import type { ComposeDraft } from "./components/ComposeDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
 import { TenantInvitationScreen } from "./components/TenantInvitationScreen.js";
-import { AiReviewQueueDialog } from "./components/AiReviewQueueDialog.js";
-import { AskArchiveMailDialog } from "./components/AskArchiveMailDialog.js";
-import { DuplicateGroupsDialog } from "./components/DuplicateGroupsDialog.js";
-import { MessageActionDialog, type ReviewAction } from "./components/MessageActionDialog.js";
+import type { ReviewAction } from "./components/MessageActionDialog.js";
 import { StockTickerBar } from "./components/StockTickerBar.js";
 import { NewsTickerBar } from "./components/NewsTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
@@ -167,6 +161,8 @@ const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string
 };
 
 const MAX_BULK_SELECTION = 500;
+const INITIAL_MAIL_WINDOW_DAYS = 5;
+const MESSAGE_PAGE_SIZE = 100;
 const CalendarView = lazy(async () => {
   const module = await import("./components/CalendarView.js");
   return { default: module.CalendarView };
@@ -184,6 +180,14 @@ const BackgroundActivityDialog = lazy(async () => {
   const module = await import("./components/BackgroundActivityDialog.js");
   return { default: module.BackgroundActivityDialog };
 });
+const ComposeDialog = lazy(async () => ({ default: (await import("./components/ComposeDialog.js")).ComposeDialog }));
+const DraftsDialog = lazy(async () => ({ default: (await import("./components/DraftsDialog.js")).DraftsDialog }));
+const GuideDialog = lazy(async () => ({ default: (await import("./components/GuideDialog.js")).GuideDialog }));
+const AiReviewQueueDialog = lazy(async () => ({ default: (await import("./components/AiReviewQueueDialog.js")).AiReviewQueueDialog }));
+const AskArchiveMailDialog = lazy(async () => ({ default: (await import("./components/AskArchiveMailDialog.js")).AskArchiveMailDialog }));
+const DuplicateGroupsDialog = lazy(async () => ({ default: (await import("./components/DuplicateGroupsDialog.js")).DuplicateGroupsDialog }));
+const MessageActionDialog = lazy(async () => ({ default: (await import("./components/MessageActionDialog.js")).MessageActionDialog }));
+const MessageReader = lazy(async () => ({ default: (await import("./components/MessageReader.js")).MessageReader }));
 
 function viewForPath(pathname = window.location.pathname): AppView {
   if (pathname.startsWith("/properties") || pathname.startsWith("/portal")) return "properties";
@@ -209,6 +213,7 @@ export function App() {
   const [loginError, setLoginError] = useState("");
   const [archives, setArchives] = useState<ArchiveModel[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
+  const [foldersArchiveId, setFoldersArchiveId] = useState<string | null>(null);
   const [items, setItems] = useState<MessageListItem[]>([]);
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [selectedArchiveId, setSelectedArchiveId] = useState<string | null>(null);
@@ -238,6 +243,10 @@ export function App() {
   const [aiFilingBusy, setAiFilingBusy] = useState(false);
   const [message, setMessage] = useState<MessageDetail | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [recentWindowActive, setRecentWindowActive] = useState(false);
+  const [historyCutoff, setHistoryCutoff] = useState<string | null>(null);
+  const [historyStarted, setHistoryStarted] = useState(false);
+  const [historyExhausted, setHistoryExhausted] = useState(true);
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [filters, setFilters] = useState<UiSearchFilters>(EMPTY_FILTERS);
@@ -565,6 +574,7 @@ export function App() {
     setSettingsVisited(false);
     setArchives([]);
     setFolders([]);
+    setFoldersArchiveId(null);
     setItems([]);
     setJobs([]);
     setMessage(null);
@@ -699,13 +709,16 @@ export function App() {
   useEffect(() => {
     if (!api || !selectedArchiveId) {
       setFolders([]);
+      setFoldersArchiveId(null);
       return;
     }
     let active = true;
+    setFoldersArchiveId(null);
     void api.listFolders(selectedArchiveId)
       .then((loaded) => {
         if (!active) return;
         setFolders(loaded);
+        setFoldersArchiveId(selectedArchiveId);
         setSelectedFolderId((current) => {
           if (current && loaded.some((folder) => folder.id === current)) return current;
           return loaded.find((folder) => folder.name.trim().toLowerCase() === "inbox")?.id ?? null;
@@ -736,21 +749,34 @@ export function App() {
 
   const loadMessages = useCallback(async (append = false) => {
     const requestId = ++messageListRequestRef.current;
-    if (!api || !selectedArchiveId) {
+    if (!api || !selectedArchiveId || foldersArchiveId !== selectedArchiveId) {
       setItems([]);
       setNextCursor(null);
+      setLoadingMessages(false);
       return;
     }
     setLoadingMessages(true);
     try {
-      const countsPromise = !append && showInboxCategories
-        ? api.inboxCategoryCounts({
+      if (!append && showInboxCategories) {
+        void api.inboxCategoryCounts({
             archiveId: selectedArchiveId,
             folderId: visibleFolderId ?? undefined,
             isRead: showReadMessages ? undefined : false
           })
-        : Promise.resolve(null);
+          .then((counts) => {
+            if (requestId === messageListRequestRef.current) setInboxCategoryCounts(counts);
+          })
+          .catch((error) => {
+            if (requestId === messageListRequestRef.current) {
+              showError(error instanceof Error ? error.message : "Inbox counts could not be loaded");
+            }
+          });
+      }
       if (searchTerm) {
+        setRecentWindowActive(false);
+        setHistoryCutoff(null);
+        setHistoryStarted(false);
+        setHistoryExhausted(true);
         const searchFilters: SearchFilters = {
           archiveId: selectedArchiveId,
           folderId: searchFolderId ?? undefined,
@@ -766,15 +792,14 @@ export function App() {
           cursor: append ? nextCursor ?? undefined : undefined,
           limit: 50
         };
-        const [page, counts] = await Promise.all([api.search(searchTerm, searchFilters), countsPromise]);
+        const page = await api.search(searchTerm, searchFilters);
         if (requestId !== messageListRequestRef.current) return;
         setItems((current) => append
           ? [...current, ...page.items.map(hitToItem)]
           : page.items.map(hitToItem));
         setNextCursor(page.nextCursor);
-        if (counts) setInboxCategoryCounts(counts);
       } else {
-        const [page, counts] = await Promise.all([api.listMessages({
+        const baseFilters = {
           archiveId: selectedArchiveId,
           folderId: searchFolderId ?? undefined,
           isRead: showReadMessages ? undefined : false,
@@ -782,18 +807,69 @@ export function App() {
           inboxCategory: showInboxCategories ? inboxCategory : undefined,
           from: filters.from || undefined,
           to: filters.to || undefined,
-          after: filters.after || undefined,
-          before: filters.before || undefined,
-          hasAttachment: filters.hasAttachment,
-          cursor: append ? nextCursor ?? undefined : undefined,
-          limit: 50
-        }), countsPromise]);
-        if (requestId !== messageListRequestRef.current) return;
-        setItems((current) => append
-          ? [...current, ...page.items.map(messageToItem)]
-          : page.items.map(messageToItem));
-        setNextCursor(page.nextCursor);
-        if (counts) setInboxCategoryCounts(counts);
+          hasAttachment: filters.hasAttachment
+        };
+        const shouldUseRecentWindow = !filters.after && !filters.before;
+        if (!shouldUseRecentWindow) {
+          setRecentWindowActive(false);
+          setHistoryCutoff(null);
+          setHistoryStarted(false);
+          setHistoryExhausted(true);
+          const page = await api.listMessages({
+            ...baseFilters,
+            after: filters.after || undefined,
+            before: filters.before || undefined,
+            cursor: append ? nextCursor ?? undefined : undefined,
+            limit: MESSAGE_PAGE_SIZE
+          });
+          if (requestId !== messageListRequestRef.current) return;
+          setItems((current) => append
+            ? appendUniqueMessages(current, page.items.map(messageToItem))
+            : page.items.map(messageToItem));
+          setNextCursor(page.nextCursor);
+        } else if (append) {
+          const cutoff = historyCutoff;
+          if (!cutoff) return;
+          const page = await api.listMessages({
+            ...baseFilters,
+            before: new Date(new Date(cutoff).getTime() - 1).toISOString(),
+            cursor: historyStarted ? nextCursor ?? undefined : undefined,
+            limit: MESSAGE_PAGE_SIZE
+          });
+          if (requestId !== messageListRequestRef.current) return;
+          setItems((current) => appendUniqueMessages(current, page.items.map(messageToItem)));
+          setHistoryStarted(true);
+          setHistoryExhausted(page.nextCursor === null);
+          setNextCursor(page.nextCursor);
+        } else {
+          const cutoff = new Date(Date.now() - INITIAL_MAIL_WINDOW_DAYS * 24 * 60 * 60 * 1_000).toISOString();
+          setRecentWindowActive(true);
+          setHistoryCutoff(cutoff);
+          setHistoryStarted(false);
+          setHistoryExhausted(false);
+          setNextCursor(null);
+
+          let page = await api.listMessages({
+            ...baseFilters,
+            after: cutoff,
+            limit: MESSAGE_PAGE_SIZE
+          });
+          if (requestId !== messageListRequestRef.current) return;
+          setItems(page.items.map(messageToItem));
+
+          // Paint the first page immediately, then finish the five-day window in the
+          // background. Older history stays server-side until the user asks for it.
+          while (page.nextCursor) {
+            page = await api.listMessages({
+              ...baseFilters,
+              after: cutoff,
+              cursor: page.nextCursor,
+              limit: MESSAGE_PAGE_SIZE
+            });
+            if (requestId !== messageListRequestRef.current) return;
+            setItems((current) => appendUniqueMessages(current, page.items.map(messageToItem)));
+          }
+        }
       }
       if (!showInboxCategories) setInboxCategoryCounts(EMPTY_INBOX_CATEGORY_COUNTS);
     } catch (error) {
@@ -805,7 +881,7 @@ export function App() {
   }, [
     api,
     selectedArchiveId,
-    selectedFolderId,
+    foldersArchiveId,
     searchFolderId,
     visibleFolderId,
     selectedSmartMailbox,
@@ -816,6 +892,8 @@ export function App() {
     sort,
     showReadMessages,
     nextCursor,
+    historyCutoff,
+    historyStarted,
     showError
   ]);
 
@@ -827,7 +905,7 @@ export function App() {
     setMessage(null);
     setBulkSelectedIds(new Set());
     void loadMessages(false);
-  }, [api, selectedArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory, showReadMessages, messageListRevision]);
+  }, [api, selectedArchiveId, foldersArchiveId, selectedFolderId, selectedSmartMailbox, searchTerm, filters, sort, inboxCategory, showReadMessages, messageListRevision]);
 
   const loadFoldersForGmail = useCallback(async (archiveId: string): Promise<Folder[]> => {
     if (!api) return [];
@@ -1000,6 +1078,7 @@ export function App() {
 
   const selectArchive = (id: string) => {
     setSelectedArchiveId(id);
+    setFoldersArchiveId(null);
     setSelectedFolderId(null);
     setSelectedSmartMailbox(null);
     setInboxCategory("primary");
@@ -1912,7 +1991,8 @@ export function App() {
 
   const selectEntireMessageView = async () => {
     if (!api || !selectedArchiveId || readOnly) return;
-    if (!nextCursor) {
+    const viewHasMore = recentWindowActive ? !historyExhausted : Boolean(nextCursor);
+    if (!viewHasMore) {
       selectAllLoadedMessages();
       showError(`Selected all ${items.length.toLocaleString()} messages in this view`);
       return;
@@ -2381,6 +2461,14 @@ export function App() {
     : selectedSmartMailbox === "starred"
       ? "Starred"
       : selectedFolder?.name ?? (selectedArchive ? "All mail" : "Messages");
+  const messageListHasMore = recentWindowActive ? !historyExhausted : Boolean(nextCursor);
+  const messageRangeLabel = recentWindowActive
+    ? historyStarted
+      ? "Recent mail + older history"
+      : loadingMessages
+        ? "Loading the last 5 days…"
+        : "Last 5 days loaded"
+    : undefined;
 
   if (initializing) {
     return (
@@ -2635,7 +2723,9 @@ export function App() {
               title={listTitle}
               loading={loadingMessages}
               searching={Boolean(searchTerm)}
-              hasMore={Boolean(nextCursor)}
+              hasMore={messageListHasMore}
+              rangeLabel={messageRangeLabel}
+              loadMoreLabel={recentWindowActive && !historyStarted ? "Load messages older than 5 days" : "Load more"}
               readOnly={readOnly}
               onSelect={(selected) => void openMessage(selected)}
               onDragStart={(target, messageIds) => {
@@ -2674,7 +2764,9 @@ export function App() {
               onSpam={(target) => void spamSender(target)}
               onToggleRead={(target) => void toggleListMessageRead(target)}
             />
-            <MessageReader
+            {(selectedMessageId || loadingMessage) && <Suspense fallback={
+              <section className="reader-pane reader-loading"><LoaderCircle className="spin" size={20} /> Opening message…</section>
+            }><MessageReader
               key={message?.id ?? "empty-reader"}
               message={message}
               loading={loadingMessage}
@@ -2694,7 +2786,7 @@ export function App() {
               onIndicatorsChange={updateMessageIndicators}
               moveBusy={moveBusy}
               spamBusy={spamBusy}
-            />
+            /></Suspense>}
         </div>
       </main>
 
@@ -2871,7 +2963,8 @@ export function App() {
         onLoadFolders={loadFoldersForGmail}
         onMove={(destination) => void moveGmailConnection(destination)}
       />
-      <ComposeDialog
+      <Suspense fallback={null}>
+      {composeOpen && <ComposeDialog
         open={composeOpen}
         connections={gmailConnections}
         initialConnectionId={composeConnectionId}
@@ -2888,8 +2981,8 @@ export function App() {
         onDelete={composeDraft?.id && !readOnly ? () => void deleteOpenDraft() : undefined}
         onSave={(connectionId, outgoing, resumeId) => void saveComposeDraft(connectionId, outgoing, resumeId)}
         onSend={(connectionId, outgoing, resumeId) => void sendGmailMessage(connectionId, outgoing, resumeId)}
-      />
-      <DraftsDialog
+      />}
+      {draftsOpen && <DraftsDialog
         open={draftsOpen}
         drafts={drafts}
         loading={draftsLoading}
@@ -2900,8 +2993,8 @@ export function App() {
         onEdit={editSavedDraft}
         onSend={(draft) => void sendSavedDraft(draft)}
         onDelete={(draft) => void deleteSavedDraft(draft)}
-      />
-      <AskArchiveMailDialog
+      />}
+      {askOpen && <AskArchiveMailDialog
         open={askOpen}
         answer={askAnswer}
         history={askHistory}
@@ -2914,8 +3007,8 @@ export function App() {
           void openMessage({ id: messageId });
         }}
         onRefreshHistory={() => void refreshAskHistory()}
-      />
-      <DuplicateGroupsDialog
+      />}
+      {duplicatesOpen && <DuplicateGroupsDialog
         open={duplicatesOpen}
         list={duplicateList}
         status={duplicateStatus}
@@ -2944,8 +3037,8 @@ export function App() {
           setDuplicatesOpen(false);
           void openMessage({ id: messageId });
         }}
-      />
-      <AiReviewQueueDialog
+      />}
+      {reviewQueueOpen && <AiReviewQueueDialog
         open={reviewQueueOpen}
         queue={reviewQueue}
         loading={reviewQueueLoading}
@@ -2968,7 +3061,7 @@ export function App() {
         onMarkAnalysisReviewed={(item) => void markReviewAnalysisReviewed(item)}
         onMarkAllAnalysesReviewed={() => void markAllReviewAnalysesReviewed()}
         onCompleteFollowUp={(followUp) => void completeReviewFollowUp(followUp.id, followUp.messageId)}
-      />
+      />}
       {api && reviewActionDraft && (
         <MessageActionDialog
           key={`${reviewActionDraft.item.message.id}:${reviewActionDraft.initialAction}`}
@@ -3000,7 +3093,8 @@ export function App() {
           onError={showError}
         />
       )}
-      <GuideDialog open={guideOpen} onClose={() => setGuideOpen(false)} />
+      {guideOpen && <GuideDialog open onClose={() => setGuideOpen(false)} />}
+      </Suspense>
       {!readOnly && (settingsOpen || settingsVisited) && (
         <Suspense fallback={settingsOpen ? <div className="dialog-backdrop"><div className="settings-loading"><LoaderCircle className="spin" size={20} /> Loading settings…</div></div> : null}>
           <BackgroundActivityDialog
@@ -3070,4 +3164,14 @@ function hitToItem(hit: SearchHit): MessageListItem {
 
 function messageToItem(message: MessageSummary): MessageListItem {
   return { message };
+}
+
+function appendUniqueMessages(
+  current: MessageListItem[],
+  incoming: MessageListItem[]
+): MessageListItem[] {
+  if (incoming.length === 0) return current;
+  const existing = new Set(current.map((item) => item.message.id));
+  const unique = incoming.filter((item) => !existing.has(item.message.id));
+  return unique.length === 0 ? current : [...current, ...unique];
 }

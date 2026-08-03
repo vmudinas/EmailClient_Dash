@@ -236,6 +236,14 @@ public sealed class DatabaseInitializer(
           WHERE fingerprinted_at IS NULL;
         CREATE INDEX IF NOT EXISTS messages_archive_date_idx ON messages(archive_id, received_at DESC, sent_at DESC);
         CREATE INDEX IF NOT EXISTS messages_folder_date_idx ON messages(folder_id, received_at DESC, sent_at DESC);
+        -- List views order by the coalesced activity timestamp. Matching expression indexes let
+        -- Postgres stop as soon as a page is full instead of sorting an entire large mailbox.
+        CREATE INDEX IF NOT EXISTS messages_archive_activity_idx ON messages(
+          archive_id, (COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS messages_folder_activity_idx ON messages(
+          folder_id, (COALESCE(received_at, sent_at, '')) DESC, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS messages_archive_category_idx ON messages(archive_id, inbox_category);
+        CREATE INDEX IF NOT EXISTS messages_folder_category_idx ON messages(folder_id, inbox_category);
         CREATE INDEX IF NOT EXISTS messages_sender_idx ON messages(sender_address);
         CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(archive_id, conversation_key);
         DO $archive_mail$

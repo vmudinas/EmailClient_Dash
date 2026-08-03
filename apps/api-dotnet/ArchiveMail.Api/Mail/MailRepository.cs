@@ -227,23 +227,33 @@ public sealed class MailRepository(NpgsqlDataSource database)
         CancellationToken cancellationToken)
     {
         var limit = ClampLimit(filters.Limit);
-        var offset = DecodeOffset(filters.Cursor);
+        var cursor = DecodeMessageCursor(filters.Cursor);
         var (where, parameters) = BuildFilters(filters, ownerUserId);
+        var cursorWhere = "";
+        if (cursor is not null)
+        {
+            cursorWhere = "AND (COALESCE(m.received_at, m.sent_at, ''), m.created_at, m.id) < (@cursor_activity, @cursor_created, @cursor_id)";
+            parameters.Add(new("cursor_activity", cursor.ActivityAt));
+            parameters.Add(new("cursor_created", cursor.CreatedAt));
+            parameters.Add(new("cursor_id", cursor.Id));
+        }
         var sql = $"""
             SELECT {SummaryColumns}
             {SummaryJoins}
             WHERE {where}
+            {cursorWhere}
             ORDER BY COALESCE(m.received_at, m.sent_at, '') DESC, m.created_at DESC, m.id DESC
-            LIMIT @limit OFFSET @offset
+            LIMIT @limit
             """;
         await using var command = database.CreateCommand(sql);
         AddParameters(command, parameters);
         command.Parameters.AddWithValue("limit", limit + 1);
-        command.Parameters.AddWithValue("offset", offset);
-        var rows = await ReadSummariesAsync(command, cancellationToken);
+        var rows = await ReadSummaryRowsAsync(command, cancellationToken);
         var hasMore = rows.Count > limit;
         if (hasMore) rows.RemoveAt(rows.Count - 1);
-        return new(rows, hasMore ? EncodeOffset(offset + limit) : null);
+        return new(
+            rows.Select(row => row.Message).ToArray(),
+            hasMore && rows.Count > 0 ? EncodeMessageCursor(rows[^1]) : null);
     }
 
     public async Task<InboxCategoryCountsDto> CountCategoriesAsync(
@@ -285,43 +295,70 @@ public sealed class MailRepository(NpgsqlDataSource database)
         var limit = ClampLimit(filters.Limit);
         var offset = DecodeOffset(filters.Cursor);
         var (where, parameters) = BuildFilters(filters, ownerUserId);
-        var ordering = sort == "newest"
+        var rankedOrdering = sort == "newest"
             ? "COALESCE(m.received_at, m.sent_at, '') DESC, ranked.rank DESC, m.created_at DESC, m.id DESC"
             : "ranked.rank DESC, COALESCE(m.received_at, m.sent_at, '') DESC, m.created_at DESC, m.id DESC";
+        var pagedOrdering = sort == "newest"
+            ? "COALESCE(m.received_at, m.sent_at, '') DESC, paged.rank DESC, m.created_at DESC, m.id DESC"
+            : "paged.rank DESC, COALESCE(m.received_at, m.sent_at, '') DESC, m.created_at DESC, m.id DESC";
         var sql = $"""
             WITH search_query AS (SELECT websearch_to_tsquery('simple', @query) AS value),
+            filtered_messages AS NOT MATERIALIZED (
+              SELECT m.id
+              FROM messages m
+              LEFT JOIN message_state s ON s.message_id = m.id
+              JOIN archives owner_archive ON owner_archive.id = m.archive_id
+              WHERE {where}
+            ),
             raw_hits AS (
               SELECT m.id AS message_id,
                 ts_rank_cd(archive_mail_message_search(m.subject, m.sender_name, m.sender_address,
                   m.recipients_text, m.body_text), search_query.value) AS rank,
-                'message' AS matched_in, NULL::text AS attachment_id, NULL::text AS attachment_name,
-                ts_headline('simple', archive_mail_search_excerpt(
-                  COALESCE(m.subject, '') || ' ' || COALESCE(m.body_text, '')), search_query.value,
-                  'StartSel=<mark>, StopSel=</mark>, MaxWords=24, MinWords=8') AS hit_snippet
-              FROM messages m CROSS JOIN search_query
+                'message' AS matched_in, NULL::text AS attachment_id, NULL::text AS attachment_name
+              FROM filtered_messages scope
+              JOIN messages m ON m.id = scope.id
+              CROSS JOIN search_query
               WHERE archive_mail_message_search(m.subject, m.sender_name, m.sender_address,
                 m.recipients_text, m.body_text) @@ search_query.value
               UNION ALL
               SELECT a.message_id,
                 ts_rank_cd(archive_mail_attachment_search(a.filename, a.extracted_text), search_query.value) * 0.8,
-                'attachment', a.id, a.filename,
-                ts_headline('simple', archive_mail_search_excerpt(
-                  COALESCE(a.filename, '') || ' ' || COALESCE(a.extracted_text, '')), search_query.value,
-                  'StartSel=<mark>, StopSel=</mark>, MaxWords=24, MinWords=8')
-              FROM attachments a CROSS JOIN search_query
+                'attachment', a.id, a.filename
+              FROM filtered_messages scope
+              JOIN attachments a ON a.message_id = scope.id
+              CROSS JOIN search_query
               WHERE archive_mail_attachment_search(a.filename, a.extracted_text) @@ search_query.value
             ), ranked AS (
               SELECT *, ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY rank DESC) AS hit_order FROM raw_hits
+            ), paged AS (
+              SELECT ranked.message_id, ranked.rank, ranked.matched_in,
+                     ranked.attachment_id, ranked.attachment_name
+              FROM ranked
+              JOIN messages m ON m.id = ranked.message_id
+              WHERE ranked.hit_order = 1
+              ORDER BY {rankedOrdering}
+              LIMIT @limit OFFSET @offset
             )
-            SELECT {SummaryColumns}, ranked.rank, ranked.matched_in, ranked.attachment_id, ranked.attachment_name, ranked.hit_snippet
-            FROM ranked
-            JOIN messages m ON m.id = ranked.message_id
+            SELECT {SummaryColumns}, paged.rank, paged.matched_in, paged.attachment_id, paged.attachment_name,
+              CASE WHEN paged.matched_in = 'attachment' THEN
+                ts_headline('simple', archive_mail_search_excerpt(
+                  COALESCE(matched_attachment.filename, '') || ' ' || COALESCE(matched_attachment.extracted_text, '')),
+                  search_query.value,
+                  'StartSel=<mark>, StopSel=</mark>, MaxWords=24, MinWords=8')
+              ELSE
+                ts_headline('simple', archive_mail_search_excerpt(
+                  COALESCE(m.subject, '') || ' ' || COALESCE(m.body_text, '')),
+                  search_query.value,
+                  'StartSel=<mark>, StopSel=</mark>, MaxWords=24, MinWords=8')
+              END AS hit_snippet
+            FROM paged
+            JOIN messages m ON m.id = paged.message_id
             JOIN folders f ON f.id = m.folder_id
             LEFT JOIN message_state s ON s.message_id = m.id
             JOIN archives owner_archive ON owner_archive.id = m.archive_id
-            WHERE ranked.hit_order = 1 AND {where}
-            ORDER BY {ordering}
-            LIMIT @limit OFFSET @offset
+            LEFT JOIN attachments matched_attachment ON matched_attachment.id = paged.attachment_id
+            CROSS JOIN search_query
+            ORDER BY {pagedOrdering}
             """;
         await using var command = database.CreateCommand(sql);
         command.Parameters.AddWithValue("query", query.Trim());
@@ -644,6 +681,23 @@ public sealed class MailRepository(NpgsqlDataSource database)
         return rows;
     }
 
+    private static async Task<List<MessageSummaryRow>> ReadSummaryRowsAsync(
+        NpgsqlCommand command,
+        CancellationToken cancellationToken)
+    {
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<MessageSummaryRow>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new(
+                ReadSummary(reader),
+                reader.IsDBNull(9) ? (reader.IsDBNull(8) ? "" : reader.GetString(8)) : reader.GetString(9),
+                reader.GetString(10),
+                reader.GetString(0)));
+        }
+        return rows;
+    }
+
     private static MessageSummaryDto ReadSummary(NpgsqlDataReader reader)
     {
         var body = reader.IsDBNull(11) ? "" : reader.GetString(11);
@@ -706,6 +760,32 @@ public sealed class MailRepository(NpgsqlDataSource database)
     }
 
     private static int ClampLimit(int? limit) => Math.Clamp(limit ?? 50, 1, 100);
+    private static string EncodeMessageCursor(MessageSummaryRow row) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            activityAt = row.ActivityAt,
+            createdAt = row.CreatedAt,
+            id = row.Id
+        }))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static MessageCursor? DecodeMessageCursor(string? cursor)
+    {
+        if (string.IsNullOrWhiteSpace(cursor)) return null;
+        try
+        {
+            var normalized = cursor.Replace('-', '+').Replace('_', '/');
+            normalized += new string('=', (4 - normalized.Length % 4) % 4);
+            using var json = JsonDocument.Parse(Convert.FromBase64String(normalized));
+            var root = json.RootElement;
+            return root.TryGetProperty("activityAt", out var activityAt)
+                && root.TryGetProperty("createdAt", out var createdAt)
+                && root.TryGetProperty("id", out var id)
+                ? new(activityAt.GetString() ?? "", createdAt.GetString() ?? "", id.GetString() ?? "")
+                : null;
+        }
+        catch { return null; }
+    }
+
     private static string EncodeOffset(int offset) => Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { offset })))
         .TrimEnd('=').Replace('+', '-').Replace('/', '_');
     private static int DecodeOffset(string? cursor)
@@ -788,6 +868,8 @@ public sealed class MailRepository(NpgsqlDataSource database)
 
     private sealed record FolderRow(
         string ArchiveId, string? ParentId, string Path, long MessageCount, long UnreadCount, string Status);
+    private sealed record MessageSummaryRow(MessageSummaryDto Message, string ActivityAt, string CreatedAt, string Id);
+    private sealed record MessageCursor(string ActivityAt, string CreatedAt, string Id);
 
     private static async Task<FolderRow?> GetFolderRowAsync(
         NpgsqlConnection connection,
