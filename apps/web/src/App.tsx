@@ -117,6 +117,7 @@ import type { ComposeDraft } from "./components/ComposeDialog.js";
 import { LoginScreen } from "./components/LoginScreen.js";
 import { TenantInvitationScreen } from "./components/TenantInvitationScreen.js";
 import type { ReviewAction } from "./components/MessageActionDialog.js";
+import type { DuplicateMoveRequest } from "./components/DuplicateGroupsDialog.js";
 import { StockTickerBar } from "./components/StockTickerBar.js";
 import { NewsTickerBar } from "./components/NewsTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
@@ -1606,6 +1607,103 @@ export function App() {
       await refreshDuplicates(duplicateStatus);
     } catch (error) {
       showError(error instanceof Error ? error.message : "The preferred copy could not be changed");
+    } finally {
+      setDuplicateBusyId(null);
+    }
+  };
+
+  const moveDuplicateCopies = async (
+    detail: DuplicateGroupDetail,
+    request: DuplicateMoveRequest
+  ): Promise<boolean> => {
+    if (!api || readOnly) return false;
+    const preferredId = detail.group.preferredMessageId ?? detail.members[0]?.message.id;
+    const copies = detail.members.filter((member) => member.message.id !== preferredId);
+    if (copies.length === 0) {
+      showError("This group has no extra copies to move");
+      return false;
+    }
+    const folderRequest = request.destination === "folder" ? request : null;
+    const destinationLabel = folderRequest
+      ? [...new Set(folderRequest.targets.map((target) => target.folderPath))].join(", ")
+      : request.destination === "archived" ? "Archive" : "Trash";
+    if (!window.confirm(
+      `Move ${copies.length.toLocaleString()} duplicate ${copies.length === 1 ? "copy" : "copies"} to ${destinationLabel}? The preferred copy will stay where it is.`
+    )) return false;
+
+    setDuplicateBusyId(detail.group.id);
+    try {
+      const processed = new Set<string>();
+      if (!folderRequest) {
+        const namedDestination: BulkMoveDestination = request.destination === "archived" ? "archived" : "trash";
+        const result = await api.bulkMoveMessages(copies.map((member) => member.message.id), namedDestination);
+        result.processedMessageIds.forEach((messageId) => processed.add(messageId));
+      } else {
+        for (const target of folderRequest.targets) {
+          const messageIds = copies
+            .filter((member) => member.message.archiveId === target.archiveId)
+            .map((member) => member.message.id);
+          if (messageIds.length === 0) continue;
+          const result = await api.bulkMoveMessagesToFolder(messageIds, target.folderId);
+          result.processedMessageIds.forEach((messageId) => processed.add(messageId));
+        }
+      }
+
+      const failedMoves = copies.filter((member) => !processed.has(member.message.id));
+      refreshAfterMove();
+      if (message && processed.has(message.id)) closeMessage();
+      if (failedMoves.length > 0) {
+        setDuplicateExpanded(await api.getDuplicateGroup(detail.group.id));
+        await refreshDuplicates(duplicateStatus);
+        showError(
+          `Moved ${processed.size.toLocaleString()} duplicate ${processed.size === 1 ? "copy" : "copies"}; `
+          + `${failedMoves.length.toLocaleString()} could not be moved and remain in this group`
+        );
+        return false;
+      }
+
+      let failedRules = 0;
+      if (folderRequest?.createRules) {
+        for (const target of folderRequest.targets) {
+          const senders = new Map<string, string>();
+          for (const member of copies.filter((item) => item.message.archiveId === target.archiveId)) {
+            const address = member.message.sender.address.trim().toLowerCase();
+            if (address) senders.set(address, member.message.sender.name ?? address);
+          }
+          for (const address of senders.keys()) {
+            try {
+              await api.createSenderFilingRule({
+                archiveId: target.archiveId,
+                archiveScope: "archive",
+                matchField: "from",
+                matchAddress: address,
+                sourceScope: "inbox",
+                destinationFolderId: target.folderId,
+                applyExisting: false
+              });
+            } catch {
+              failedRules++;
+            }
+          }
+        }
+      }
+
+      await api.updateDuplicateGroup(detail.group.id, { reviewStatus: "confirmed" });
+      setDuplicateExpanded(null);
+      setDuplicateExpandedId(null);
+      await refreshDuplicates(duplicateStatus);
+      showError(
+        `Moved ${processed.size.toLocaleString()} duplicate ${processed.size === 1 ? "copy" : "copies"} to ${destinationLabel}`
+        + (folderRequest?.createRules
+          ? failedRules > 0
+            ? `; ${failedRules.toLocaleString()} sender ${failedRules === 1 ? "rule" : "rules"} could not be created`
+            : "; future sender rules created"
+          : "")
+      );
+      return true;
+    } catch (error) {
+      showError(error instanceof Error ? error.message : "Duplicate copies could not be moved");
+      return false;
     } finally {
       setDuplicateBusyId(null);
     }
@@ -3143,6 +3241,7 @@ export function App() {
         scanStarting={duplicateScanStarting}
         busyGroupId={duplicateBusyId}
         readOnly={readOnly}
+        archives={archives}
         onClose={() => setDuplicatesOpen(false)}
         onRefresh={() => void refreshDuplicates(duplicateStatus)}
         onScan={() => void scanDuplicates()}
@@ -3157,6 +3256,8 @@ export function App() {
         onConfirm={(group) => void reviewDuplicateGroup(group, "confirmed")}
         onDismiss={(group) => void reviewDuplicateGroup(group, "dismissed")}
         onSetPreferred={(group, messageId) => void setDuplicatePreferred(group, messageId)}
+        onLoadFolders={(archiveId) => api ? api.listFolders(archiveId) : Promise.resolve([])}
+        onMoveCopies={moveDuplicateCopies}
         onOpenMessage={(messageId) => {
           setDuplicatesOpen(false);
           void openMessage({ id: messageId });

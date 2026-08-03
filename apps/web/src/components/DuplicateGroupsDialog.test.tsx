@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DuplicateGroup, DuplicateGroupDetail, DuplicateScan, MessageDetail } from "@email-client/shared";
 import { DuplicateGroupsDialog } from "./DuplicateGroupsDialog.js";
@@ -62,6 +62,7 @@ function renderDialog(overrides: Partial<Parameters<typeof DuplicateGroupsDialog
     scanStarting: false,
     busyGroupId: null,
     readOnly: false,
+    archives: [{ id: "archive-1", name: "Primary archive" }],
     onClose: vi.fn(),
     onRefresh: vi.fn(),
     onScan: vi.fn(),
@@ -72,6 +73,8 @@ function renderDialog(overrides: Partial<Parameters<typeof DuplicateGroupsDialog
     onDismiss: vi.fn(),
     onSetPreferred: vi.fn(),
     onOpenMessage: vi.fn(),
+    onLoadFolders: vi.fn().mockResolvedValue([{ id: "folder-2", archiveId: "archive-1", parentId: null, name: "Receipts", path: "Receipts", messageCount: 0, unreadCount: 0 }]),
+    onMoveCopies: vi.fn().mockResolvedValue(true),
     ...overrides
   };
   render(<DuplicateGroupsDialog {...props} />);
@@ -92,6 +95,7 @@ describe("DuplicateGroupsDialog", () => {
         scanStarting={false}
         busyGroupId={null}
         readOnly={false}
+        archives={[]}
         onClose={vi.fn()}
         onRefresh={vi.fn()}
         onScan={vi.fn()}
@@ -102,6 +106,8 @@ describe("DuplicateGroupsDialog", () => {
         onDismiss={vi.fn()}
         onSetPreferred={vi.fn()}
         onOpenMessage={vi.fn()}
+        onLoadFolders={vi.fn().mockResolvedValue([])}
+        onMoveCopies={vi.fn().mockResolvedValue(true)}
       />
     );
     expect(container.firstChild).toBeNull();
@@ -114,9 +120,9 @@ describe("DuplicateGroupsDialog", () => {
     expect(screen.getByText("Identical content")).toBeTruthy();
   });
 
-  it("states that nothing is deleted", () => {
+  it("states that filing keeps the preferred copy", () => {
     renderDialog();
-    expect(screen.getByText(/Nothing is ever deleted/)).toBeTruthy();
+    expect(screen.getByText(/filing actions always keep the preferred copy/)).toBeTruthy();
   });
 
   it("expands a group when its summary is clicked", () => {
@@ -147,6 +153,32 @@ describe("DuplicateGroupsDialog", () => {
     expect(props.onDismiss).toHaveBeenCalledWith(group);
   });
 
+  it("archives or trashes every copy except the preferred one", () => {
+    const props = renderDialog({ expanded: detail, expandedId: "group-1" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive copies" }));
+    expect(props.onMoveCopies).toHaveBeenCalledWith(detail, { destination: "archived" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Trash copies" }));
+    expect(props.onMoveCopies).toHaveBeenCalledWith(detail, { destination: "trash" });
+  });
+
+  it("moves copies to a chosen folder and can request future sender rules", async () => {
+    const props = renderDialog({ expanded: detail, expandedId: "group-1" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Move to folder" }));
+    await waitFor(() => expect(props.onLoadFolders).toHaveBeenCalledWith("archive-1"));
+    fireEvent.change(await screen.findByLabelText("Destination folder for Primary archive"), { target: { value: "folder-2" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Create future sender rules/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Move copies" }));
+
+    await waitFor(() => expect(props.onMoveCopies).toHaveBeenCalledWith(detail, {
+      destination: "folder",
+      createRules: true,
+      targets: [{ archiveId: "archive-1", folderId: "folder-2", folderPath: "Receipts" }]
+    }));
+  });
+
   it("opens a member message", () => {
     const props = renderDialog({ expanded: detail, expandedId: "group-1" });
     fireEvent.click(screen.getAllByTitle("Open this copy")[0]!);
@@ -158,6 +190,9 @@ describe("DuplicateGroupsDialog", () => {
     expect(screen.queryByRole("button", { name: /Mark duplicate/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Keep separate/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Scan now/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Archive copies" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Trash copies" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Move to folder" })).toBeNull();
     expect(screen.queryByLabelText("Prefer Re: Invoice 42")).toBeNull();
   });
 
