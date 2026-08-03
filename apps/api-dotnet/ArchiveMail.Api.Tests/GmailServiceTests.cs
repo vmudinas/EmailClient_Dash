@@ -30,7 +30,7 @@ public sealed class GmailServiceTests : IDisposable
             clientId = "desktop.apps.googleusercontent.com"
         }));
         var service = new GmailService(
-            null!, settings, null!, null!, null!, active, null!, NullLogger<GmailService>.Instance);
+            null!, settings, null!, null!, null!, active, null!, null!, NullLogger<GmailService>.Instance);
 
         var result = JsonSerializer.SerializeToElement(service.StartAuthorization(
             JsonSerializer.SerializeToElement(new { }),

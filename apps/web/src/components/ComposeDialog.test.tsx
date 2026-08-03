@@ -287,4 +287,90 @@ describe("ComposeDialog", () => {
     // A failed load must not imply the draft has no resume attached.
     expect(await screen.findByText("engineering-resume.pdf")).toBeTruthy();
   });
+
+  it("switches the sender to the development address when a resume is attached", async () => {
+    const onSend = vi.fn();
+    render(
+      <ComposeDialog
+        open
+        connections={[CONNECTION]}
+        initialConnectionId={CONNECTION.id}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onOpenGmail={vi.fn()}
+        onLoadSendAsAliases={vi.fn().mockResolvedValue([])}
+        onLoadResumes={vi.fn().mockResolvedValue(RESUMES)}
+        onSave={vi.fn()}
+        onSend={onSend}
+      />
+    );
+
+    const sendAs = await screen.findByRole("combobox", { name: "Send as" }) as HTMLSelectElement;
+    expect(sendAs.value).toBe("ai@vitas.work");
+
+    // Attaching makes it recruiter/development mail; the sender has to follow, or the explicit
+    // address submitted to the server leaves it nothing to default.
+    fireEvent.change(screen.getByRole("combobox", { name: "Résumé" }), { target: { value: "resume-1" } });
+    expect(sendAs.value).toBe("code@vitas.work");
+
+    // Detaching goes back.
+    fireEvent.change(screen.getByRole("combobox", { name: "Résumé" }), { target: { value: "" } });
+    expect(sendAs.value).toBe("ai@vitas.work");
+  });
+
+  it("keeps a hand-picked sender when a resume is attached afterwards", async () => {
+    render(
+      <ComposeDialog
+        open
+        connections={[CONNECTION]}
+        initialConnectionId={CONNECTION.id}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onOpenGmail={vi.fn()}
+        onLoadSendAsAliases={vi.fn().mockResolvedValue([])}
+        onLoadResumes={vi.fn().mockResolvedValue(RESUMES)}
+        onSave={vi.fn()}
+        onSend={vi.fn()}
+      />
+    );
+
+    const sendAs = await screen.findByRole("combobox", { name: "Send as" }) as HTMLSelectElement;
+    fireEvent.change(sendAs, { target: { value: "me@vitas.work" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Résumé" }), { target: { value: "resume-1" } });
+
+    // A deliberate choice must not be overwritten by the resume default.
+    expect(sendAs.value).toBe("me@vitas.work");
+  });
+
+  it("carries the resume on a directly sent message so the file is attached", async () => {
+    const onSend = vi.fn();
+    render(
+      <ComposeDialog
+        open
+        connections={[CONNECTION]}
+        initialConnectionId={CONNECTION.id}
+        busy={false}
+        error=""
+        onClose={vi.fn()}
+        onOpenGmail={vi.fn()}
+        onLoadSendAsAliases={vi.fn().mockResolvedValue([])}
+        onLoadResumes={vi.fn().mockResolvedValue(RESUMES)}
+        onSave={vi.fn()}
+        onSend={onSend}
+      />
+    );
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "Résumé" }), { target: { value: "resume-1" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "To" }), { target: { value: "recruiter@example.test" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Subject" }), { target: { value: "Application" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    // Without resumeId on the request the server has nothing to attach and the recipient gets
+    // the text alone, while the dialog claims a file went with it.
+    expect(onSend).toHaveBeenCalledWith(CONNECTION.id, expect.objectContaining({
+      resumeId: "resume-1"
+    }), "resume-1");
+  });
 });

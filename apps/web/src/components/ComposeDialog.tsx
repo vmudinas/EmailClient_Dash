@@ -62,10 +62,14 @@ export function ComposeDialog({
   const [bodyText, setBodyText] = useState("");
   const [resumes, setResumes] = useState<ResumeAsset[]>([]);
   const [resumeId, setResumeId] = useState("");
+  // Once the sender is picked by hand it stops tracking the resume, so an explicit choice is
+  // never overwritten by attaching or detaching one.
+  const [senderChosenByHand, setSenderChosenByHand] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setResumeId(initialDraft?.resumeId ?? "");
+    setSenderChosenByHand(Boolean(initialDraft?.fromAddress && isAllowedSendingAddress(initialDraft.fromAddress)));
     setConnectionId(
       initialConnectionId && senders.some((connection) => connection.id === initialConnectionId)
         ? initialConnectionId
@@ -91,9 +95,9 @@ export function ComposeDialog({
     // rather than whatever the connected account happens to expose. Gmail's own aliases are still
     // fetched, but only to label the ones it recognises -- an address Gmail has not verified will
     // be refused by Google at send time, and saying so up front beats a failed send.
-    setFromAddress(initialDraft?.fromAddress && isAllowedSendingAddress(initialDraft.fromAddress)
-      ? initialDraft.fromAddress
-      : defaultSendingAddress(Boolean(initialDraft?.resumeId)));
+    if (initialDraft?.fromAddress && isAllowedSendingAddress(initialDraft.fromAddress)) {
+      setFromAddress(initialDraft.fromAddress);
+    }
     setAliases([]);
     let active = true;
     void onLoadSendAsAliases(connectionId).then((loaded) => {
@@ -113,6 +117,14 @@ export function ComposeDialog({
     return () => { active = false; };
   }, [open, onLoadResumes]);
 
+  useEffect(() => {
+    // Attaching a resume makes this recruiter or development mail, so the sender follows unless
+    // it was set by hand. Without this the composer keeps the address it opened with and the
+    // server, receiving an explicit choice, has nothing left to default.
+    if (!open || senderChosenByHand) return;
+    setFromAddress(defaultSendingAddress(Boolean(resumeId)));
+  }, [open, resumeId, senderChosenByHand]);
+
   if (!open) return null;
   const selectedConnection = senders.find((connection) => connection.id === connectionId);
   const message: GmailSendRequest = {
@@ -125,6 +137,9 @@ export function ComposeDialog({
     // choice rather than a deviation from the account default, and omitting it would hand the
     // server a blank to fill in.
     ...(fromAddress ? { fromAddress } : {}),
+    // Carried on the request so a directly-sent message attaches the file too; without it only
+    // saved drafts could ever carry one, and the recipient would get the text alone.
+    ...(resumeId ? { resumeId } : {}),
     ...(initialDraft?.sourceMessageId ? { sourceMessageId: initialDraft.sourceMessageId } : {})
   };
   const ready = Boolean(connectionId)
@@ -154,7 +169,7 @@ export function ComposeDialog({
           ) : (
             <>
               <label className="compose-line"><span>From</span><select value={connectionId} onChange={(event) => setConnectionId(event.target.value)}>{senders.map((connection) => <option key={connection.id} value={connection.id}>{connection.email}</option>)}</select></label>
-              <label className="compose-line"><span>Send as</span><select value={fromAddress} onChange={(event) => setFromAddress(event.target.value)}>{SENDING_ADDRESSES.map((entry) => <option key={entry.email} value={entry.email}>{`${entry.email} — ${entry.label}`}</option>)}</select></label>
+              <label className="compose-line"><span>Send as</span><select value={fromAddress} onChange={(event) => { setFromAddress(event.target.value); setSenderChosenByHand(true); }}>{SENDING_ADDRESSES.map((entry) => <option key={entry.email} value={entry.email}>{`${entry.email} — ${entry.label}`}</option>)}</select></label>
               {aliases.length > 0 && !aliases.some((alias) => alias.email.trim().toLowerCase() === fromAddress.trim().toLowerCase()) && (
                 <p className="compose-line compose-hint">Gmail has not verified {fromAddress} as a send-as alias on {selectedConnection?.email}. Google will refuse the send until it is added there.</p>
               )}

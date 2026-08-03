@@ -9,6 +9,7 @@ using System.Text.Json;
 using ArchiveMail.Api.Imports;
 using ArchiveMail.Api.Infrastructure;
 using ArchiveMail.Api.Mail;
+using ArchiveMail.Api.Productivity;
 using MimeKit;
 using Npgsql;
 using NpgsqlTypes;
@@ -32,6 +33,7 @@ public sealed class GmailService(
     ImportJobRepository jobs,
     ActiveDatabaseConfiguration active,
     IHttpClientFactory clients,
+    ProductivityRepository productivity,
     ILogger<GmailService> logger)
 {
     private const string GmailApi="https://gmail.googleapis.com/gmail/v1";
@@ -191,7 +193,20 @@ public sealed class GmailService(
         // Callers that care about the recruiter/development split resolve it when the draft is
         // written, where the flag lives; anything arriving here without a choice is general mail.
         var fromAddress=SendingIdentity.Resolve(Text(input,"fromAddress"),developmentRelated:false);
-        message.From.Add(MailboxAddress.Parse(fromAddress));foreach(var value in Strings(input,"to"))message.To.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"cc"))message.Cc.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"bcc"))message.Bcc.Add(MailboxAddress.Parse(value));message.Subject=Text(input,"subject")??"";message.Body=new TextPart("plain"){Text=Text(input,"bodyText")??""};await using var stream=new MemoryStream();await message.WriteToAsync(stream,token);var payload=JsonSerializer.SerializeToElement(new{raw=Base64Url(stream.ToArray())});var sent=await GoogleJsonAsync($"{GmailApi}/users/me/messages/send",accessToken,HttpMethod.Post,payload,token);return new{id=sent.GetProperty("id").GetString(),threadId=sent.TryGetProperty("threadId",out var thread)?thread.GetString():null,localCopyImported=false};
+        message.From.Add(MailboxAddress.Parse(fromAddress));foreach(var value in Strings(input,"to"))message.To.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"cc"))message.Cc.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"bcc"))message.Bcc.Add(MailboxAddress.Parse(value));message.Subject=Text(input,"subject")??"";
+        // A resume was previously stored on the draft and shown as attached, but never actually
+        // added to the outgoing message: the body was a bare TextPart, so recipients received the
+        // text and no file. Build through BodyBuilder so the file genuinely travels with the mail.
+        var body=new BodyBuilder{TextBody=Text(input,"bodyText")??""};
+        if(Text(input,"resumeId") is {Length:>0} resumeId)
+        {
+            var resume=await productivity.GetResumeContentAsync(resumeId,token)
+                ?? throw new InvalidOperationException("The attached resume file is missing; re-upload it in Admin settings or remove it from this draft");
+            await using var file=File.OpenRead(resume.FullPath);
+            body.Attachments.Add(resume.Filename,file,ContentType.Parse(resume.ContentType));
+        }
+        message.Body=body.ToMessageBody();
+        await using var stream=new MemoryStream();await message.WriteToAsync(stream,token);var payload=JsonSerializer.SerializeToElement(new{raw=Base64Url(stream.ToArray())});var sent=await GoogleJsonAsync($"{GmailApi}/users/me/messages/send",accessToken,HttpMethod.Post,payload,token);return new{id=sent.GetProperty("id").GetString(),threadId=sent.TryGetProperty("threadId",out var thread)?thread.GetString():null,localCopyImported=false};
     }
 
     public async Task<IReadOnlyList<object>> SendAsAsync(string id,string owner,CancellationToken token){var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");var accessToken=await AccessTokenAsync(connection,token);var json=await GoogleJsonAsync($"{GmailApi}/users/me/settings/sendAs",accessToken,HttpMethod.Get,null,token);if(!json.TryGetProperty("sendAs",out var values)||values.ValueKind!=JsonValueKind.Array)return[];return values.EnumerateArray().Where(item=>item.TryGetProperty("sendAsEmail",out _)).Select(item=>(object)new{email=item.GetProperty("sendAsEmail").GetString(),displayName=item.TryGetProperty("displayName",out var display)?display.GetString()??"":"",isPrimary=item.TryGetProperty("isPrimary",out var primary)&&primary.GetBoolean(),isDefault=item.TryGetProperty("isDefault",out var fallback)&&fallback.GetBoolean()}).ToArray();}
