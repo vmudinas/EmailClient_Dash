@@ -2178,6 +2178,7 @@ export interface BulkMoveResult {
   alreadyThere: number;
   failed: number;
   senderRules: number;
+  processedMessageIds: string[];
 }
 
 export const bulkFolderMoveSchema = z.object({
@@ -2193,6 +2194,7 @@ export interface BulkFolderMoveResult {
   moved: number;
   alreadyThere: number;
   failed: number;
+  processedMessageIds: string[];
 }
 
 export const bulkFilingSuggestionRequestSchema = z.object({

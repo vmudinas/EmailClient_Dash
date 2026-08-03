@@ -141,11 +141,11 @@ public sealed record MoveMessageRequest(string FolderId);
 public sealed record BulkReadRequest(string[] MessageIds);
 public sealed record BulkMoveFolderRequest(string[] MessageIds, string FolderId);
 public sealed record BulkReadResult(long Updated, long AlreadyRead, long Failed);
-public sealed record BulkFolderMoveResult(string FolderId, string FolderPath, long Moved, long AlreadyThere, long Failed);
+public sealed record BulkFolderMoveResult(string FolderId, string FolderPath, long Moved, long AlreadyThere, long Failed, string[] ProcessedMessageIds);
 // Combines report through the import job they create, so there is no merge result to return.
 public sealed record MailboxMoveResult(FolderDto Mailbox, long MovedMailboxes);
 public sealed record BulkMoveRequest(string[] MessageIds, string Destination);
-public sealed record BulkMoveResult(string Destination, string[] FolderPaths, long Moved, long AlreadyThere, long Failed, long SenderRules);
+public sealed record BulkMoveResult(string Destination, string[] FolderPaths, long Moved, long AlreadyThere, long Failed, long SenderRules, string[] ProcessedMessageIds);
 public sealed record SenderFolderRuleResult(string SenderAddress, string FolderId, string FolderPath, long MovedMessages, MessageDetailDto Message);
 public sealed record SenderSpamRuleResult(string SenderAddress, string SpamFolderId, string SpamFolderPath, long MovedMessages, MessageDetailDto Message);
 public sealed record AttachmentContentDto(string Filename, string ContentType, long SizeBytes, string RelativePath);

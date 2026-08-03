@@ -107,6 +107,7 @@ import {
   type PollingSettings
 } from "./lib/polling.js";
 import { removeByMessageId, restoreRemoved } from "./lib/optimisticList.js";
+import { reviewProcessedMessages } from "./lib/reviewFiling.js";
 import {
   navigateGoogleAuthorizationPopup,
   openGoogleAuthorizationPopup,
@@ -191,7 +192,8 @@ const AiReviewQueueDialog = lazy(async () => ({ default: (await import("./compon
 const AskArchiveMailDialog = lazy(async () => ({ default: (await import("./components/AskArchiveMailDialog.js")).AskArchiveMailDialog }));
 const DuplicateGroupsDialog = lazy(async () => ({ default: (await import("./components/DuplicateGroupsDialog.js")).DuplicateGroupsDialog }));
 const MessageActionDialog = lazy(async () => ({ default: (await import("./components/MessageActionDialog.js")).MessageActionDialog }));
-const MessageReader = lazy(async () => ({ default: (await import("./components/MessageReader.js")).MessageReader }));
+const loadMessageReader = () => import("./components/MessageReader.js");
+const MessageReader = lazy(async () => ({ default: (await loadMessageReader()).MessageReader }));
 
 function viewForPath(pathname = window.location.pathname): AppView {
   if (pathname.startsWith("/properties") || pathname.startsWith("/portal")) return "properties";
@@ -212,6 +214,13 @@ export function App() {
   const [newsHeadlinesLoading, setNewsHeadlinesLoading] = useState(false);
   const [newsHeadlinesError, setNewsHeadlinesError] = useState("");
   const [newsSecondsPerHeadline, setNewsSecondsPerHeadline] = useState(8);
+
+  useEffect(() => {
+    const preloadTimer = window.setTimeout(() => {
+      void loadMessageReader();
+    }, 500);
+    return () => window.clearTimeout(preloadTimer);
+  }, []);
   const [stockSecondsPerSymbol, setStockSecondsPerSymbol] = useState(8);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
@@ -1039,10 +1048,18 @@ export function App() {
       if (requestId !== messageRequestRef.current) return;
       setMessage(detail);
       if (!readOnly && !detail.state.isRead) {
-        const state = await api.updateMessageState(detail.id, { isRead: true });
-        if (requestId !== messageRequestRef.current) return;
-        mergeMessageState(detail.id, state);
-        void refreshMailboxCounts();
+        void api.updateMessageState(detail.id, { isRead: true })
+          .then((state) => {
+            if (requestId !== messageRequestRef.current) return;
+            mergeMessageState(detail.id, state);
+            void refreshMailboxCounts();
+          })
+          .catch((error: unknown) => {
+            if (requestId !== messageRequestRef.current) return;
+            showError(error instanceof Error
+              ? `Message opened, but it could not be marked read: ${error.message}`
+              : "Message opened, but it could not be marked read");
+          });
       }
     } catch (error) {
       if (requestId !== messageRequestRef.current) return;
@@ -1665,6 +1682,7 @@ export function App() {
     if (messageIds.length === 1) setReviewActionBusyId(messageIds[0]!);
     try {
       let destinationLabel = "Archive";
+      let processedMessageIds: string[] = [];
       if (action.kind === "ai") {
         const suggestion = await api.suggestBulkFilingFolder(messageIds);
         if (!suggestion.folderId || !suggestion.folderPath) {
@@ -1674,29 +1692,40 @@ export function App() {
         if (!window.confirm(
           `AI recommends “${suggestion.folderPath}” for ${selected.length.toLocaleString()} message${selected.length === 1 ? "" : "s"} (${Math.round(suggestion.confidence * 100)}% confidence). Move and mark reviewed?`
         )) return false;
-        await api.bulkMoveMessagesToFolder(messageIds, suggestion.folderId);
+        const result = await api.bulkMoveMessagesToFolder(messageIds, suggestion.folderId);
+        processedMessageIds = result.processedMessageIds;
         destinationLabel = suggestion.folderPath;
       } else if (action.kind === "folder") {
         const result = await api.bulkMoveMessagesToFolder(messageIds, action.folderId);
+        processedMessageIds = result.processedMessageIds;
         destinationLabel = result.folderPath;
       } else {
         const result = await api.bulkMoveMessages(messageIds, action.kind === "archive" ? "archived" : "trash");
+        processedMessageIds = result.processedMessageIds;
         destinationLabel = result.folderPaths.join(", ") || (action.kind === "archive" ? "Archive" : "Trash");
       }
 
-      const reviews = await Promise.allSettled(messageIds.map((messageId) => api.markMessageAnalysisReviewed(messageId)));
-      const failedReviews = reviews.filter((result) => result.status === "rejected").length;
-      if (message && messageIds.includes(message.id)) {
+      const requestedMessageIds = new Set(messageIds);
+      const reviewResult = await reviewProcessedMessages(
+        processedMessageIds.filter((messageId) => requestedMessageIds.has(messageId)),
+        (messageId) => api.markMessageAnalysisReviewed(messageId)
+      );
+      processedMessageIds = reviewResult.processedMessageIds;
+      const failedReviews = reviewResult.failedMessageIds.length;
+      const reviewedCount = reviewResult.reviewedMessageIds.length;
+      const unprocessedCount = messageIds.length - processedMessageIds.length;
+      if (message && processedMessageIds.includes(message.id)) {
         setSelectedMessageId(null);
         setMessage(null);
       }
       await refreshReviewQueue();
       refreshAfterMove();
       showError(
-        `Moved ${messageIds.length.toLocaleString()} message${messageIds.length === 1 ? "" : "s"} to ${destinationLabel} and marked reviewed`
+        `Filed ${processedMessageIds.length.toLocaleString()} message${processedMessageIds.length === 1 ? "" : "s"} in ${destinationLabel} and marked ${reviewedCount.toLocaleString()} reviewed`
+        + (unprocessedCount ? `; ${unprocessedCount.toLocaleString()} could not be filed and remain${unprocessedCount === 1 ? "s" : ""} in the review queue` : "")
         + (failedReviews ? `; ${failedReviews.toLocaleString()} review status update${failedReviews === 1 ? "" : "s"} failed` : "")
       );
-      return true;
+      return unprocessedCount === 0 && failedReviews === 0;
     } catch (error) {
       showError(error instanceof Error ? error.message : "Review messages could not be filed");
       return false;

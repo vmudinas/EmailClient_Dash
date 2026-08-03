@@ -289,6 +289,40 @@ describe("MessageReader reply, forward, and move", () => {
 });
 
 describe("MessageReader attachment preview", () => {
+  it("renders the message body before inline images finish loading", async () => {
+    let resolveInlineImage: ((blob: Blob) => void) | undefined;
+    const inlineImage = new Promise<Blob>((resolve) => {
+      resolveInlineImage = resolve;
+    });
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null }),
+      attachmentBlob: vi.fn().mockReturnValue(inlineImage)
+    } as unknown as ApiClient;
+
+    renderReader(api, {
+      ...MESSAGE,
+      bodyHtml: '<p>Read this without waiting.</p><img src="cid:signature-logo">',
+      hasAttachments: true,
+      attachmentCount: 1,
+      attachments: [{
+        id: "inline-attachment",
+        messageId: MESSAGE.id,
+        filename: "signature-logo.png",
+        contentType: "image/png",
+        sizeBytes: 1_024,
+        contentId: "signature-logo",
+        disposition: "inline",
+        textStatus: "unsupported"
+      }]
+    });
+
+    const frame = document.querySelector("iframe.email-frame") as HTMLIFrameElement;
+    await waitFor(() => expect(frame.getAttribute("srcdoc")).toContain("Read this without waiting."));
+    expect(api.attachmentBlob).toHaveBeenCalledWith("inline-attachment");
+
+    resolveInlineImage?.(new Blob(["inline-image"], { type: "image/png" }));
+  });
+
   it("shows inline attachments and lets the user download them", async () => {
     const api = {
       getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null }),
