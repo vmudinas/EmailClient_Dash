@@ -21,6 +21,8 @@ public static class AiEndpoints
         app.MapPost("/api/ai/jobs/{jobId}/cancel",async(string jobId,HttpContext context,AiService ai,CancellationToken token)=>
             await ai.CancelAsync(jobId,Session(context).User.Id,token) is{} job?Results.Ok(job):Results.NotFound(new{error="AI job not found"})).WithTags("AI");
         app.MapGet("/api/ai/review-queue",async(HttpContext context,AiService ai,CancellationToken token)=>Results.Ok(await ai.ReviewQueueAsync(Session(context).User.Id,token))).WithTags("AI");
+        app.MapPost("/api/ai/review-queue/filing-proposals",async(JsonElement input,HttpContext context,AiService ai,CancellationToken token)=>
+        {try{var ids=input.TryGetProperty("messageIds",out var values)?values.EnumerateArray().Select(value=>value.GetString()??"").ToArray():[];return Results.Ok(await ai.FilingProposalsAsync(ids,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI");
         app.MapPost("/api/ai/review-queue/review-all",async(HttpContext context,AiService ai,CancellationToken token)=>Results.Ok(await ai.ReviewAllAsync(Session(context).User.Id,token))).WithTags("AI");
         app.MapPost("/api/messages/{messageId}/ai/review",async(string messageId,HttpContext context,AiService ai,CancellationToken token)=>
         {try{return Results.Ok(await ai.ReviewAsync(messageId,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI");

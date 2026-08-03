@@ -18,6 +18,8 @@ public sealed class AiService(
     ILogger<AiService> logger) : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private sealed record FilingCandidate(string FolderId,string FolderPath,string Reason,double Confidence);
+    private sealed record FilingProposal(string Id,string MessageId,string Subject,EmailAddressDto Sender,string CurrentFolderId,string CurrentFolderPath,string ProposedFolderId,string ProposedFolderPath,string Reason,double Confidence);
 
     public async Task<object> MessageStateAsync(string messageId,string owner,CancellationToken token)
     {
@@ -36,7 +38,32 @@ public sealed class AiService(
     public async Task<object> SuggestActionAsync(string messageId,JsonElement input,string owner,CancellationToken token)
     {await EnsureMessageOwner(messageId,owner,token);await using var command=database.CreateCommand("SELECT subject,body_text FROM messages WHERE id=$1");command.Parameters.AddWithValue(messageId);await using var r=await command.ExecuteReaderAsync(token);await r.ReadAsync(token);var subject=r.GetString(0);var body=r.GetString(1);var date=System.Text.RegularExpressions.Regex.Match(body,@"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b");var provider=settings.Current().AiValue.ActiveProvider;var model=Provider().Model;if(date.Success&&DateTime.TryParse(date.Value,out var parsed)){var day=DateOnly.FromDateTime(parsed).ToString("yyyy-MM-dd");return new{recommendedAction="calendar_event",reason="The message contains an explicit date.",confidence=.72,dateEvidence=new[]{date.Value},calendarEvent=new{title=subject,description=body[..Math.Min(body.Length,1000)],location="",allDay=true,startDate=day,endDate=day,startTime=(string?)null,endTime=(string?)null},todo=(object?)null,provider,model};}return new{recommendedAction="none",reason="No unambiguous future date was found.",confidence=.65,dateEvidence=System.Array.Empty<string>(),calendarEvent=(object?)null,todo=(object?)null,provider,model};}
     public async Task<object> SuggestFilingAsync(string[] ids,string owner,CancellationToken token)
-    {var unique=ids.Distinct().Take(100).ToArray();if(unique.Length==0)throw new ArgumentException("Choose messages to file");const string sql="SELECT f.id,f.path,COUNT(*) FROM messages selected JOIN archives a ON a.id=selected.archive_id JOIN messages similar ON similar.archive_id=selected.archive_id AND lower(similar.sender_address)=lower(selected.sender_address) JOIN folders f ON f.id=similar.folder_id WHERE selected.id=ANY($1) AND a.owner_user_id=$2 AND similar.id<>selected.id GROUP BY f.id,f.path ORDER BY COUNT(*) DESC LIMIT 1";await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(unique);command.Parameters.AddWithValue(owner);await using var r=await command.ExecuteReaderAsync(token);if(!await r.ReadAsync(token))return new{folderId=(string?)null,folderPath=(string?)null,reason="No previous filing pattern was found.",confidence=.3};return new{folderId=r.GetString(0),folderPath=r.GetString(1),reason="Messages from these senders were most often filed here.",confidence=Math.Min(.95,.55+r.GetInt64(2)/100d)};}
+    {
+        var unique=ids.Distinct().Take(100).ToArray();
+        if(unique.Length==0)throw new ArgumentException("Choose messages to file");
+        const string sql="""
+            SELECT f.id,f.path,COUNT(*)
+            FROM messages selected
+            JOIN archives a ON a.id=selected.archive_id
+            JOIN messages similar ON similar.archive_id=selected.archive_id
+                AND lower(similar.sender_address)=lower(selected.sender_address)
+            JOIN folders f ON f.id=similar.folder_id
+            WHERE selected.id=ANY($1) AND a.owner_user_id=$2 AND similar.id<>selected.id
+                AND f.id<>selected.folder_id
+                AND lower(f.name) NOT IN ('trash','spam','junk','deleted')
+            GROUP BY f.id,f.path
+            ORDER BY COUNT(*) DESC,f.path
+            LIMIT 3
+            """;
+        var suggestions=new List<FilingCandidate>();
+        await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(unique);command.Parameters.AddWithValue(owner);
+        await using var r=await command.ExecuteReaderAsync(token);
+        while(await r.ReadAsync(token))suggestions.Add(Candidate(r.GetString(0),r.GetString(1),r.GetInt64(2)));
+        var provider=settings.Current().AiValue.ActiveProvider;var model=Provider().Model;
+        if(suggestions.Count==0)return new{folderId=(string?)null,folderPath=(string?)null,reason="No previous filing pattern was found.",confidence=.3,messageCount=unique.Length,provider,model,suggestions};
+        var best=suggestions[0];
+        return new{folderId=best.FolderId,folderPath=best.FolderPath,reason=best.Reason,confidence=best.Confidence,messageCount=unique.Length,provider,model,suggestions};
+    }
 
     public async Task<object?> GetJobAsync(string id,string owner,CancellationToken token)
     {
@@ -54,16 +81,115 @@ public sealed class AiService(
     {
         const string sql="SELECT m.id FROM ai_message_analysis x JOIN messages m ON m.id=x.message_id JOIN archives a ON a.id=m.archive_id LEFT JOIN ai_analysis_reviews r ON r.message_id=m.id WHERE a.owner_user_id=$1 AND r.message_id IS NULL ORDER BY x.updated_at DESC LIMIT 100";
         var analyses=new List<object>();await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(owner);await using var reader=await command.ExecuteReaderAsync(token);var ids=new List<string>();while(await reader.ReadAsync(token))ids.Add(reader.GetString(0));
+        await reader.CloseAsync();
+        var summaryTask=mail.GetMessageSummariesAsync(ids,owner,token);
+        var analysisTask=AnalysesAsync(ids.ToArray(),token);
+        var filingTask=FilingSuggestionsByMessageAsync(ids.ToArray(),owner,token);
+        var draftTask=productivity.ListDraftsAsync(owner,token);
+        var followUpTask=followUps.ListAsync("pending",owner,token);
+        await Task.WhenAll(summaryTask,analysisTask,filingTask,draftTask,followUpTask);
+        var summaries=(await summaryTask).ToDictionary(message=>message.Id);
+        var analysisByMessage=await analysisTask;
+        var filingSuggestions=await filingTask;
         foreach(var id in ids)
         {
-            var message=await mail.GetMessageAsync(id,owner,token);
-            var analysis=await Analysis(id,token);
-            if(message is not null&&analysis is not null)analyses.Add(new{message,analysis});
+            if(summaries.TryGetValue(id,out var message)&&analysisByMessage.TryGetValue(id,out var analysis))
+                analyses.Add(new{message,analysis,filingSuggestions=filingSuggestions.GetValueOrDefault(id)??new List<FilingCandidate>()});
         }
-        var drafts=await productivity.ListDraftsAsync(owner,token);
-        var pendingFollowUps=await followUps.ListAsync("pending",owner,token);
-        return new{drafts,analyses,followUps=pendingFollowUps,totalItems=drafts.Count+analyses.Count+pendingFollowUps.Count};
+        var archiveIds=summaries.Values.Select(message=>message.ArchiveId).Distinct().ToArray();
+        var folderLists=await Task.WhenAll(archiveIds.Select(archiveId=>mail.ListFoldersAsync(archiveId,owner,token)));
+        var folders=folderLists.SelectMany(list=>list).ToArray();
+        var drafts=await draftTask;
+        var pendingFollowUps=await followUpTask;
+        return new{drafts,analyses,followUps=pendingFollowUps,folders,totalItems=drafts.Count+analyses.Count+pendingFollowUps.Count};
     }
+
+    public async Task<object> FilingProposalsAsync(string[] ids,string owner,CancellationToken token)
+    {
+        var unique=ids.Where(id=>!string.IsNullOrWhiteSpace(id)).Distinct().Take(100).ToArray();
+        if(unique.Length==0)throw new ArgumentException("Choose messages to recategorize");
+        var summaryTask=mail.GetMessageSummariesAsync(unique,owner,token);
+        var suggestionTask=FilingSuggestionsByMessageAsync(unique,owner,token);
+        await Task.WhenAll(summaryTask,suggestionTask);
+        var suggestions=await suggestionTask;
+        var proposals=new List<FilingProposal>();
+        foreach(var message in await summaryTask)
+        {
+            var candidate=suggestions.GetValueOrDefault(message.Id)?.FirstOrDefault();
+            if(candidate is null)continue;
+            proposals.Add(new($"{message.Id}:{candidate.FolderId}",message.Id,message.Subject,message.Sender,message.FolderId,message.FolderPath,candidate.FolderId,candidate.FolderPath,candidate.Reason,candidate.Confidence));
+        }
+        var ordered=proposals.OrderByDescending(proposal=>proposal.Confidence).ToArray();
+        return new{proposals=ordered,considered=unique.Length,skipped=unique.Length-ordered.Length,generatedAt=DateTimeOffset.UtcNow.ToString("O")};
+    }
+
+    private async Task<Dictionary<string,List<FilingCandidate>>> FilingSuggestionsByMessageAsync(string[] ids,string owner,CancellationToken token)
+    {
+        var result=new Dictionary<string,List<FilingCandidate>>();
+        if(ids.Length==0)return result;
+        const string sql="""
+            WITH ranked AS (
+                SELECT selected.id AS message_id,f.id AS folder_id,f.path,COUNT(*) AS matches,
+                    ROW_NUMBER() OVER (PARTITION BY selected.id ORDER BY COUNT(*) DESC,f.path) AS rank
+                FROM messages selected
+                JOIN archives a ON a.id=selected.archive_id
+                JOIN messages similar ON similar.archive_id=selected.archive_id
+                    AND lower(similar.sender_address)=lower(selected.sender_address)
+                JOIN folders f ON f.id=similar.folder_id
+                WHERE selected.id=ANY($1) AND a.owner_user_id=$2 AND similar.id<>selected.id
+                    AND f.id<>selected.folder_id
+                    AND lower(f.name) NOT IN ('trash','spam','junk','deleted')
+                GROUP BY selected.id,f.id,f.path
+            )
+            SELECT message_id,folder_id,path,matches FROM ranked WHERE rank<=3 ORDER BY message_id,rank
+            """;
+        await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(ids);command.Parameters.AddWithValue(owner);
+        await using var reader=await command.ExecuteReaderAsync(token);
+        while(await reader.ReadAsync(token))
+        {
+            var messageId=reader.GetString(0);
+            if(!result.TryGetValue(messageId,out var suggestions)){suggestions=new List<FilingCandidate>();result[messageId]=suggestions;}
+            suggestions.Add(Candidate(reader.GetString(1),reader.GetString(2),reader.GetInt64(3)));
+        }
+        await reader.CloseAsync();
+        const string categorySql="""
+            SELECT DISTINCT x.message_id,f.id,f.path
+            FROM ai_message_analysis x
+            JOIN messages m ON m.id=x.message_id
+            JOIN archives a ON a.id=m.archive_id
+            CROSS JOIN LATERAL jsonb_array_elements_text(x.categories_json::jsonb) category
+            JOIN folders f ON f.archive_id=m.archive_id AND f.id<>m.folder_id
+                AND (lower(f.name)=lower(category.value) OR lower(f.path)=lower(category.value))
+            WHERE x.message_id=ANY($1) AND a.owner_user_id=$2
+                AND lower(f.name) NOT IN ('trash','spam','junk','deleted')
+            ORDER BY x.message_id,f.path
+            """;
+        await using var categoryCommand=database.CreateCommand(categorySql);categoryCommand.Parameters.AddWithValue(ids);categoryCommand.Parameters.AddWithValue(owner);
+        await using var categoryReader=await categoryCommand.ExecuteReaderAsync(token);
+        while(await categoryReader.ReadAsync(token))
+        {
+            var messageId=categoryReader.GetString(0);
+            if(!result.TryGetValue(messageId,out var suggestions)){suggestions=new List<FilingCandidate>();result[messageId]=suggestions;}
+            var folderId=categoryReader.GetString(1);
+            if(suggestions.Count<3&&!suggestions.Any(candidate=>candidate.FolderId==folderId))
+                suggestions.Add(new(folderId,categoryReader.GetString(2),"AI category matches this existing folder.",.68));
+        }
+        return result;
+    }
+
+    private async Task<Dictionary<string,object>> AnalysesAsync(string[] ids,CancellationToken token)
+    {
+        var result=new Dictionary<string,object>();
+        if(ids.Length==0)return result;
+        const string sql="SELECT id,message_id,summary,categories_json,priority,action_required<>0,action_summary,spam_probability,phishing_probability,draft_recommended<>0,confidence,signals_json,model,prompt_version,content_hash,context_hash,thread_message_count,created_at,updated_at FROM ai_message_analysis WHERE message_id=ANY($1)";
+        await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(ids);
+        await using var reader=await command.ExecuteReaderAsync(token);
+        while(await reader.ReadAsync(token))result[reader.GetString(1)]=AnalysisObject(reader);
+        return result;
+    }
+
+    private static FilingCandidate Candidate(string folderId,string folderPath,long matches)=>new(
+        folderId,folderPath,"Previous messages from this sender were filed here.",Math.Min(.95,.55+matches/100d));
 
     public async Task<object> ReviewAsync(string messageId,string owner,CancellationToken token)
     {await EnsureMessageOwner(messageId,owner,token);if(await Analysis(messageId,token) is null)throw new MailNotFoundException("Message analysis not found");var now=DateTimeOffset.UtcNow.ToString("O");await using var command=database.CreateCommand("INSERT INTO ai_analysis_reviews(message_id,reviewed_at) VALUES($1,$2) ON CONFLICT(message_id) DO UPDATE SET reviewed_at=EXCLUDED.reviewed_at");command.Parameters.AddWithValue(messageId);command.Parameters.AddWithValue(now);await command.ExecuteNonQueryAsync(token);return new{messageId,reviewedAt=now};}
@@ -119,7 +245,8 @@ public sealed class AiService(
     private async Task EnsureMessageOwner(string id,string owner,CancellationToken token){await using var command=database.CreateCommand("SELECT EXISTS(SELECT 1 FROM messages m JOIN archives a ON a.id=m.archive_id WHERE m.id=$1 AND a.owner_user_id=$2)");command.Parameters.AddWithValue(id);command.Parameters.AddWithValue(owner);if(!Convert.ToBoolean(await command.ExecuteScalarAsync(token)))throw new MailNotFoundException("Message not found");}
     private async Task EnsureFolderOwner(string id,string owner,CancellationToken token){await using var command=database.CreateCommand("SELECT EXISTS(SELECT 1 FROM folders f JOIN archives a ON a.id=f.archive_id WHERE f.id=$1 AND a.owner_user_id=$2)");command.Parameters.AddWithValue(id);command.Parameters.AddWithValue(owner);if(!Convert.ToBoolean(await command.ExecuteScalarAsync(token)))throw new MailNotFoundException("Mailbox not found");}
     private async Task<object?> LatestJob(string messageId,string task,CancellationToken token){await using var command=database.CreateCommand("SELECT * FROM ai_jobs WHERE message_id=$1 AND task=$2 ORDER BY created_at DESC LIMIT 1");command.Parameters.AddWithValue(messageId);command.Parameters.AddWithValue(task);await using var reader=await command.ExecuteReaderAsync(token);return await reader.ReadAsync(token)?Job(reader):null;}
-    private async Task<object?> Analysis(string id,CancellationToken token){const string sql="SELECT id,message_id,summary,categories_json,priority,action_required<>0,action_summary,spam_probability,phishing_probability,draft_recommended<>0,confidence,signals_json,model,prompt_version,content_hash,context_hash,thread_message_count,created_at,updated_at FROM ai_message_analysis WHERE message_id=$1";await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(id);await using var r=await command.ExecuteReaderAsync(token);return await r.ReadAsync(token)?new{id=r.GetString(0),messageId=r.GetString(1),summary=r.GetString(2),categories=ParseArray(r.GetString(3)),priority=r.GetString(4),actionRequired=r.GetBoolean(5),actionSummary=r.IsDBNull(6)?null:r.GetString(6),spamProbability=r.GetDouble(7),phishingProbability=r.GetDouble(8),draftRecommended=r.GetBoolean(9),confidence=r.GetDouble(10),signals=ParseArray(r.GetString(11)),model=r.GetString(12),promptVersion=r.GetString(13),contentHash=r.GetString(14),contextHash=r.GetString(15),threadMessageCount=r.GetInt64(16),createdAt=r.GetString(17),updatedAt=r.GetString(18)}:null;}
+    private async Task<object?> Analysis(string id,CancellationToken token){const string sql="SELECT id,message_id,summary,categories_json,priority,action_required<>0,action_summary,spam_probability,phishing_probability,draft_recommended<>0,confidence,signals_json,model,prompt_version,content_hash,context_hash,thread_message_count,created_at,updated_at FROM ai_message_analysis WHERE message_id=$1";await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(id);await using var r=await command.ExecuteReaderAsync(token);return await r.ReadAsync(token)?AnalysisObject(r):null;}
+    private static object AnalysisObject(NpgsqlDataReader r)=>new{id=r.GetString(0),messageId=r.GetString(1),summary=r.GetString(2),categories=ParseArray(r.GetString(3)),priority=r.GetString(4),actionRequired=r.GetBoolean(5),actionSummary=r.IsDBNull(6)?null:r.GetString(6),spamProbability=r.GetDouble(7),phishingProbability=r.GetDouble(8),draftRecommended=r.GetBoolean(9),confidence=r.GetDouble(10),signals=ParseArray(r.GetString(11)),model=r.GetString(12),promptVersion=r.GetString(13),contentHash=r.GetString(14),contextHash=r.GetString(15),threadMessageCount=r.GetInt64(16),createdAt=r.GetString(17),updatedAt=r.GetString(18)};
     private static object Job(NpgsqlDataReader r)=>new{id=r["id"],messageId=r["message_id"],task=r["task"],scheduleId=r["schedule_id"] is DBNull?null:r["schedule_id"],scheduleRunId=(string?)null,gmailConnectionId=r["gmail_connection_id"] is DBNull?null:r["gmail_connection_id"],resumeId=r["resume_id"] is DBNull?null:r["resume_id"],status=r["status"],provider=r["provider"],model=r["model"],skills=ParseArray((string)r["skills_json"]),prompt=r["prompt"],promptVersion=r["prompt_version"],contentHash=r["content_hash"],attempts=r["attempts"],maxAttempts=r["max_attempts"],error=r["error"] is DBNull?null:r["error"],createdAt=r["created_at"],updatedAt=r["updated_at"],startedAt=r["started_at"] is DBNull?null:r["started_at"],completedAt=r["completed_at"] is DBNull?null:r["completed_at"]};
     private static object Schedule(NpgsqlDataReader r)=>new{id=r.GetString(0),name=r.GetString(1),task=r.GetString(2),folderId=r.GetString(3),folderPath=r.GetString(4),archiveId=r.GetString(5),archiveName=r.GetString(6),messageId=r.IsDBNull(7)?null:r.GetString(7),messageSubject=r.IsDBNull(8)?null:r.GetString(8),gmailConnectionId=r.IsDBNull(9)?null:r.GetString(9),gmailConnectionEmail=r.IsDBNull(10)?null:r.GetString(10),resumeId=r.IsDBNull(11)?null:r.GetString(11),resumeName=r.IsDBNull(12)?null:r.GetString(12),mode=r.GetString(13),intervalMinutes=r.GetInt64(14),enabled=r.GetBoolean(15),lastRunAt=r.IsDBNull(16)?null:r.GetString(16),lastRunSummary=r.IsDBNull(17)?null:r.GetString(17),provider=r.GetString(18),model=r.GetString(19),skills=ParseArray(r.GetString(20)),prompt=r.GetString(21),progress=(object?)null,createdAt=r.GetString(22),updatedAt=r.GetString(23)};
     private static string Id(object value)=>value.GetType().GetProperty("id")?.GetValue(value)?.ToString()??"";
