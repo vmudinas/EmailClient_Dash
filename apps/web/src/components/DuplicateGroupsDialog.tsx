@@ -1,5 +1,6 @@
-import { CheckCheck, ChevronDown, ChevronRight, Copy, LoaderCircle, RefreshCw, ScanSearch, Split, Star, X } from "lucide-react";
-import type { DuplicateDetectionTier, DuplicateGroup, DuplicateGroupDetail, DuplicateGroupList, DuplicateReviewStatus, DuplicateScan } from "@email-client/shared";
+import { useState } from "react";
+import { Archive, CheckCheck, ChevronDown, ChevronRight, Copy, FolderInput, LoaderCircle, RefreshCw, ScanSearch, Split, Star, Trash2, X } from "lucide-react";
+import type { Archive as ArchiveModel, DuplicateDetectionTier, DuplicateGroup, DuplicateGroupDetail, DuplicateGroupList, DuplicateReviewStatus, DuplicateScan, Folder } from "@email-client/shared";
 import { isDuplicateScanActive } from "@email-client/shared";
 import { displayAddress, formatDateTime } from "../lib/format.js";
 
@@ -14,6 +15,7 @@ interface DuplicateGroupsDialogProps {
   scanStarting: boolean;
   busyGroupId: string | null;
   readOnly: boolean;
+  archives: Pick<ArchiveModel, "id" | "name">[];
   onClose(): void;
   onRefresh(): void;
   onScan(): void;
@@ -24,7 +26,17 @@ interface DuplicateGroupsDialogProps {
   onDismiss(group: DuplicateGroup): void;
   onSetPreferred(group: DuplicateGroup, messageId: string): void;
   onOpenMessage(messageId: string): void;
+  onLoadFolders(archiveId: string): Promise<Folder[]>;
+  onMoveCopies(detail: DuplicateGroupDetail, request: DuplicateMoveRequest): Promise<boolean>;
 }
+
+export type DuplicateMoveRequest =
+  | { destination: "archived" | "trash" }
+  | {
+    destination: "folder";
+    createRules: boolean;
+    targets: Array<{ archiveId: string; folderId: string; folderPath: string }>;
+  };
 
 const TIER_LABELS: Record<DuplicateDetectionTier, string> = {
   exact_id: "Identical Message-ID",
@@ -52,6 +64,7 @@ export function DuplicateGroupsDialog({
   scanStarting,
   busyGroupId,
   readOnly,
+  archives,
   onClose,
   onRefresh,
   onScan,
@@ -61,13 +74,56 @@ export function DuplicateGroupsDialog({
   onConfirm,
   onDismiss,
   onSetPreferred,
-  onOpenMessage
+  onOpenMessage,
+  onLoadFolders,
+  onMoveCopies
 }: DuplicateGroupsDialogProps) {
+  const [folderEditorGroupId, setFolderEditorGroupId] = useState<string | null>(null);
+  const [folderOptions, setFolderOptions] = useState<Record<string, Folder[]>>({});
+  const [folderTargets, setFolderTargets] = useState<Record<string, string>>({});
+  const [folderLoading, setFolderLoading] = useState(false);
+  const [folderError, setFolderError] = useState("");
+  const [createRules, setCreateRules] = useState(false);
   if (!open) return null;
   const groups = list?.groups ?? [];
   const duplicateMessages = groups.reduce((total, group) => total + Math.max(0, group.memberCount - 1), 0);
   const scanning = isDuplicateScanActive(scan);
   const busy = scanning || scanStarting;
+
+  const openFolderEditor = async (detail: DuplicateGroupDetail) => {
+    const archiveIds = duplicateArchiveIds(detail);
+    setFolderEditorGroupId(detail.group.id);
+    setFolderOptions({});
+    setFolderTargets({});
+    setCreateRules(false);
+    setFolderError("");
+    setFolderLoading(true);
+    try {
+      const loaded = await Promise.all(archiveIds.map(async (archiveId) => [archiveId, await onLoadFolders(archiveId)] as const));
+      setFolderOptions(Object.fromEntries(loaded));
+    } catch (error) {
+      setFolderError(error instanceof Error ? error.message : "Folders could not be loaded");
+    } finally {
+      setFolderLoading(false);
+    }
+  };
+
+  const submitFolderMove = async (detail: DuplicateGroupDetail) => {
+    const archiveIds = duplicateArchiveIds(detail);
+    const targets = archiveIds.flatMap((archiveId) => {
+      const folderId = folderTargets[archiveId];
+      const folder = folderOptions[archiveId]?.find((item) => item.id === folderId);
+      return folder ? [{ archiveId, folderId: folder.id, folderPath: folder.path }] : [];
+    });
+    if (targets.length !== archiveIds.length) {
+      setFolderError("Choose a destination folder for every archive containing duplicate copies.");
+      return;
+    }
+    setFolderError("");
+    if (await onMoveCopies(detail, { destination: "folder", createRules, targets })) {
+      setFolderEditorGroupId(null);
+    }
+  };
 
   return (
     // The dialog closes during a scan. The scan is a background job now, so holding the user here
@@ -134,8 +190,8 @@ export function DuplicateGroupsDialog({
           )}
 
           <p className="duplicates-note">
-            Detected locally with content fingerprints — no AI and no API cost. Nothing is ever deleted:
-            confirming only collapses copies behind the preferred one.
+            Detected locally with content fingerprints — no AI and no API cost. Reviewing alone never
+            deletes mail, and filing actions always keep the preferred copy.
           </p>
 
           {loading && !list ? (
@@ -223,16 +279,84 @@ export function DuplicateGroupsDialog({
                             </ul>
 
                             {!readOnly && (
-                              <div className="duplicate-group-actions">
-                                {group.reviewStatus !== "confirmed" && (
-                                  <button className="primary-button" disabled={busy} onClick={() => onConfirm(group)}>
-                                    {busy ? <LoaderCircle className="spin" size={15} /> : <CheckCheck size={15} />}
-                                    <span>Mark duplicate</span>
+                              <div className="duplicate-actions-wrap">
+                                <div className="duplicate-group-actions">
+                                  {group.reviewStatus !== "confirmed" && (
+                                    <button className="primary-button" disabled={busy} onClick={() => onConfirm(group)}>
+                                      {busy ? <LoaderCircle className="spin" size={15} /> : <CheckCheck size={15} />}
+                                      <span>Mark duplicate</span>
+                                    </button>
+                                  )}
+                                  <button className="secondary-button" disabled={busy} onClick={() => onMoveCopies(expanded, { destination: "archived" })}>
+                                    <Archive size={15} /><span>Archive copies</span>
                                   </button>
+                                  <button className="secondary-button danger" disabled={busy} onClick={() => onMoveCopies(expanded, { destination: "trash" })}>
+                                    <Trash2 size={15} /><span>Trash copies</span>
+                                  </button>
+                                  <button className="secondary-button" disabled={busy || folderLoading} onClick={() => void openFolderEditor(expanded)}>
+                                    <FolderInput size={15} /><span>Move to folder</span>
+                                  </button>
+                                  <button className="secondary-button" disabled={busy} onClick={() => onDismiss(group)}>
+                                    <Split size={15} /><span>Keep separate</span>
+                                  </button>
+                                </div>
+
+                                {folderEditorGroupId === group.id && (
+                                  <div className="duplicate-folder-editor">
+                                    <div className="duplicate-folder-editor-heading">
+                                      <div>
+                                        <strong>Move {duplicateCopyCount(expanded)} extra {duplicateCopyCount(expanded) === 1 ? "copy" : "copies"}</strong>
+                                        <small>The preferred copy stays where it is.</small>
+                                      </div>
+                                      <button className="icon-button" disabled={busy} onClick={() => setFolderEditorGroupId(null)} aria-label="Close folder choices">
+                                        <X size={16} />
+                                      </button>
+                                    </div>
+
+                                    {folderLoading ? (
+                                      <div className="settings-loading"><LoaderCircle className="spin" size={16} /> Loading folders</div>
+                                    ) : (
+                                      <div className="duplicate-folder-targets">
+                                        {duplicateArchiveIds(expanded).map((archiveId) => (
+                                          <label key={archiveId}>
+                                            <span>{archives.find((archive) => archive.id === archiveId)?.name ?? "Mail archive"}</span>
+                                            <select
+                                              aria-label={`Destination folder for ${archives.find((archive) => archive.id === archiveId)?.name ?? "mail archive"}`}
+                                              value={folderTargets[archiveId] ?? ""}
+                                              onChange={(event) => setFolderTargets((current) => ({ ...current, [archiveId]: event.target.value }))}
+                                            >
+                                              <option value="">Choose folder</option>
+                                              {(folderOptions[archiveId] ?? []).map((folder) => (
+                                                <option key={folder.id} value={folder.id}>{folder.path}</option>
+                                              ))}
+                                            </select>
+                                          </label>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    <label className="duplicate-rule-option">
+                                      <input
+                                        type="checkbox"
+                                        checked={createRules}
+                                        disabled={busy || folderLoading}
+                                        onChange={(event) => setCreateRules(event.target.checked)}
+                                      />
+                                      <span>
+                                        <strong>Create future sender rules</strong>
+                                        <small>New Inbox mail from these senders will go to the selected folder. Existing mail is not affected.</small>
+                                      </span>
+                                    </label>
+                                    {folderError && <p className="duplicate-folder-error" role="alert">{folderError}</p>}
+                                    <div className="duplicate-folder-editor-actions">
+                                      <button className="secondary-button" disabled={busy} onClick={() => setFolderEditorGroupId(null)}>Cancel</button>
+                                      <button className="primary-button" disabled={busy || folderLoading} onClick={() => void submitFolderMove(expanded)}>
+                                        {busy ? <LoaderCircle className="spin" size={15} /> : <FolderInput size={15} />}
+                                        <span>Move copies</span>
+                                      </button>
+                                    </div>
+                                  </div>
                                 )}
-                                <button className="secondary-button" disabled={busy} onClick={() => onDismiss(group)}>
-                                  <Split size={15} /><span>Keep separate</span>
-                                </button>
                               </div>
                             )}
                           </>
@@ -248,6 +372,19 @@ export function DuplicateGroupsDialog({
       </section>
     </div>
   );
+}
+
+function duplicateMembers(detail: DuplicateGroupDetail) {
+  const preferredId = detail.group.preferredMessageId ?? detail.members[0]?.message.id;
+  return detail.members.filter((member) => member.message.id !== preferredId);
+}
+
+function duplicateArchiveIds(detail: DuplicateGroupDetail) {
+  return [...new Set(duplicateMembers(detail).map((member) => member.message.archiveId))];
+}
+
+function duplicateCopyCount(detail: DuplicateGroupDetail) {
+  return duplicateMembers(detail).length;
 }
 
 function Metric({ value, label, tone = "neutral" }: { value: number; label: string; tone?: string }) {

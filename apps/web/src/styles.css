@@ -10864,6 +10864,121 @@ textarea:focus-visible {
   margin-top: 12px;
 }
 
+.duplicate-actions-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.duplicate-group-actions .secondary-button.danger {
+  border-color: rgba(180, 35, 24, 0.28);
+  color: var(--red-dark, #b42318);
+}
+
+.duplicate-folder-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.duplicate-folder-editor-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.duplicate-folder-editor-heading > div,
+.duplicate-rule-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.duplicate-folder-editor-heading strong,
+.duplicate-rule-option strong {
+  color: var(--ink);
+  font-size: 0.84rem;
+}
+
+.duplicate-folder-editor-heading small,
+.duplicate-rule-option small {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.duplicate-folder-targets {
+  display: grid;
+  gap: 9px;
+}
+
+.duplicate-folder-targets label {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.42fr) minmax(180px, 1fr);
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.duplicate-folder-targets select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+}
+
+.duplicate-rule-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.duplicate-rule-option input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--green);
+}
+
+.duplicate-folder-error {
+  margin: 0;
+  color: var(--red-dark, #b42318);
+  font-size: 0.78rem;
+}
+
+.duplicate-folder-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .duplicate-group-actions > button {
+    flex: 1 1 calc(50% - 4px);
+  }
+
+  .duplicate-folder-targets label {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  .duplicate-folder-editor-actions > button {
+    flex: 1;
+  }
+}
+
 /* --- Out-of-band payment instructions (Zelle / Apple Cash / manual) --- */
 
 .payment-instructions {

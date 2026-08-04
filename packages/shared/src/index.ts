@@ -374,7 +374,8 @@ export interface DuplicateGroup {
 }
 
 export interface DuplicateGroupMember {
-  message: MessageDetail;
+  /** Summary only: opening the group must not fetch and sanitize every copy's full body. */
+  message: MessageSummary;
   relation: DuplicateRelation;
   /** Human-readable reasons the message was grouped, e.g. "identical Message-ID header". */
   evidence: string[];
@@ -2178,6 +2179,7 @@ export interface BulkMoveResult {
   alreadyThere: number;
   failed: number;
   senderRules: number;
+  processedMessageIds: string[];
 }
 
 export const bulkFolderMoveSchema = z.object({
@@ -2193,6 +2195,7 @@ export interface BulkFolderMoveResult {
   moved: number;
   alreadyThere: number;
   failed: number;
+  processedMessageIds: string[];
 }
 
 export const bulkFilingSuggestionRequestSchema = z.object({

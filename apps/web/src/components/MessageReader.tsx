@@ -1064,11 +1064,37 @@ function EmailFrame({
         }
       }
 
+      const commitDocument = () => {
+        if (!active) return;
+        const bodyHtml = document.body.innerHTML;
+        setHasRemoteImages(blockedImageFound);
+        setHasBlockedImages(blockedImageFound && !showRemoteImages);
+        setMobileHtml(bodyHtml);
+        const imgSrc = showRemoteImages ? "data: blob: https: http:" : "data: blob:";
+        setSrcDoc(`<!doctype html>
+          <html><head>
+            <meta charset="utf-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline';">
+            <style>
+              html{width:100%;min-height:100%;margin:0;padding:0;background:#fff}
+              body{display:block;width:100%;min-height:1px;margin:0;padding:2px 1px 24px;box-sizing:border-box;background:#fff;color:#202622;font:15px/1.58 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-wrap:anywhere}
+              img{max-width:100%;height:auto} table{max-width:100%;border-collapse:collapse}
+              a{color:#176747} blockquote{margin-left:0;padding-left:14px;border-left:3px solid #d9ded9;color:#5d665f}
+              pre{white-space:pre-wrap} hr{border:0;border-top:1px solid #e0e4e0}
+            </style>
+          </head><body>${bodyHtml}</body></html>`);
+      };
+
+      // Render the message text immediately. Inline images can fill in as their
+      // attachment downloads complete instead of blocking the whole email.
+      commitDocument();
+
       if (api) {
         const inlineAttachments = message.attachments.filter((attachment) => attachment.contentId);
         await Promise.all(inlineAttachments.map(async (attachment) => {
           try {
             const blob = await api.attachmentBlob(attachment.id);
+            if (!active) return;
             const objectUrl = URL.createObjectURL(blob);
             objectUrls.push(objectUrl);
             const escapedId = CSS.escape(`cid:${attachment.contentId}`);
@@ -1086,23 +1112,7 @@ function EmailFrame({
         }));
       }
 
-      if (!active) return;
-      setHasRemoteImages(blockedImageFound);
-      setHasBlockedImages(blockedImageFound && !showRemoteImages);
-      setMobileHtml(document.body.innerHTML);
-      const imgSrc = showRemoteImages ? "data: blob: https: http:" : "data: blob:";
-      setSrcDoc(`<!doctype html>
-        <html><head>
-          <meta charset="utf-8">
-          <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline';">
-          <style>
-            html{width:100%;min-height:100%;margin:0;padding:0;background:#fff}
-            body{display:block;width:100%;min-height:1px;margin:0;padding:2px 1px 24px;box-sizing:border-box;background:#fff;color:#202622;font:15px/1.58 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-wrap:anywhere}
-            img{max-width:100%;height:auto} table{max-width:100%;border-collapse:collapse}
-            a{color:#176747} blockquote{margin-left:0;padding-left:14px;border-left:3px solid #d9ded9;color:#5d665f}
-            pre{white-space:pre-wrap} hr{border:0;border-top:1px solid #e0e4e0}
-          </style>
-        </head><body>${document.body.innerHTML}</body></html>`);
+      commitDocument();
     };
     void build();
     return () => {

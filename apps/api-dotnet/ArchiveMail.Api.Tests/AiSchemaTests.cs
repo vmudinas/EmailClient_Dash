@@ -6,6 +6,23 @@ namespace ArchiveMail.Api.Tests;
 public sealed class AiSchemaTests
 {
     [Fact]
+    public void MalformedLegacyAnalysisArraysAreIgnored()
+    {
+        Assert.Empty(ArchiveMail.Api.Ai.AiService.ParseArray("legacy category"));
+    }
+
+    [Theory]
+    [InlineData("Receipts", "receipts", "Inbox/Receipts")]
+    [InlineData("Inbox/Receipts", "Receipts", "inbox/receipts")]
+    public void AiCategoriesMatchFolderNamesAndPathsWithoutCaseSensitivity(
+        string category,
+        string folderName,
+        string folderPath)
+    {
+        Assert.True(ArchiveMail.Api.Ai.AiService.CategoryMatchesFolder(category,folderName,folderPath));
+    }
+
+    [Fact]
     public void ExistingCutoverSchemaGetsAiColumnsAndConflictIndexRepaired()
     {
         Assert.Contains(

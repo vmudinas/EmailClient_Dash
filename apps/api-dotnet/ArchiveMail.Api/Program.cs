@@ -9,6 +9,7 @@ using ArchiveMail.Api.Mail;
 using ArchiveMail.Api.Security;
 using ArchiveMail.Api.Productivity;
 using ArchiveMail.Api.Gmail;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.OpenApi.Models;
 using Npgsql;
 
@@ -22,6 +23,12 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 builder.Services.Configure<ImportOptions>(builder.Configuration.GetSection("Import"));
 builder.Services.AddResilientBackgroundWorkers();
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+});
 
 var activeDatabase = DatabaseBootstrap.Resolve(builder.Configuration);
 if (activeDatabase.Provider != DatabaseProviderIds.PostgreSql)
@@ -96,6 +103,7 @@ var app = builder.Build();
 
 await app.Services.GetRequiredService<DatabaseInitializer>().InitializeAsync(app.Lifetime.ApplicationStopping);
 
+app.UseResponseCompression();
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
@@ -140,13 +148,21 @@ app.Use(async (context, next) =>
     await next();
 });
 
-app.Use(async (context, next) =>
+app.Use((context, next) =>
 {
-    await next();
-    if (!context.Request.Path.StartsWithSegments("/api") || context.Request.Path == "/api/health") return;
-    var session = context.Items[AuthService.SessionItemKey] as SessionRecord;
-    await context.RequestServices.GetRequiredService<ObservabilityRepository>()
-        .RecordAuditAsync(context, session, CancellationToken.None);
+    if (context.Request.Path.StartsWithSegments("/api") && context.Request.Path != "/api/health")
+    {
+        // Audit persistence is important, but it must not hold the API response open while the
+        // browser waits. OnCompleted runs after the response has been sent and still gives the
+        // repository access to the resolved route, status, and authenticated session.
+        context.Response.OnCompleted(() =>
+        {
+            var session = context.Items[AuthService.SessionItemKey] as SessionRecord;
+            return context.RequestServices.GetRequiredService<ObservabilityRepository>()
+                .RecordAuditAsync(context, session, CancellationToken.None);
+        });
+    }
+    return next();
 });
 
 app.MapGet("/api/health", async (NpgsqlDataSource database, CancellationToken cancellationToken) =>

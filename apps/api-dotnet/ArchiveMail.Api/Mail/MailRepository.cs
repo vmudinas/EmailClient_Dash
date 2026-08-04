@@ -437,7 +437,10 @@ public sealed class MailRepository(NpgsqlDataSource database)
         var cc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(23) ? null : reader.GetString(23), []);
         var bcc = ParseJson<List<EmailAddressDto>>(reader.IsDBNull(24) ? null : reader.GetString(24), []);
         var bodyText = reader.IsDBNull(25) ? "" : reader.GetString(25);
-        var bodyHtml = EmailHtmlSanitizer.Sanitize(reader.IsDBNull(26) ? null : reader.GetString(26));
+        // HTML is sanitized before ImportBatchWriter persists it. Re-parsing a large newsletter
+        // with AngleSharp on every open was the dominant message-read cost; the web reader still
+        // applies DOMPurify as a second boundary before inserting this string into the document.
+        var bodyHtml = reader.IsDBNull(26) ? null : reader.GetString(26);
         var headers = ParseJson<Dictionary<string, string>>(reader.IsDBNull(27) ? null : reader.GetString(27), []);
         await reader.CloseAsync();
         var attachments = await ListAttachmentsAsync(id, cancellationToken);
@@ -637,17 +640,24 @@ public sealed class MailRepository(NpgsqlDataSource database)
         var path = folderReader.GetString(1);
         await folderReader.CloseAsync();
         const string countSql = """
-            SELECT COUNT(*) FILTER (WHERE folder_id = @folder), COUNT(*) FILTER (WHERE folder_id <> @folder)
+            SELECT id, folder_id = @folder
             FROM messages WHERE id = ANY(@ids) AND archive_id = @archive
+            FOR UPDATE
             """;
         await using var count = new NpgsqlCommand(countSql, connection, transaction);
         count.Parameters.AddWithValue("folder", folderId);
         count.Parameters.AddWithValue("ids", unique);
         count.Parameters.AddWithValue("archive", archiveId);
         await using var countReader = await count.ExecuteReaderAsync(cancellationToken);
-        await countReader.ReadAsync(cancellationToken);
-        var already = countReader.GetInt64(0);
-        var moved = countReader.GetInt64(1);
+        var processed = new List<string>();
+        long already = 0;
+        long moved = 0;
+        while (await countReader.ReadAsync(cancellationToken))
+        {
+            processed.Add(countReader.GetString(0));
+            if (countReader.GetBoolean(1)) already++;
+            else moved++;
+        }
         await countReader.CloseAsync();
         await using var update = new NpgsqlCommand(
             "UPDATE messages SET folder_id = @folder WHERE id = ANY(@ids) AND archive_id = @archive AND folder_id <> @folder",
@@ -658,7 +668,7 @@ public sealed class MailRepository(NpgsqlDataSource database)
         await update.ExecuteNonQueryAsync(cancellationToken);
         await RecountArchiveAsync(connection, transaction, archiveId, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return new(folderId, path, moved, already, unique.Length - moved - already);
+        return new(folderId, path, moved, already, unique.Length - moved - already, processed.ToArray());
     }
 
     private async Task<IReadOnlyList<AttachmentDto>> ListAttachmentsAsync(string messageId, CancellationToken cancellationToken)

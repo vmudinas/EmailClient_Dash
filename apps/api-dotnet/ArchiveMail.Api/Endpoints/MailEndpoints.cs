@@ -226,15 +226,16 @@ public static class MailEndpoints
             var session=MailSession(context,true);if(session is null)return Results.Forbid();
             if(request.Destination is not("trash" or "archived" or "spam"))return Results.BadRequest(new{error="Choose a valid destination"});
             var ids=request.MessageIds.Where(id=>!string.IsNullOrWhiteSpace(id)).Distinct().Take(500).ToArray();if(ids.Length==0)return Results.BadRequest(new{error="Choose one or more messages"});
-            long moved=0,already=0,failed=0,rules=0;var paths=new HashSet<string>();
+            long moved=0,already=0,rules=0;var paths=new HashSet<string>();var destinationIds=new HashSet<string>();
             foreach(var group in (await Task.WhenAll(ids.Select(id=>mail.GetMessageAsync(id,session.User.Id,token)))).Where(value=>value is not null).Cast<MessageDetailDto>().GroupBy(value=>value.ArchiveId))
             {
-                var destination=await EnsureNamedFolder(mail,group.Key,session.User.Id,request.Destination=="archived"?"Archived":request.Destination=="trash"?"Trash":"Spam",token);paths.Add(destination.Path);
-                if(request.Destination=="spam")foreach(var message in group.GroupBy(value=>value.Sender.Address,StringComparer.OrdinalIgnoreCase).Select(value=>value.First()))
-                {try{var result=await senderRules.CreateAsync(new(message.ArchiveId,"archive","from",message.Sender.Address,"all",null,destination.Id,null,true),session.User.Id,token);moved+=result.MovedMessages;rules+=result.CreatedRules;}catch{failed++;}}
-                else{var result=await mail.BulkMoveToFolderAsync(group.Select(value=>value.Id).ToArray(),destination.Id,session.User.Id,token);moved+=result.Moved;already+=result.AlreadyThere;failed+=result.Failed;}
+                var destination=await EnsureNamedFolder(mail,group.Key,session.User.Id,request.Destination=="archived"?"Archived":request.Destination=="trash"?"Trash":"Spam",token);paths.Add(destination.Path);destinationIds.Add(destination.Id);
+                if(request.Destination=="spam")foreach(var senderGroup in group.GroupBy(value=>value.Sender.Address,StringComparer.OrdinalIgnoreCase))
+                {var message=senderGroup.First();try{var result=await senderRules.CreateAsync(new(message.ArchiveId,"archive","from",message.Sender.Address,"all",null,destination.Id,null,true),session.User.Id,token);moved+=result.MovedMessages;rules+=result.CreatedRules;}catch{/* Unprocessed selected messages are reported below. */}}
+                else{var result=await mail.BulkMoveToFolderAsync(group.Select(value=>value.Id).ToArray(),destination.Id,session.User.Id,token);moved+=result.Moved;already+=result.AlreadyThere;}
             }
-            failed+=ids.Length-(moved+already+failed)>0?ids.Length-(moved+already+failed):0;return Results.Ok(new BulkMoveResult(request.Destination,paths.ToArray(),moved,already,failed,rules));
+            var processed=(await mail.GetMessageSummariesAsync(ids,session.User.Id,token)).Where(message=>destinationIds.Contains(message.FolderId)).Select(message=>message.Id).ToArray();
+            var failed=ids.Length-processed.Length;return Results.Ok(new BulkMoveResult(request.Destination,paths.ToArray(),moved,already,failed,rules,processed));
         }).WithName("BulkMoveMessages");
 
         api.MapPost("/messages/{messageId}/sender-folder",async(string messageId,MoveMessageRequest request,HttpContext context,MailRepository mail,SenderRuleRepository rules,CancellationToken token)=>
