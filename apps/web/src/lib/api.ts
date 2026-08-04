@@ -833,10 +833,10 @@ export class ApiClient {
     return this.request("/api/ai/review-queue/review-all", { method: "POST" });
   }
 
-  proposeReviewFiling(messageIds: string[]): Promise<AiFilingProposalResult> {
+  proposeReviewFiling(messageIds: string[], contentOnly = false): Promise<AiFilingProposalResult> {
     return this.request("/api/ai/review-queue/filing-proposals", {
       method: "POST",
-      body: JSON.stringify({ messageIds })
+      body: JSON.stringify({ messageIds, contentOnly })
     });
   }
 

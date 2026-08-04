@@ -732,6 +732,7 @@ export interface AiFilingProposal {
   proposedFolderPath: string;
   reason: string;
   confidence: number;
+  contentBased: boolean;
 }
 
 export interface AiFilingProposalResult {
@@ -2210,6 +2211,7 @@ export interface MessageFilingSuggestionOption {
   folderPath: string;
   reason: string;
   confidence: number;
+  contentBased?: boolean;
 }
 
 export interface MessageFilingSuggestion {

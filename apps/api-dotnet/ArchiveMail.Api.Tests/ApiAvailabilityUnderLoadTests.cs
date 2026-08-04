@@ -49,6 +49,15 @@ public sealed class ApiAvailabilityUnderLoadTests
     }
 
     [Fact]
+    public void GmailProviderFailuresCarryTheirReasonInsteadOfReturningABare500()
+    {
+        var result = ProductivityEndpoints.ProductivityError(
+            new InvalidOperationException("Google rejected the sending identity"));
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, StatusOf(result));
+    }
+
+    [Fact]
     public void AStatementThePostgresServerRejectedStaysLoud()
     {
         // Deliberately not folded into the retryable case above. The server understood the

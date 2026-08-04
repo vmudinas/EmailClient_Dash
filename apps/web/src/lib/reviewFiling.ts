@@ -4,6 +4,16 @@ export interface ReviewProcessedMessagesResult {
   failedMessageIds: string[];
 }
 
+export const BULK_MOVE_BATCH_SIZE = 500;
+
+export function bulkMoveBatches<T>(items: readonly T[]): T[][] {
+  const batches: T[][] = [];
+  for (let offset = 0; offset < items.length; offset += BULK_MOVE_BATCH_SIZE) {
+    batches.push(items.slice(offset, offset + BULK_MOVE_BATCH_SIZE));
+  }
+  return batches;
+}
+
 export async function reviewProcessedMessages(
   processedMessageIds: string[],
   markReviewed: (messageId: string) => Promise<unknown>

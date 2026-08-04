@@ -2,6 +2,7 @@ using System.Text.Json;
 using ArchiveMail.Api.Ai;
 using ArchiveMail.Api.Mail;
 using ArchiveMail.Api.Security;
+using Npgsql;
 
 namespace ArchiveMail.Api.Endpoints;
 
@@ -22,7 +23,7 @@ public static class AiEndpoints
             await ai.CancelAsync(jobId,Session(context).User.Id,token) is{} job?Results.Ok(job):Results.NotFound(new{error="AI job not found"})).WithTags("AI");
         app.MapGet("/api/ai/review-queue",async(HttpContext context,AiService ai,CancellationToken token)=>Results.Ok(await ai.ReviewQueueAsync(Session(context).User.Id,token))).WithTags("AI");
         app.MapPost("/api/ai/review-queue/filing-proposals",async(JsonElement input,HttpContext context,AiService ai,CancellationToken token)=>
-        {try{var ids=input.TryGetProperty("messageIds",out var values)?values.EnumerateArray().Select(value=>value.GetString()??"").ToArray():[];return Results.Ok(await ai.FilingProposalsAsync(ids,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI");
+        {try{var ids=input.TryGetProperty("messageIds",out var values)?values.EnumerateArray().Select(value=>value.GetString()??"").ToArray():[];var contentOnly=input.TryGetProperty("contentOnly",out var content)&&content.ValueKind==JsonValueKind.True;return Results.Ok(await ai.FilingProposalsAsync(ids,contentOnly,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI");
         app.MapPost("/api/ai/review-queue/review-all",async(HttpContext context,AiService ai,CancellationToken token)=>Results.Ok(await ai.ReviewAllAsync(Session(context).User.Id,token))).WithTags("AI");
         app.MapPost("/api/messages/{messageId}/ai/review",async(string messageId,HttpContext context,AiService ai,CancellationToken token)=>
         {try{return Results.Ok(await ai.ReviewAsync(messageId,Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI");
@@ -41,7 +42,7 @@ public static class AiEndpoints
         app.MapPost("/api/ai/duplicates/scan",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
         {try{return Results.Accepted(value:await duplicates.EnqueueScanAsync(Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI duplicates");
         app.MapGet("/api/ai/duplicates/scan",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
-            Results.Ok(await duplicates.LatestScanAsync(Session(context).User.Id,token))).WithTags("AI duplicates");
+        {try{return Results.Ok(await duplicates.LatestScanAsync(Session(context).User.Id,token));}catch(Exception error){return Error(error);}}).WithTags("AI duplicates");
         app.MapPost("/api/ai/duplicates/scan/cancel",async(HttpContext context,DeduplicationService duplicates,CancellationToken token)=>
             await duplicates.CancelScanAsync(Session(context).User.Id,token) is{} scan?Results.Ok(scan):Results.NotFound(new{error="No duplicate scan is running"})).WithTags("AI duplicates");
 
@@ -58,5 +59,5 @@ public static class AiEndpoints
     }
     private static SessionRecord Session(HttpContext context)=>(SessionRecord)context.Items[AuthService.SessionItemKey]!;
     private static bool Admin(HttpContext context)=>Session(context).Role=="admin";
-    private static IResult Error(Exception error)=>error switch{MailNotFoundException=>Results.NotFound(new{error=error.Message}),ArgumentException=>Results.BadRequest(new{error=error.Message}),InvalidOperationException=>Results.Json(new{error=error.Message},statusCode:503),_=>throw error};
+    private static IResult Error(Exception error)=>error switch{MailNotFoundException=>Results.NotFound(new{error=error.Message}),ArgumentException=>Results.BadRequest(new{error=error.Message}),InvalidOperationException=>Results.Json(new{error=error.Message},statusCode:503),TimeoutException=>Results.Json(new{error=MailEndpoints.DatabaseBusyMessage},statusCode:503),NpgsqlException and not PostgresException=>Results.Json(new{error=MailEndpoints.DatabaseBusyMessage},statusCode:503),_=>throw error};
 }

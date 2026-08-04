@@ -7,6 +7,8 @@ namespace ArchiveMail.Api.Mail;
 
 public sealed class MailRepository(NpgsqlDataSource database)
 {
+    internal const int MessageSummaryLookupLimit = 500;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> InboxCategories =
     ["primary", "promotions", "social", "updates", "bills", "medical", "mail_tracking"];
@@ -261,7 +263,8 @@ public sealed class MailRepository(NpgsqlDataSource database)
         string ownerUserId,
         CancellationToken cancellationToken)
     {
-        var uniqueIds = ids.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct().Take(500).ToArray();
+        var uniqueIds = ids.Where(id => !string.IsNullOrWhiteSpace(id)).Distinct()
+            .Take(MessageSummaryLookupLimit).ToArray();
         if (uniqueIds.Length == 0) return [];
         var sql = $"""
             SELECT {SummaryColumns}

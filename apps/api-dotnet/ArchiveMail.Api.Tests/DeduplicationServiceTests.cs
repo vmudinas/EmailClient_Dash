@@ -1,5 +1,6 @@
 using ArchiveMail.Api.Ai;
 using ArchiveMail.Api.Infrastructure;
+using ArchiveMail.Api.Mail;
 using Xunit;
 
 namespace ArchiveMail.Api.Tests;
@@ -139,6 +140,22 @@ public sealed class DeduplicationServiceTests
     {
         Assert.Contains("FROM unnest($2::text[], $3::text[]) AS member(message_id, evidence)",
             DeduplicationService.MemberInsertSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Group_detail_batches_every_member_past_the_summary_lookup_limit()
+    {
+        var limit = MailRepository.MessageSummaryLookupLimit;
+        var ids = Enumerable.Range(0, limit * 2 + 1)
+            .Select(index => $"message-{index}")
+            .Append("message-0")
+            .Append("");
+
+        var batches = DeduplicationService.GroupMemberSummaryBatches(ids).ToArray();
+
+        Assert.Equal([limit, limit, 1], batches.Select(batch => batch.Length));
+        Assert.Equal(limit * 2 + 1,
+            batches.SelectMany(batch => batch).Distinct(StringComparer.Ordinal).Count());
     }
 
     [Fact]

@@ -14,12 +14,33 @@ public sealed class AiSchemaTests
     [Theory]
     [InlineData("Receipts", "receipts", "Inbox/Receipts")]
     [InlineData("Inbox/Receipts", "Receipts", "inbox/receipts")]
+    [InlineData("Financial invoices", "Invoice", "Finance/Invoice")]
     public void AiCategoriesMatchFolderNamesAndPathsWithoutCaseSensitivity(
         string category,
         string folderName,
         string folderPath)
     {
         Assert.True(ArchiveMail.Api.Ai.AiService.CategoryMatchesFolder(category,folderName,folderPath));
+    }
+
+    [Fact]
+    public void ContentBasedFolderSuggestionWinsOverSenderHistory()
+    {
+        var history = new ArchiveMail.Api.Ai.AiService.FilingCandidate(
+            "history", "Projects", "Sender history", .95);
+        var content = new ArchiveMail.Api.Ai.AiService.FilingCandidate(
+            "content", "Invoices", "Content category", .78, true);
+
+        var selected = ArchiveMail.Api.Ai.AiService.BestFilingCandidate([history, content]);
+
+        Assert.Same(content, selected);
+    }
+
+    [Fact]
+    public void UnrelatedContentDoesNotProduceAFolderMatch()
+    {
+        Assert.False(ArchiveMail.Api.Ai.AiService.CategoryMatchesFolder(
+            "Travel itinerary", "Invoices", "Finance/Invoices"));
     }
 
     [Fact]

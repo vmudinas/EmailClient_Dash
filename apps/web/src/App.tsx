@@ -107,7 +107,7 @@ import {
   type PollingSettings
 } from "./lib/polling.js";
 import { removeByMessageId, restoreRemoved } from "./lib/optimisticList.js";
-import { reviewProcessedMessages } from "./lib/reviewFiling.js";
+import { bulkMoveBatches, reviewProcessedMessages } from "./lib/reviewFiling.js";
 import {
   navigateGoogleAuthorizationPopup,
   openGoogleAuthorizationPopup,
@@ -1636,16 +1636,19 @@ export function App() {
       const processed = new Set<string>();
       if (!folderRequest) {
         const namedDestination: BulkMoveDestination = request.destination === "archived" ? "archived" : "trash";
-        const result = await api.bulkMoveMessages(copies.map((member) => member.message.id), namedDestination);
-        result.processedMessageIds.forEach((messageId) => processed.add(messageId));
+        for (const batch of bulkMoveBatches(copies.map((member) => member.message.id))) {
+          const result = await api.bulkMoveMessages(batch, namedDestination);
+          result.processedMessageIds.forEach((messageId) => processed.add(messageId));
+        }
       } else {
         for (const target of folderRequest.targets) {
           const messageIds = copies
             .filter((member) => member.message.archiveId === target.archiveId)
             .map((member) => member.message.id);
-          if (messageIds.length === 0) continue;
-          const result = await api.bulkMoveMessagesToFolder(messageIds, target.folderId);
-          result.processedMessageIds.forEach((messageId) => processed.add(messageId));
+          for (const batch of bulkMoveBatches(messageIds)) {
+            const result = await api.bulkMoveMessagesToFolder(batch, target.folderId);
+            result.processedMessageIds.forEach((messageId) => processed.add(messageId));
+          }
         }
       }
 
@@ -1833,15 +1836,15 @@ export function App() {
     }
   };
 
-  const generateReviewFilingProposals = async (selected: AiReviewAnalysisItem[]) => {
+  const generateReviewFilingProposals = async (selected: AiReviewAnalysisItem[], contentOnly = false) => {
     if (!api || readOnly || selected.length === 0) return;
     setReviewProposalsLoading(true);
     try {
-      const result = await api.proposeReviewFiling(selected.map((item) => item.message.id));
+      const result = await api.proposeReviewFiling(selected.map((item) => item.message.id), contentOnly);
       setReviewFilingProposals(result.proposals);
       showError(result.proposals.length
-        ? `AI prepared ${result.proposals.length.toLocaleString()} folder proposal${result.proposals.length === 1 ? "" : "s"} for review.`
-        : "AI did not find a stronger folder for these messages.");
+        ? `AI prepared ${result.proposals.length.toLocaleString()} ${contentOnly ? "content-based " : ""}folder proposal${result.proposals.length === 1 ? "" : "s"} for review.`
+        : contentOnly ? "AI did not find a folder matching this message's content." : "AI did not find a stronger folder for these messages.");
     } catch (error) {
       showError(error instanceof Error ? error.message : "AI folder proposals could not be prepared");
     } finally {
@@ -3300,7 +3303,7 @@ export function App() {
         onDeleteAnalyses={(selected) => void fileReviewAnalyses(selected, { kind: "trash" })}
         onMoveAnalyses={(selected, folderId) => void fileReviewAnalyses(selected, { kind: "folder", folderId })}
         onAiFileAnalyses={(selected) => void fileReviewAnalyses(selected, { kind: "ai" })}
-        onGenerateFilingProposals={(selected) => void generateReviewFilingProposals(selected)}
+        onGenerateFilingProposals={(selected, contentOnly) => void generateReviewFilingProposals(selected, contentOnly)}
         onApproveFilingProposal={(proposal) => void approveReviewFilingProposal(proposal)}
         onDeclineFilingProposal={(proposal) => setReviewFilingProposals((current) => current.filter((entry) => entry.id !== proposal.id))}
         onMarkAnalysisReviewed={(item) => void markReviewAnalysisReviewed(item)}

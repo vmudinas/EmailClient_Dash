@@ -94,8 +94,10 @@ public sealed class DeduplicationService(NpgsqlDataSource database, MailReposito
         await using (var reader = await memberCommand.ExecuteReaderAsync(token))
             while (await reader.ReadAsync(token))
                 rows.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
-        var summaries = (await mail.GetMessageSummariesAsync(rows.Select(row => row.MessageId), owner, token))
-            .ToDictionary(message => message.Id, StringComparer.Ordinal);
+        var summaries = new Dictionary<string, MessageSummaryDto>(StringComparer.Ordinal);
+        foreach (var batch in GroupMemberSummaryBatches(rows.Select(row => row.MessageId)))
+            foreach (var message in await mail.GetMessageSummariesAsync(batch, owner, token))
+                summaries[message.Id] = message;
         foreach (var row in rows)
         {
             if (summaries.TryGetValue(row.MessageId, out var message))
@@ -103,6 +105,12 @@ public sealed class DeduplicationService(NpgsqlDataSource database, MailReposito
         }
         return new { group, members };
     }
+
+    internal static IEnumerable<string[]> GroupMemberSummaryBatches(IEnumerable<string> messageIds) =>
+        messageIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .Chunk(MailRepository.MessageSummaryLookupLimit);
 
     /// <summary>Confirm a group, dismiss it (remembering the pair so it never regroups), or repoint the preferred copy.</summary>
     public async Task<object?> UpdateGroupAsync(string id, JsonElement input, string owner, CancellationToken token)
