@@ -675,18 +675,20 @@ export class ApiClient {
     return this.request(`/api/messages?${queryString(options)}`);
   }
 
-  async inboxCategoryCounts(options: { archiveId?: string; folderId?: string; isRead?: boolean }): Promise<InboxCategoryCounts> {
+  async inboxCategoryCounts(options: { archiveId?: string; folderId?: string; inboxOnly?: boolean; focus?: boolean; isRead?: boolean; after?: string; before?: string }): Promise<InboxCategoryCounts> {
     const counts = await this.request<InboxCategoryCounts & { mailTracking?: number }>(
       `/api/messages/category-counts?${queryString(options)}`
     );
     return {
       primary: counts.primary ?? 0,
+      jobs: counts.jobs ?? 0,
       promotions: counts.promotions ?? 0,
       social: counts.social ?? 0,
       updates: counts.updates ?? 0,
       bills: counts.bills ?? 0,
       medical: counts.medical ?? 0,
-      mail_tracking: counts.mail_tracking ?? counts.mailTracking ?? 0
+      mail_tracking: counts.mail_tracking ?? counts.mailTracking ?? 0,
+      focus: counts.focus
     };
   }
 

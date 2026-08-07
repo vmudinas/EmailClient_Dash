@@ -3,12 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Archive, Folder, GmailConnection } from "@email-client/shared";
 import {
   CreateMailboxDialog,
-  EMPTY_FILTERS,
-  FilterPanel,
   GmailDialog,
   MailboxDropDialog,
   MoveGmailConnectionDialog
 } from "./Dialogs.js";
+import { EMPTY_FILTERS, FilterPanel } from "./SearchFilterPanel.js";
 
 afterEach(cleanup);
 

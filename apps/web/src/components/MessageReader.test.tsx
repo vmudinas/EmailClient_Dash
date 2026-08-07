@@ -226,6 +226,34 @@ describe("MessageReader AI analysis", () => {
 });
 
 describe("MessageReader reply, forward, and move", () => {
+  it("shows the conversation without requiring AI analysis and opens another message", async () => {
+    const api = {
+      getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null }),
+      getMessageThread: vi.fn().mockResolvedValue({
+        messageId: MESSAGE.id,
+        totalMessages: 2,
+        messages: [
+          {
+            ...MESSAGE,
+            id: "message-earlier",
+            subject: "Contract review",
+            preview: "Here is the contract for review."
+          },
+          MESSAGE
+        ]
+      })
+    } as unknown as ApiClient;
+    const onOpenMessage = vi.fn();
+    renderReader(api, MESSAGE, { onOpenMessage });
+
+    expect(await screen.findByText("Conversation")).toBeTruthy();
+    expect(screen.getByText("2 messages")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Customer.*Contract review.*Here is the contract for review/i }));
+
+    expect(onOpenMessage).toHaveBeenCalledWith("message-earlier");
+    expect(screen.queryByLabelText("AI analysis")).toBeNull();
+  });
+
   it("invokes onReply and onForward with the current message", async () => {
     const api = {
       getMessageAiState: vi.fn().mockResolvedValue({ job: null, analysis: null })
@@ -466,6 +494,7 @@ function renderReader(
       api={api}
       connections={connections}
       onMobileBack={vi.fn()}
+      onOpenMessage={vi.fn()}
       onUpdateState={vi.fn().mockResolvedValue(undefined)}
       onError={vi.fn()}
       onReply={vi.fn()}

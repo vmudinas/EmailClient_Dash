@@ -32,6 +32,7 @@ public sealed class EmlParserTests
             Assert.Equal("Mailbox/Inbox", first.FolderPath);
             Assert.Equal("sender@example.com", first.SenderAddress);
             Assert.Contains("stable@example.com", first.InternetMessageId);
+            Assert.Equal("archive:archive-id:rfc822:stable@example.com", first.ConversationKey);
             Assert.Equal("Imported body", first.BodyText);
             Assert.Equal(first.SourceKey, second.SourceKey);
             Assert.Equal("recipient@example.com", JsonDocument.Parse(first.ToJson).RootElement[0].GetProperty("address").GetString());
@@ -40,6 +41,33 @@ public sealed class EmlParserTests
         {
             Directory.Delete(testDirectory, recursive: true);
         }
+    }
+
+    [Fact]
+    public void ReplyUsesTheOldestReferenceAsItsConversationRoot()
+    {
+        var key = EmlParser.ConversationKey(
+            "archive-1",
+            "reply@example.com",
+            ["<root@example.com>", "<parent@example.com>"],
+            "<parent@example.com>");
+
+        Assert.Equal("archive:archive-1:rfc822:root@example.com", key);
+    }
+
+    [Fact]
+    public void ConversationKeysAreScopedToTheArchive()
+    {
+        var first = EmlParser.ConversationKey("archive-1", "same@example.com", [], null);
+        var second = EmlParser.ConversationKey("archive-2", "same@example.com", [], null);
+
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
+    public void MessageWithoutAnyRfcIdentifierKeepsTheLegacyFallback()
+    {
+        Assert.Null(EmlParser.ConversationKey("archive-1", null, [], null));
     }
 
     [Fact]

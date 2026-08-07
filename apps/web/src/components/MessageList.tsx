@@ -1,9 +1,10 @@
 import DOMPurify from "dompurify";
-import { memo, useCallback, useEffect, useRef, useState, type CSSProperties, type TouchEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type TouchEvent } from "react";
 import {
   Archive,
   ArrowLeft,
   BellRing,
+  BriefcaseBusiness,
   BrainCircuit,
   CalendarClock,
   ChevronDown,
@@ -20,6 +21,7 @@ import {
   Reply,
   SearchX,
   ShieldAlert,
+  ShieldCheck,
   Star,
   Tag,
   Trash2,
@@ -40,6 +42,8 @@ export interface MessageListItem {
   hit?: SearchHit;
 }
 
+export type InboxView = InboxCategory | "focus";
+
 interface MessageListProps {
   items: MessageListItem[];
   selectedMessageId: string | null;
@@ -56,10 +60,10 @@ interface MessageListProps {
   onLoadMore(): void;
   onMobileBack(): void;
   inboxCategories?: {
-    active: InboxCategory;
+    active: InboxView;
     counts: InboxCategoryCounts;
     tabs: InboxTabDefinition[];
-    onSelect(category: InboxCategory): void;
+    onSelect(category: InboxView): void;
   } | null;
   selectedIds: Set<string>;
   onToggleSelect(messageId: string): void;
@@ -84,6 +88,7 @@ interface MessageListProps {
 
 const CATEGORY_ICONS: Record<InboxCategory, typeof Inbox> = {
   primary: Inbox,
+  jobs: BriefcaseBusiness,
   promotions: Tag,
   social: CircleUserRound,
   updates: Info,
@@ -149,7 +154,20 @@ export function MessageList({
     onDragEnd
   };
   const selectedCount = selectedIds.size;
-  const allVisibleSelected = items.length > 0 && items.every((item) => selectedIds.has(item.message.id));
+  const focusMode = inboxCategories?.active === "focus";
+  const activeCategoryLabel = inboxCategories && !focusMode
+    ? inboxCategories.tabs.find((tab) => tab.id === inboxCategories.active)?.label ?? inboxCategories.active
+    : null;
+  const displayItems = useMemo(
+    () => focusMode ? [...items].sort(compareFocusItems) : items,
+    [focusMode, items]
+  );
+  const focusSections = useMemo(
+    () => focusMode ? groupFocusItems(displayItems) : [],
+    [displayItems, focusMode]
+  );
+  const unreadCount = displayItems.filter((item) => !item.message.state.isRead).length;
+  const allVisibleSelected = displayItems.length > 0 && displayItems.every((item) => selectedIds.has(item.message.id));
   const selectRow = useCallback((target: MessageSummary) => rowCallbacksRef.current.onSelect(target), []);
   const toggleRow = useCallback((messageId: string) => rowCallbacksRef.current.onToggleSelect(messageId), []);
   const archiveRow = useCallback((target: MessageSummary) => rowCallbacksRef.current.onArchive(target), []);
@@ -170,9 +188,30 @@ export function MessageList({
     }
   }, [allVisibleSelected, selectedCount]);
 
+  const renderRow = ({ message, hit }: MessageListItem) => (
+    <MessageRow
+      key={message.id}
+      message={message}
+      hit={hit}
+      readOnly={readOnly}
+      selected={selectedMessageId === message.id}
+      checked={selectedIds.has(message.id)}
+      dragging={draggingMessageIds.has(message.id)}
+      dragMessageIds={selectedIds.has(message.id) ? [...selectedIds] : [message.id]}
+      actionBusy={actionBusy}
+      onSelect={selectRow}
+      onToggleSelect={toggleRow}
+      onArchive={archiveRow}
+      onSpam={spamRow}
+      onToggleRead={toggleReadRow}
+      onDragStart={startRowDrag}
+      onDragEnd={endRowDrag}
+    />
+  );
+
   const selectionMenu = (
     <SelectionMenu
-      loadedCount={items.length}
+      loadedCount={displayItems.length}
       hasMore={hasMore}
       selectedCount={selectedCount}
       busy={selectionBusy}
@@ -234,13 +273,21 @@ export function MessageList({
                 {selectionMenu}
               </div>
             )}
-            <div>
+            <div className="message-heading-copy">
+              {focusMode && <small className="message-heading-eyebrow">Your daily catch-up</small>}
               <h2>{title}</h2>
               <span>
-                {items.length.toLocaleString()}{hasMore ? "+" : ""} shown
+                {focusMode
+                  ? `${unreadCount.toLocaleString()} unread · ${displayItems.length.toLocaleString()} to review`
+                  : `${displayItems.length.toLocaleString()}${hasMore ? "+" : ""} shown`}
                 {rangeLabel && <small className="message-range-label"> · {rangeLabel}</small>}
               </span>
             </div>
+            {focusMode && (
+              <div className="focus-safety-note" title="Known junk and low-value bulk mail stay out of Focus">
+                <ShieldCheck size={15} /><span>Low-priority mail set aside</span>
+              </div>
+            )}
           </>
         )}
       </header>
@@ -273,8 +320,20 @@ export function MessageList({
         <nav
           className="inbox-category-tabs"
           aria-label="Inbox categories"
-          style={{ "--inbox-tab-count": inboxCategories.tabs.filter((tab) => tab.enabled).length } as CSSProperties}
+          style={{ "--inbox-tab-count": inboxCategories.tabs.filter((tab) => tab.enabled).length + 1 } as CSSProperties}
         >
+          <button
+            className={`inbox-category-tab focus ${inboxCategories.active === "focus" ? "active" : ""}`}
+            onClick={() => inboxCategories.onSelect("focus")}
+            aria-pressed={inboxCategories.active === "focus"}
+            aria-label="Focus, important mail from today and yesterday"
+            title="People, replies, follow-ups, career, and useful account mail from today and yesterday"
+            style={{ "--inbox-tab-color": "#176747" } as CSSProperties}
+          >
+            <ShieldCheck size={15} />
+            <span>Focus</span>
+            <small>{focusMode ? displayItems.length.toLocaleString() : "Now"}</small>
+          </button>
           {inboxCategories.tabs.filter((category) => category.enabled).sort((left, right) => left.position - right.position).map((category) => {
             const Icon = CATEGORY_ICONS[category.id];
             const count = inboxCategories.counts[category.id] ?? 0;
@@ -297,42 +356,35 @@ export function MessageList({
         </nav>
       )}
 
-      <div className="message-list" role="listbox" aria-label={title}>
+      <div className={`message-list ${focusMode ? "focus-list" : ""}`} role="list" aria-label={title}>
         {inboxCategories?.active === "mail_tracking" && (
           <ShipmentHighlights messages={items.map((item) => item.message)} onSelect={selectRow} />
         )}
-        {items.map(({ message, hit }) => (
-          <MessageRow
-            key={message.id}
-            message={message}
-            hit={hit}
-            readOnly={readOnly}
-            selected={selectedMessageId === message.id}
-            checked={selectedIds.has(message.id)}
-            dragging={draggingMessageIds.has(message.id)}
-            dragMessageIds={selectedIds.has(message.id) ? [...selectedIds] : [message.id]}
-            actionBusy={actionBusy}
-            onSelect={selectRow}
-            onToggleSelect={toggleRow}
-            onArchive={archiveRow}
-            onSpam={spamRow}
-            onToggleRead={toggleReadRow}
-            onDragStart={startRowDrag}
-            onDragEnd={endRowDrag}
-          />
-        ))}
+        {focusMode ? focusSections.map((section) => (
+          <section className="focus-date-section" aria-labelledby={`focus-date-${section.key}`} key={section.key}>
+            <header className="focus-date-heading" id={`focus-date-${section.key}`}>
+              <span>{section.label}</span>
+              <small>{section.items.length.toLocaleString()} {section.items.length === 1 ? "message" : "messages"}</small>
+            </header>
+            {section.items.map(renderRow)}
+          </section>
+        )) : displayItems.map(renderRow)}
 
         {!loading && items.length === 0 && (
           <div className="list-empty">
             {searching ? <SearchX size={28} /> : <Inbox size={28} />}
             <strong>{searching
               ? "No matching messages"
-              : inboxCategories
-                ? `No ${inboxCategories.active} messages`
+              : focusMode
+                ? "You’re caught up"
+              : activeCategoryLabel
+                ? `No ${activeCategoryLabel} messages`
                 : "No messages here"}</strong>
             <span>{searching
               ? "Adjust the search or filters."
-              : inboxCategories
+              : focusMode
+                ? "Nothing important from today or yesterday needs your attention."
+              : activeCategoryLabel
                 ? "Choose another Inbox category."
                 : "Choose another folder or import an archive."}</span>
           </div>
@@ -356,6 +408,73 @@ export function MessageList({
       </div>
     </section>
   );
+}
+
+interface FocusSection {
+  key: string;
+  label: string;
+  items: MessageListItem[];
+}
+
+function compareFocusItems(left: MessageListItem, right: MessageListItem): number {
+  const leftDate = localDateKey(left.message.receivedAt ?? left.message.sentAt);
+  const rightDate = localDateKey(right.message.receivedAt ?? right.message.sentAt);
+  if (leftDate !== rightDate) return rightDate.localeCompare(leftDate);
+  const priority = focusPriority(left.message) - focusPriority(right.message);
+  if (priority !== 0) return priority;
+  if (left.message.state.isRead !== right.message.state.isRead) {
+    return left.message.state.isRead ? 1 : -1;
+  }
+  return messageTime(right.message) - messageTime(left.message);
+}
+
+function groupFocusItems(items: MessageListItem[]): FocusSection[] {
+  const groups = new Map<string, MessageListItem[]>();
+  for (const item of items) {
+    const key = localDateKey(item.message.receivedAt ?? item.message.sentAt);
+    const group = groups.get(key) ?? [];
+    group.push(item);
+    groups.set(key, group);
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => right.localeCompare(left))
+    .map(([key, sectionItems]) => ({ key, label: focusDateLabel(key), items: sectionItems }));
+}
+
+function focusPriority(message: MessageSummary): number {
+  if (message.hasPendingFollowUp) return 0;
+  if (message.hasReply || /^\s*(?:re|fwd?):/i.test(message.subject)) return 1;
+  if (message.inboxCategory === "primary") return 2;
+  if (message.inboxCategory === "jobs") return 3;
+  if (message.inboxCategory === "medical" || message.inboxCategory === "bills") return 4;
+  if (message.inboxCategory === "updates") return 5;
+  if (message.inboxCategory === "mail_tracking") return 6;
+  return 7;
+}
+
+function messageTime(message: MessageSummary): number {
+  const value = message.receivedAt ?? message.sentAt;
+  return value ? new Date(value).getTime() || 0 : 0;
+}
+
+function localDateKey(value: string | null): string {
+  if (!value) return "0000-00-00";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "0000-00-00";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function focusDateLabel(key: string): string {
+  if (key === "0000-00-00") return "Date unavailable";
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const keyFor = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  if (key === keyFor(today)) return "Today";
+  if (key === keyFor(yesterday)) return "Yesterday";
+  const [year, month, day] = key.split("-").map(Number) as [number, number, number];
+  return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "short", day: "numeric" })
+    .format(new Date(year, month - 1, day));
 }
 
 function SelectionMenu({
@@ -552,10 +671,10 @@ const MessageRow = memo(function MessageRow({
         </>
       )}
       <div
-        className={`message-row ${readOnly ? "" : "selectable"} ${selected ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${message.hasCalendarEvent ? "calendar-linked" : message.hasPendingFollowUp ? "follow-up-linked" : message.hasAiAnalysis ? "analyzed" : ""} ${dragging ? "dragging" : ""} ${checked ? "checked" : ""} ${swiping ? "swiping" : ""}`}
-        role="option"
+        className={`message-row ${readOnly ? "" : "selectable"} ${selected ? "selected" : ""} ${message.state.isRead ? "read" : "unread"} ${message.hasPendingFollowUp ? "follow-up-linked" : message.hasCalendarEvent ? "calendar-linked" : message.hasAiAnalysis ? "analyzed" : ""} ${dragging ? "dragging" : ""} ${checked ? "checked" : ""} ${swiping ? "swiping" : ""}`}
+        role="listitem"
         tabIndex={0}
-        aria-selected={selected}
+        aria-current={selected ? "true" : undefined}
         title={dragMessageIds.length > 1 ? `Drag to move ${dragMessageIds.length.toLocaleString()} selected messages` : undefined}
         draggable={!readOnly}
         style={{ transform: `translateX(${swipeOffset}px)` }}
@@ -621,14 +740,12 @@ const MessageRow = memo(function MessageRow({
           ) : <span className="message-preview">{message.preview}</span>}
           <span className="message-row-footer">
             <span className="folder-chip">{message.folderPath.split("/").at(-1)}</span>
-            {message.hasCalendarEvent ? (
-              <span className="message-status-chip calendar"><CalendarClock size={11} />Event</span>
-            ) : message.hasPendingFollowUp ? (
-              <span className="message-status-chip follow-up"><BellRing size={11} />Follow up</span>
-            ) : message.hasAiAnalysis ? (
-              <span className="message-status-chip analyzed"><BrainCircuit size={11} />Analyzed</span>
-            ) : null}
-            {message.hasReply && <span className="message-status-chip replied"><Reply size={11} />Replied</span>}
+            {message.hasPendingFollowUp && <span className="message-status-chip follow-up"><BellRing size={11} />Follow up</span>}
+            {(message.hasReply || /^\s*(?:re|fwd?):/i.test(message.subject)) && <span className="message-status-chip replied"><Reply size={11} />Conversation</span>}
+            {message.inboxCategory === "jobs" && <span className="message-status-chip career"><BriefcaseBusiness size={11} />Career</span>}
+            {message.inboxCategory === "primary" && !message.hasPendingFollowUp && !message.hasReply && !/^\s*(?:re|fwd?):/i.test(message.subject) && <span className="message-status-chip person"><CircleUserRound size={11} />Person</span>}
+            {message.hasCalendarEvent && <span className="message-status-chip calendar"><CalendarClock size={11} />Event</span>}
+            {message.hasAiAnalysis && <span className="message-status-chip analyzed"><BrainCircuit size={11} />AI brief</span>}
             {hit?.matchedIn === "attachment" && (
               <span className="attachment-hit"><Paperclip size={12} />{hit.matchedAttachmentName}</span>
             )}

@@ -1,6 +1,7 @@
 using ArchiveMail.Api.Mail;
 using ArchiveMail.Api.Security;
 using ArchiveMail.Api.Imports;
+using ArchiveMail.Api.Gmail;
 using Microsoft.Extensions.Options;
 using Npgsql;
 
@@ -182,21 +183,32 @@ public static class MailEndpoints
         }).WithName("GetAttachmentContent").Produces(StatusCodes.Status200OK).Produces(StatusCodes.Status404NotFound);
 
         api.MapMethods("/messages/{messageId}/state", ["PATCH"], async (
-            string messageId, MessageStatePatch request, HttpContext context, MailRepository mail, CancellationToken token) =>
-        {
-            var session = MailSession(context, write: true);
-            if (session is null) return Results.Forbid();
-            try { return Results.Ok(await mail.UpdateStateAsync(messageId, session.User.Id, request, token)); }
-            catch (Exception error) { return MailError(error); }
-        }).WithName("UpdateMessageState").Produces<LocalMessageStateDto>();
-
-        api.MapPost("/messages/{messageId}/move", async (
-            string messageId, MoveMessageRequest request, HttpContext context, MailRepository mail, CancellationToken token) =>
+            string messageId, MessageStatePatch request, HttpContext context, MailRepository mail,
+            GmailService gmail, CancellationToken token) =>
         {
             var session = MailSession(context, write: true);
             if (session is null) return Results.Forbid();
             try
             {
+                var actions = GmailStateActions(request);
+                var mutation = await gmail.ApplyMailboxActionsAsync([messageId], session.User.Id, actions, token);
+                EnsureGmailMutationSucceeded(mutation);
+                return Results.Ok(await mail.UpdateStateAsync(messageId, session.User.Id, request, token));
+            }
+            catch (Exception error) { return MailError(error); }
+        }).WithName("UpdateMessageState").Produces<LocalMessageStateDto>();
+
+        api.MapPost("/messages/{messageId}/move", async (
+            string messageId, MoveMessageRequest request, HttpContext context, MailRepository mail,
+            GmailService gmail, CancellationToken token) =>
+        {
+            var session = MailSession(context, write: true);
+            if (session is null) return Results.Forbid();
+            try
+            {
+                var mutation = await gmail.ApplyFolderMoveAsync(
+                    [messageId], request.FolderId, session.User.Id, token);
+                EnsureGmailMutationSucceeded(mutation);
                 await mail.MoveMessageAsync(messageId, request.FolderId, session.User.Id, token);
                 return Results.Ok(await mail.GetMessageAsync(messageId, session.User.Id, token));
             }
@@ -204,45 +216,183 @@ public static class MailEndpoints
         }).WithName("MoveMessage").Produces<MessageDetailDto>();
 
         api.MapPost("/messages/bulk-read", async (
-            BulkReadRequest request, HttpContext context, MailRepository mail, CancellationToken token) =>
+            BulkReadRequest request, HttpContext context, MailRepository mail, GmailService gmail,
+            CancellationToken token) =>
         {
             var session = MailSession(context, write: true);
             if (session is null) return Results.Forbid();
-            try { return Results.Ok(await mail.BulkReadAsync(request.MessageIds, session.User.Id, token)); }
+            try
+            {
+                var mutation = await gmail.ApplyMailboxActionsAsync(
+                    request.MessageIds, session.User.Id, [GmailMailboxAction.Read], token);
+                var eligible = mutation.EligibleLocalMessageIds(request.MessageIds);
+                if (eligible.Length == 0)
+                {
+                    EnsureGmailMutationSucceeded(mutation);
+                    return Results.Ok(new BulkReadResult(0, 0, 0));
+                }
+                var local = await mail.BulkReadAsync(eligible, session.User.Id, token);
+                return Results.Ok(local with { Failed = local.Failed + mutation.FailedMessageIds.Length });
+            }
             catch (Exception error) { return MailError(error); }
         }).WithName("BulkMarkRead").Produces<BulkReadResult>();
 
         api.MapPost("/messages/bulk-move-to-folder", async (
-            BulkMoveFolderRequest request, HttpContext context, MailRepository mail, CancellationToken token) =>
+            BulkMoveFolderRequest request, HttpContext context, MailRepository mail, GmailService gmail,
+            CancellationToken token) =>
         {
             var session = MailSession(context, write: true);
             if (session is null) return Results.Forbid();
-            try { return Results.Ok(await mail.BulkMoveToFolderAsync(request.MessageIds, request.FolderId, session.User.Id, token)); }
+            try
+            {
+                var mutation = await gmail.ApplyFolderMoveAsync(
+                    request.MessageIds, request.FolderId, session.User.Id, token);
+                var eligible = mutation.EligibleLocalMessageIds(request.MessageIds);
+                if (eligible.Length == 0)
+                {
+                    EnsureGmailMutationSucceeded(mutation);
+                    throw new ArgumentException("Choose one or more messages");
+                }
+                var local = await mail.BulkMoveToFolderAsync(
+                    eligible, request.FolderId, session.User.Id, token);
+                return Results.Ok(local with { Failed = local.Failed + mutation.FailedMessageIds.Length });
+            }
             catch (Exception error) { return MailError(error); }
         }).WithName("BulkMoveToFolder").Produces<BulkFolderMoveResult>();
 
-        api.MapPost("/messages/bulk-move", async (BulkMoveRequest request,HttpContext context,MailRepository mail,SenderRuleRepository senderRules,CancellationToken token)=>
+        api.MapPost("/messages/bulk-move", async (
+            BulkMoveRequest request, HttpContext context, MailRepository mail,
+            SenderRuleRepository senderRules, GmailService gmail, CancellationToken token) =>
         {
-            var session=MailSession(context,true);if(session is null)return Results.Forbid();
-            if(request.Destination is not("trash" or "archived" or "spam"))return Results.BadRequest(new{error="Choose a valid destination"});
-            var ids=request.MessageIds.Where(id=>!string.IsNullOrWhiteSpace(id)).Distinct().Take(500).ToArray();if(ids.Length==0)return Results.BadRequest(new{error="Choose one or more messages"});
-            long moved=0,already=0,rules=0;var paths=new HashSet<string>();var destinationIds=new HashSet<string>();
-            foreach(var group in (await Task.WhenAll(ids.Select(id=>mail.GetMessageAsync(id,session.User.Id,token)))).Where(value=>value is not null).Cast<MessageDetailDto>().GroupBy(value=>value.ArchiveId))
+            var session = MailSession(context, true);
+            if (session is null) return Results.Forbid();
+            if (request.Destination is not ("trash" or "archived" or "spam"))
+                return Results.BadRequest(new { error = "Choose a valid destination" });
+            var ids = request.MessageIds.Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal).Take(500).ToArray();
+            if (ids.Length == 0) return Results.BadRequest(new { error = "Choose one or more messages" });
+            try
             {
-                var destination=await EnsureNamedFolder(mail,group.Key,session.User.Id,request.Destination=="archived"?"Archived":request.Destination=="trash"?"Trash":"Spam",token);paths.Add(destination.Path);destinationIds.Add(destination.Id);
-                if(request.Destination=="spam")foreach(var senderGroup in group.GroupBy(value=>value.Sender.Address,StringComparer.OrdinalIgnoreCase))
-                {var message=senderGroup.First();try{var result=await senderRules.CreateAsync(new(message.ArchiveId,"archive","from",message.Sender.Address,"all",null,destination.Id,null,true),session.User.Id,token);moved+=result.MovedMessages;rules+=result.CreatedRules;}catch{/* Unprocessed selected messages are reported below. */}}
-                else{var result=await mail.BulkMoveToFolderAsync(group.Select(value=>value.Id).ToArray(),destination.Id,session.User.Id,token);moved+=result.Moved;already+=result.AlreadyThere;}
+                long moved = 0, already = 0, rules = 0;
+                var paths = new HashSet<string>();
+                var destinationIds = new HashSet<string>();
+                var details = (await Task.WhenAll(ids.Select(id => mail.GetMessageAsync(id, session.User.Id, token))))
+                    .Where(value => value is not null).Cast<MessageDetailDto>();
+                foreach (var group in details.GroupBy(value => value.ArchiveId))
+                {
+                    var destination = await EnsureNamedFolder(
+                        mail, group.Key, session.User.Id,
+                        request.Destination == "archived" ? "Archived" : request.Destination == "trash" ? "Trash" : "Spam",
+                        token);
+                    paths.Add(destination.Path);
+                    destinationIds.Add(destination.Id);
+                    if (request.Destination == "spam")
+                    {
+                        foreach (var senderGroup in group.GroupBy(value => value.Sender.Address, StringComparer.OrdinalIgnoreCase))
+                        {
+                            var selectedSenderIds = senderGroup.Select(value => value.Id).ToArray();
+                            var mutation = await gmail.ApplySenderSpamAsync(selectedSenderIds, session.User.Id, token);
+                            if (mutation.FailedMessageIds.Length > 0)
+                            {
+                                var fallback = await MoveMessagesInBatches(
+                                    mail,
+                                    mutation.SyncedMessageIds.Concat(mutation.EligibleLocalMessageIds(selectedSenderIds)),
+                                    destination.Id, session.User.Id, token);
+                                moved += fallback.Moved;
+                                already += fallback.AlreadyThere;
+                                continue;
+                            }
+                            var message = senderGroup.First();
+                            try
+                            {
+                                var result = await senderRules.CreateAsync(new(
+                                    message.ArchiveId, "archive", "from", message.Sender.Address,
+                                    "inbox", null, destination.Id, null, true), session.User.Id, token);
+                                moved += result.MovedMessages;
+                                rules += result.CreatedRules;
+                            }
+                            catch
+                            {
+                                // Google may already have accepted this idempotent mutation. Keep
+                                // every remotely changed message consistent locally even if sender
+                                // rule creation itself loses a database race.
+                                var fallback = await MoveMessagesInBatches(
+                                    mail,
+                                    mutation.SyncedMessageIds.Concat(mutation.EligibleLocalMessageIds(selectedSenderIds)),
+                                    destination.Id, session.User.Id, token);
+                                moved += fallback.Moved;
+                                already += fallback.AlreadyThere;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var selectedIds = group.Select(value => value.Id).ToArray();
+                        var action = GmailBulkMoveAction(request.Destination);
+                        var mutation = action is not null
+                            ? await gmail.ApplyMailboxActionsAsync(
+                                selectedIds, session.User.Id, [action.Value], token)
+                            : new GmailMailboxMutationResult([], [], []);
+                        var eligible = mutation.EligibleLocalMessageIds(selectedIds);
+                        if (eligible.Length == 0) continue;
+                        var result = await mail.BulkMoveToFolderAsync(
+                            eligible, destination.Id, session.User.Id, token);
+                        moved += result.Moved;
+                        already += result.AlreadyThere;
+                    }
+                }
+                var processed = (await mail.GetMessageSummariesAsync(ids, session.User.Id, token))
+                    .Where(message => destinationIds.Contains(message.FolderId)).Select(message => message.Id).ToArray();
+                var failed = ids.Length - processed.Length;
+                return Results.Ok(new BulkMoveResult(
+                    request.Destination, paths.ToArray(), moved, already, failed, rules, processed));
             }
-            var processed=(await mail.GetMessageSummariesAsync(ids,session.User.Id,token)).Where(message=>destinationIds.Contains(message.FolderId)).Select(message=>message.Id).ToArray();
-            var failed=ids.Length-processed.Length;return Results.Ok(new BulkMoveResult(request.Destination,paths.ToArray(),moved,already,failed,rules,processed));
+            catch (Exception error) { return MailError(error); }
         }).WithName("BulkMoveMessages");
 
         api.MapPost("/messages/{messageId}/sender-folder",async(string messageId,MoveMessageRequest request,HttpContext context,MailRepository mail,SenderRuleRepository rules,CancellationToken token)=>
         {var session=MailSession(context,true);if(session is null)return Results.Forbid();var message=await mail.GetMessageAsync(messageId,session.User.Id,token);if(message is null)return Results.NotFound(new{error="Message not found"});try{var result=await rules.CreateAsync(new(message.ArchiveId,"archive","from",message.Sender.Address,"all",null,request.FolderId,null,true),session.User.Id,token);var folder=(await mail.ListFoldersAsync(message.ArchiveId,session.User.Id,token)).Single(value=>value.Id==request.FolderId);return Results.Ok(new SenderFolderRuleResult(message.Sender.Address,folder.Id,folder.Path,result.MovedMessages,(await mail.GetMessageAsync(messageId,session.User.Id,token))!));}catch(Exception error){return MailError(error);}}).WithName("MoveSenderMessages");
 
-        api.MapPost("/messages/{messageId}/spam-sender",async(string messageId,HttpContext context,MailRepository mail,SenderRuleRepository rules,CancellationToken token)=>
-        {var session=MailSession(context,true);if(session is null)return Results.Forbid();var message=await mail.GetMessageAsync(messageId,session.User.Id,token);if(message is null)return Results.NotFound(new{error="Message not found"});try{var folder=await EnsureNamedFolder(mail,message.ArchiveId,session.User.Id,"Spam",token);var result=await rules.CreateAsync(new(message.ArchiveId,"archive","from",message.Sender.Address,"all",null,folder.Id,null,true),session.User.Id,token);return Results.Ok(new SenderSpamRuleResult(message.Sender.Address,folder.Id,folder.Path,result.MovedMessages,(await mail.GetMessageAsync(messageId,session.User.Id,token))!));}catch(Exception error){return MailError(error);}}).WithName("MarkSenderSpam");
+        api.MapPost("/messages/{messageId}/spam-sender", async (
+            string messageId, HttpContext context, MailRepository mail, SenderRuleRepository rules,
+            GmailService gmail, CancellationToken token) =>
+        {
+            var session = MailSession(context, true);
+            if (session is null) return Results.Forbid();
+            var message = await mail.GetMessageAsync(messageId, session.User.Id, token);
+            if (message is null) return Results.NotFound(new { error = "Message not found" });
+            try
+            {
+                var folder = await EnsureNamedFolder(mail, message.ArchiveId, session.User.Id, "Spam", token);
+                var mutation = await gmail.ApplySenderSpamAsync([messageId], session.User.Id, token);
+                if (mutation.FailedMessageIds.Length > 0)
+                {
+                    await MoveMessagesInBatches(
+                        mail,
+                        mutation.SyncedMessageIds.Concat(mutation.EligibleLocalMessageIds([messageId])),
+                        folder.Id, session.User.Id, token);
+                    EnsureGmailMutationSucceeded(mutation);
+                }
+                try
+                {
+                    var result = await rules.CreateAsync(new(
+                        message.ArchiveId, "archive", "from", message.Sender.Address,
+                        "inbox", null, folder.Id, null, true), session.User.Id, token);
+                    return Results.Ok(new SenderSpamRuleResult(
+                        message.Sender.Address, folder.Id, folder.Path, result.MovedMessages,
+                        (await mail.GetMessageAsync(messageId, session.User.Id, token))!));
+                }
+                catch
+                {
+                    await MoveMessagesInBatches(
+                        mail,
+                        mutation.SyncedMessageIds.Concat(mutation.EligibleLocalMessageIds([messageId])),
+                        folder.Id, session.User.Id, token);
+                    throw;
+                }
+            }
+            catch (Exception error) { return MailError(error); }
+        }).WithName("MarkSenderSpam");
 
         return app;
     }
@@ -258,11 +408,29 @@ public static class MailEndpoints
         };
     }
 
+    internal static GmailMailboxAction[] GmailStateActions(MessageStatePatch request)
+    {
+        var actions = new List<GmailMailboxAction>(2);
+        if (request.IsRead is not null)
+            actions.Add(request.IsRead.Value ? GmailMailboxAction.Read : GmailMailboxAction.Unread);
+        if (request.IsStarred is not null)
+            actions.Add(request.IsStarred.Value ? GmailMailboxAction.Star : GmailMailboxAction.Unstar);
+        return actions.ToArray();
+    }
+
+    internal static GmailMailboxAction? GmailBulkMoveAction(string destination) => destination switch
+    {
+        "archived" => GmailMailboxAction.Archive,
+        "trash" => GmailMailboxAction.Trash,
+        "spam" => GmailMailboxAction.Spam,
+        _ => null
+    };
+
     private static MessageFilters Filters(IQueryCollection query) => new(
         Text(query, "archiveId"), Text(query, "folderId"), Boolean(query, "isRead"),
         Boolean(query, "starred"), Text(query, "inboxCategory"), Text(query, "from"), Text(query, "to"),
         Text(query, "after"), Text(query, "before"), Boolean(query, "hasAttachment"),
-        Text(query, "cursor"), Integer(query, "limit"));
+        Text(query, "cursor"), Integer(query, "limit"), Boolean(query, "focus"), Boolean(query, "inboxOnly"));
 
     private static string? Text(IQueryCollection query, string key)
     {
@@ -287,6 +455,8 @@ public static class MailEndpoints
     {
         MailNotFoundException => Results.NotFound(new { error = error.Message }),
         MailConflictException => Results.Conflict(new { error = error.Message }),
+        GmailMailboxActionException => Results.Json(
+            new { error = error.Message }, statusCode: StatusCodes.Status502BadGateway),
         ArgumentException => Results.BadRequest(new { error = error.Message }),
 
         // A combine keeps the database saturated for as long as it runs, and restarting the API
@@ -310,6 +480,30 @@ public static class MailEndpoints
 
     private static async Task<FolderDto> EnsureNamedFolder(MailRepository mail,string archive,string owner,string name,CancellationToken token)
     {var existing=(await mail.ListFoldersAsync(archive,owner,token)).FirstOrDefault(value=>value.ParentId is null&&value.Name.Equals(name,StringComparison.OrdinalIgnoreCase));return existing??await mail.CreateFolderAsync(archive,owner,name,null,token);}
+
+    private static void EnsureGmailMutationSucceeded(GmailMailboxMutationResult mutation)
+    {
+        if (mutation.FailedMessageIds.Length == 0) return;
+        throw new GmailMailboxActionException(
+            mutation.Warnings.FirstOrDefault()
+            ?? "Gmail did not accept the mailbox change. Try again or reconnect the account.");
+    }
+
+    private static async Task<(long Moved, long AlreadyThere)> MoveMessagesInBatches(
+        MailRepository mail, IEnumerable<string> messageIds, string folderId, string owner,
+        CancellationToken token)
+    {
+        long moved = 0, already = 0;
+        var ids = messageIds.Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal).Take(5_000).ToArray();
+        foreach (var batch in ids.Chunk(500))
+        {
+            var result = await mail.BulkMoveToFolderAsync(batch, folderId, owner, token);
+            moved += result.Moved;
+            already += result.AlreadyThere;
+        }
+        return (moved, already);
+    }
 
     private static string SafeContentType(string declared, string filename)
     {

@@ -90,6 +90,7 @@ export interface LocalMessageState {
 
 export const INBOX_CATEGORIES = [
   "primary",
+  "jobs",
   "promotions",
   "social",
   "updates",
@@ -101,12 +102,15 @@ export type InboxCategory = typeof INBOX_CATEGORIES[number];
 
 export interface InboxCategoryCounts {
   primary: number;
+  jobs: number;
   promotions: number;
   social: number;
   updates: number;
   bills: number;
   medical: number;
   mail_tracking: number;
+  /** Exact size of the current Focus view when requested. */
+  focus?: number;
 }
 
 export interface InboxTabDefinition {
@@ -149,13 +153,14 @@ export interface ShipmentSummary {
 }
 
 export const DEFAULT_INBOX_TABS: ReadonlyArray<InboxTabDefinition> = [
-  { id: "primary", label: "Primary", description: "Personal and important conversations.", enabled: true, position: 0, color: "#1a73e8", keywords: [], senderDomains: [], keywordOnly: false },
-  { id: "promotions", label: "Promotions", description: "Deals, offers, newsletters, and marketing.", enabled: true, position: 1, color: "#188038", keywords: [], senderDomains: [], keywordOnly: false },
-  { id: "social", label: "Social", description: "Social network activity and community updates.", enabled: true, position: 2, color: "#9334e6", keywords: [], senderDomains: [], keywordOnly: false },
-  { id: "updates", label: "Updates", description: "Automated confirmations, alerts, and account updates.", enabled: true, position: 3, color: "#b06000", keywords: [], senderDomains: [], keywordOnly: false },
-  { id: "bills", label: "Bills", description: "Invoices, statements, balances, and payment notices.", enabled: true, position: 4, color: "#137333", keywords: [], senderDomains: [], keywordOnly: false },
-  { id: "medical", label: "Medical", description: "Health care, pharmacy, and appointment messages.", enabled: true, position: 5, color: "#c5221f", keywords: [], senderDomains: [], keywordOnly: false },
-  { id: "mail_tracking", label: "Mail/Tracking", description: "Shipping, delivery, and package tracking.", enabled: true, position: 6, color: "#1967d2", keywords: [], senderDomains: [], keywordOnly: false }
+  { id: "primary", label: "People", description: "Personal conversations and messages that deserve a look.", enabled: true, position: 0, color: "#176747", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "jobs", label: "Career", description: "Recruiters, applications, interviews, and useful job alerts.", enabled: true, position: 1, color: "#315f99", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "updates", label: "Updates", description: "Confirmations, security alerts, and account activity.", enabled: true, position: 2, color: "#9a5b12", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "bills", label: "Money", description: "Bills, invoices, statements, balances, and payment notices.", enabled: true, position: 3, color: "#137333", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "medical", label: "Health", description: "Health care, pharmacy, results, and appointment messages.", enabled: true, position: 4, color: "#b63d46", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "mail_tracking", label: "Deliveries", description: "Shipping, delivery, and package tracking.", enabled: true, position: 5, color: "#1967d2", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "promotions", label: "Newsletters", description: "Newsletters, deals, offers, and marketing set aside for later.", enabled: true, position: 6, color: "#6f7457", keywords: [], senderDomains: [], keywordOnly: false },
+  { id: "social", label: "Social", description: "Social network and community activity set aside for later.", enabled: true, position: 7, color: "#76558e", keywords: [], senderDomains: [], keywordOnly: false }
 ];
 
 export interface MessageSummary {
@@ -1199,9 +1204,13 @@ export interface CursorPage<T> {
 export interface SearchFilters {
   archiveId?: string;
   folderId?: string;
+  /** Scope to every folder whose leaf name is Inbox, including combined accounts. */
+  inboxOnly?: boolean;
   isRead?: boolean;
   starred?: boolean;
   inboxCategory?: InboxCategory;
+  /** The daily safety feed: important recent mail, excluding known junk and low-value bulk mail. */
+  focus?: boolean;
   from?: string;
   to?: string;
   after?: string;

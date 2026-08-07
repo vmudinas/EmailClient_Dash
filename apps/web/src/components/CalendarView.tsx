@@ -74,6 +74,7 @@ interface DaySummary {
 
 export function CalendarView({ api, connections, active = true, onAddGoogle, onReauthorize, onError }: CalendarViewProps) {
   const mobile = useMediaQuery("(max-width: 800px)");
+  const tablet = useMediaQuery("(min-width: 801px) and (max-width: 1120px)");
   const [date, setDate] = useState(todayIso());
   const [month, setMonth] = useState(todayIso().slice(0, 7));
   const [sources, setSources] = useState<CalendarSource[]>([]);
@@ -89,7 +90,14 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
   const [eventBusy, setEventBusy] = useState(false);
   const [monthSummary, setMonthSummary] = useState<Map<string, DaySummary>>(new Map());
   const [mobilePanel, setMobilePanel] = useState<"calendars" | "todos" | null>(null);
+  const [tabletTodosOpen, setTabletTodosOpen] = useState(false);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const sourcesRequestId = useRef(0);
+  const eventsRequestId = useRef(0);
+  const todosRequestId = useRef(0);
+  const monthSummaryRequestId = useRef(0);
+  const currentDate = useRef(date);
+  currentDate.current = date;
 
   const selectedSources = useMemo(
     () => sources.filter((source) => selectedSourceIds.has(source.id)),
@@ -100,24 +108,29 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
   const writableSource = selectedSources.find((source) => !source.readOnly) ?? null;
 
   const loadSources = useCallback(async () => {
+    const requestId = ++sourcesRequestId.current;
     setSourcesLoading(true);
     setSourcesError(null);
     try {
       const loaded = await api.listCalendarSources();
+      if (requestId !== sourcesRequestId.current) return;
       setSources(loaded);
       setSelectedSourceIds((current) => initialSourceSelection(loaded, current));
     } catch (error) {
+      if (requestId !== sourcesRequestId.current) return;
       const message = errorText(error);
       setSourcesError(message);
       onError(message);
     } finally {
-      setSourcesLoading(false);
+      if (requestId === sourcesRequestId.current) setSourcesLoading(false);
     }
   }, [api, onError]);
 
   const loadEvents = useCallback(async () => {
+    const requestId = ++eventsRequestId.current;
     if (selectedSources.length === 0) {
       setEvents([]);
+      setLoadingEvents(false);
       return;
     }
     setLoadingEvents(true);
@@ -133,24 +146,28 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
           calendarColor: source.color
         }));
       }));
+      if (requestId !== eventsRequestId.current) return;
       setEvents(results.flatMap((result) => result.status === "fulfilled" ? result.value : []));
       const failures = results.filter((result) => result.status === "rejected");
       if (failures.length === 1) onError(errorText(failures[0]!.reason));
       else if (failures.length > 1) onError(`${failures.length} selected calendars could not be loaded.`);
     } finally {
-      setLoadingEvents(false);
+      if (requestId === eventsRequestId.current) setLoadingEvents(false);
     }
   }, [api, date, onError, selectedSources]);
 
   const loadTodos = useCallback(async () => {
+    const requestId = ++todosRequestId.current;
     try {
-      setTodos(await api.listTodos(date, date));
+      const loaded = await api.listTodos(date, date);
+      if (requestId === todosRequestId.current) setTodos(loaded);
     } catch (error) {
-      onError(errorText(error));
+      if (requestId === todosRequestId.current) onError(errorText(error));
     }
   }, [api, date, onError]);
 
   const loadMonthSummary = useCallback(async () => {
+    const requestId = ++monthSummaryRequestId.current;
     const grid = monthDays(month);
     const gridStart = grid[0]!.date;
     const gridEnd = grid[grid.length - 1]!.date;
@@ -172,10 +189,11 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
         const results = await Promise.allSettled(
           selectedSources.map((source) => api.listCalendarSourceEvents(source.id, startOfDay, endOfDay))
         );
+        if (requestId !== monthSummaryRequestId.current) return;
         for (const result of results) {
           if (result.status !== "fulfilled") continue;
           for (const event of result.value) {
-            for (const dateIso of eventDates(event)) addEvent(dateIso, event.title);
+            for (const dateIso of eventDates(event, gridStart, gridEnd)) addEvent(dateIso, event.title);
           }
         }
       }
@@ -183,16 +201,34 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
     } catch {
       // Best-effort: the mini month just shows no highlights if this fails.
     }
-    setMonthSummary(summary);
+    if (requestId === monthSummaryRequestId.current) setMonthSummary(summary);
   }, [api, month, selectedSources]);
 
   useEffect(() => {
     if (active) void loadSources();
+    else sourcesRequestId.current += 1;
+    return () => { sourcesRequestId.current += 1; };
   }, [active, loadSources]);
-  useEffect(() => { void loadEvents(); }, [loadEvents]);
-  useEffect(() => { void loadTodos(); }, [loadTodos]);
-  useEffect(() => { void loadMonthSummary(); }, [loadMonthSummary]);
+  useEffect(() => {
+    if (active) void loadEvents();
+    else {
+      eventsRequestId.current += 1;
+      setLoadingEvents(false);
+    }
+    return () => { eventsRequestId.current += 1; };
+  }, [active, loadEvents]);
+  useEffect(() => {
+    if (active) void loadTodos();
+    else todosRequestId.current += 1;
+    return () => { todosRequestId.current += 1; };
+  }, [active, loadTodos]);
+  useEffect(() => {
+    if (active) void loadMonthSummary();
+    else monthSummaryRequestId.current += 1;
+    return () => { monthSummaryRequestId.current += 1; };
+  }, [active, loadMonthSummary]);
   useEffect(() => { setMonth(date.slice(0, 7)); }, [date]);
+  useEffect(() => { if (!tablet) setTabletTodosOpen(false); }, [tablet]);
   useEffect(() => {
     if (sourcesLoading) return;
     window.localStorage.setItem(CALENDAR_SELECTION_KEY, JSON.stringify([...selectedSourceIds]));
@@ -216,9 +252,12 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
   const addTodo = async () => {
     const text = newTodoText.trim();
     if (!text) return;
+    const todoDate = date;
     setTodoBusy(true);
     try {
-      const created = await api.createTodo({ date, text });
+      const created = await api.createTodo({ date: todoDate, text });
+      if (currentDate.current !== todoDate) return;
+      todosRequestId.current += 1;
       setTodos((current) => [...current, created]);
       setNewTodoText("");
     } catch (error) {
@@ -231,6 +270,8 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
   const toggleTodo = async (todo: TodoItem) => {
     try {
       const updated = await api.updateTodo(todo.id, { completed: !todo.completed });
+      if (currentDate.current !== todo.date) return;
+      todosRequestId.current += 1;
       setTodos((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
     } catch (error) {
       onError(errorText(error));
@@ -240,6 +281,8 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
   const removeTodo = async (todo: TodoItem) => {
     try {
       await api.deleteTodo(todo.id);
+      if (currentDate.current !== todo.date) return;
+      todosRequestId.current += 1;
       setTodos((current) => current.filter((entry) => entry.id !== todo.id));
     } catch (error) {
       onError(errorText(error));
@@ -247,6 +290,11 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
   };
 
   const saveEvent = async (input: EventDraft) => {
+    if (!eventRangeIsValid(input)) {
+      onError("Event end must be after its start.");
+      return;
+    }
+    const eventDate = date;
     setEventBusy(true);
     try {
       const payload: CalendarEventInput = {
@@ -260,7 +308,7 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
       if (input.eventId) await api.updateCalendarSourceEvent(input.sourceId, input.eventId, payload);
       else await api.createCalendarSourceEvent(input.sourceId, payload);
       setDraft(null);
-      await loadEvents();
+      if (currentDate.current === eventDate) await loadEvents();
     } catch (error) {
       onError(errorText(error));
     } finally {
@@ -300,7 +348,7 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
   const needsAuthorization = !hasAuthorizedGoogleCalendar && missingCalendarConnections.length > 0;
 
   return (
-    <div className={`calendar-workspace mobile-calendar-panel-${mobilePanel ?? "none"}`}>
+    <div className={`calendar-workspace mobile-calendar-panel-${mobilePanel ?? "none"}${tabletTodosOpen ? " tablet-calendar-todos-open" : ""}`}>
       <aside className="calendar-sidebar">
         <div className="calendar-sidebar-heading">
           <div><CalendarDays size={17} /><strong>Calendars</strong></div>
@@ -374,6 +422,16 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
           <button className="primary-button compact" onClick={() => openNewEvent()} disabled={!writableSource} title={writableSource ? "Create event" : "Select a writable calendar"}>
             <Plus size={16} /> New event
           </button>
+          {tablet && (
+            <button
+              className="secondary-button compact calendar-tablet-todo-toggle"
+              onClick={() => setTabletTodosOpen((current) => !current)}
+              aria-controls="calendar-todo-panel"
+              aria-expanded={tabletTodosOpen}
+            >
+              <ListTodo size={16} /> Tasks {todos.filter((todo) => !todo.completed).length > 0 && <span>{todos.filter((todo) => !todo.completed).length}</span>}
+            </button>
+          )}
           <div className="mobile-calendar-tools mobile-only">
             <button className="icon-button" onClick={() => setMobilePanel("calendars")} aria-label="Choose calendars and date"><ListFilter size={18} /></button>
             <button className="icon-button" onClick={() => setMobilePanel("todos")} aria-label="Open to-do list">
@@ -485,9 +543,10 @@ export function CalendarView({ api, connections, active = true, onAddGoogle, onR
         </section>}
       </section>
 
-      <aside className="todo-panel">
+      <aside className="todo-panel" id="calendar-todo-panel" aria-label={`To-do list for ${formatDayHeading(date)}`}>
         <div className="todo-panel-heading">
           <h3>To-do <span className="gmail-count">{todos.filter((todo) => !todo.completed).length}</span></h3>
+          {tablet && <button className="icon-button calendar-tablet-todo-close" onClick={() => setTabletTodosOpen(false)} aria-label="Close to-do list"><X size={17} /></button>}
           <button className="icon-button mobile-only" onClick={() => setMobilePanel(null)} aria-label="Close to-do list"><X size={17} /></button>
         </div>
         <p className="todo-hint">Local only — not synced to Gmail or Calendar.</p>
@@ -609,21 +668,43 @@ function ariaLabelForDay(dateIso: string, summary: DaySummary | undefined): stri
   return parts.length > 0 ? `${label}, ${parts.join(", ")}` : label;
 }
 
-function eventDates(event: CalendarEvent): string[] {
-  if (!event.allDay) return [dateToIso(new Date(event.startAt))];
-  const start = event.startAt.slice(0, 10);
-  const end = event.endAt.slice(0, 10);
+function eventDates(event: CalendarEvent, rangeStart: string, rangeEnd: string): string[] {
+  let start: string;
+  let inclusiveEnd: string;
+  if (event.allDay) {
+    start = event.startAt.slice(0, 10);
+    const exclusiveEnd = event.endAt.slice(0, 10);
+    if (!validDateKey(start) || !validDateKey(exclusiveEnd)) return [];
+    // Google Calendar and iCalendar both represent an all-day DTEND as exclusive.
+    // A one-day event from Monday to Tuesday therefore belongs to Monday only.
+    inclusiveEnd = exclusiveEnd > start ? addDays(exclusiveEnd, -1) : start;
+  } else {
+    const startInstant = new Date(event.startAt);
+    const endInstant = new Date(event.endAt);
+    if (Number.isNaN(startInstant.getTime()) || Number.isNaN(endInstant.getTime())) return [];
+    start = dateToIso(startInstant);
+    // Event ends are exclusive here too. Subtracting one millisecond keeps an event that
+    // ends exactly at midnight off the following day while preserving every day it spans.
+    const lastInstant = endInstant.getTime() > startInstant.getTime()
+      ? new Date(endInstant.getTime() - 1)
+      : startInstant;
+    inclusiveEnd = dateToIso(lastInstant);
+  }
+
+  let cursor = start < rangeStart ? rangeStart : start;
+  const end = inclusiveEnd > rangeEnd ? rangeEnd : inclusiveEnd;
+  if (cursor > end) return [];
   const dates: string[] = [];
-  let cursor = localDate(start);
-  const endDate = localDate(end);
-  let guard = 0;
-  while (cursor.getTime() <= endDate.getTime() && guard < 62) {
-    dates.push(dateToIso(cursor));
-    cursor = new Date(cursor);
-    cursor.setDate(cursor.getDate() + 1);
-    guard += 1;
+  while (cursor <= end) {
+    dates.push(cursor);
+    cursor = addDays(cursor, 1);
   }
   return dates;
+}
+
+function validDateKey(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  return dateToIso(localDate(value)) === value;
 }
 
 function EventDialog({
@@ -643,7 +724,9 @@ function EventDialog({
   onDelete?: () => void;
   onSave(): void;
 }) {
-  const ready = Boolean(draft.title.trim() && draft.startAt && draft.endAt);
+  const hasRequiredFields = Boolean(draft.title.trim() && draft.startAt && draft.endAt);
+  const validRange = eventRangeIsValid(draft);
+  const ready = hasRequiredFields && validRange;
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onClose(); }}>
       <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="event-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -680,7 +763,7 @@ function EventDialog({
             </div>
           )}
           {draft.readOnly && <div className="settings-warning neutral"><CircleAlert size={16} /><span>This calendar is read only.</span></div>}
-          <form className="settings-form" onSubmit={(event) => { event.preventDefault(); if (!draft.readOnly) onSave(); }}>
+          <form className="settings-form" onSubmit={(event) => { event.preventDefault(); if (!draft.readOnly && ready) onSave(); }}>
             {sources.length > 1 && (
               <label>Calendar
                 <select value={draft.sourceId} onChange={(event) => onChange({ ...draft, sourceId: event.target.value })} disabled={busy || Boolean(draft.eventId)}>
@@ -695,11 +778,14 @@ function EventDialog({
                 checked={draft.allDay}
                 onChange={(event) => {
                   const allDay = event.target.checked;
+                  const startAt = allDay ? toDateValue(draft.startAt) : toDatetimeLocalValue(draft.startAt);
+                  let endAt = allDay ? toDateValue(draft.endAt) : toDatetimeLocalValue(draft.endAt);
+                  if (allDay && endAt <= startAt) endAt = addDays(startAt, 1);
                   onChange({
                     ...draft,
                     allDay,
-                    startAt: allDay ? toDateValue(draft.startAt) : toDatetimeLocalValue(draft.startAt),
-                    endAt: allDay ? toDateValue(draft.endAt) : toDatetimeLocalValue(draft.endAt)
+                    startAt,
+                    endAt
                   });
                 }}
                 disabled={busy || draft.readOnly}
@@ -707,7 +793,7 @@ function EventDialog({
               <span>All-day event</span>
             </label>
             <label>Starts<input type={draft.allDay ? "date" : "datetime-local"} value={draft.startAt} onChange={(event) => onChange({ ...draft, startAt: event.target.value })} disabled={busy || draft.readOnly} /></label>
-            <label>Ends<input type={draft.allDay ? "date" : "datetime-local"} value={draft.endAt} onChange={(event) => onChange({ ...draft, endAt: event.target.value })} disabled={busy || draft.readOnly} /></label>
+            <label>Ends<input type={draft.allDay ? "date" : "datetime-local"} value={draft.endAt} min={draft.startAt || undefined} aria-invalid={hasRequiredFields && !validRange} onChange={(event) => onChange({ ...draft, endAt: event.target.value })} disabled={busy || draft.readOnly} /></label>
             <label>Location<input value={draft.location} maxLength={500} onChange={(event) => onChange({ ...draft, location: event.target.value })} disabled={busy || draft.readOnly} /></label>
             <label>Description<textarea value={draft.description} maxLength={10_000} onChange={(event) => onChange({ ...draft, description: event.target.value })} disabled={busy || draft.readOnly} /></label>
           </form>
@@ -722,10 +808,21 @@ function EventDialog({
             </button>
           )}
         </footer>
-        {!draft.readOnly && !ready && <div className="import-error" role="alert"><CircleAlert size={18} /><div><span>Add a title and valid dates.</span></div></div>}
+        {!draft.readOnly && !ready && <div className="import-error" role="alert"><CircleAlert size={18} /><div><span>{hasRequiredFields ? "Event end must be after its start." : "Add a title and valid dates."}</span></div></div>}
       </section>
     </div>
   );
+}
+
+function eventRangeIsValid(draft: Pick<EventDraft, "allDay" | "startAt" | "endAt">): boolean {
+  if (!draft.startAt || !draft.endAt) return false;
+  const start = draft.allDay
+    ? new Date(`${draft.startAt.slice(0, 10)}T00:00:00`).getTime()
+    : new Date(draft.startAt).getTime();
+  const end = draft.allDay
+    ? new Date(`${draft.endAt.slice(0, 10)}T00:00:00`).getTime()
+    : new Date(draft.endAt).getTime();
+  return Number.isFinite(start) && Number.isFinite(end) && end > start;
 }
 
 function attendeeStatusIcon(status: CalendarEventAttendee["responseStatus"]) {

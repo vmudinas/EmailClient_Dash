@@ -15,6 +15,7 @@ import {
   Copy,
   Building2,
   CalendarDays,
+  CheckSquare2,
   FileEdit,
   Filter,
   FolderOpen,
@@ -67,33 +68,23 @@ import type {
   MessageDetail,
   MessageFilingSuggestion,
   MessageSummary,
-  NewsHeadline,
   SearchFilters,
   SearchHit,
-  StockQuote,
   UserScreenId
 } from "@email-client/shared";
 import { DEFAULT_INBOX_TABS, isDuplicateScanActive, userCanAccessScreen } from "@email-client/shared";
 import { Sidebar } from "./components/Sidebar.js";
 import {
   MessageList,
+  type InboxView,
   type MessageListItem
 } from "./components/MessageList.js";
 import {
   ALL_MAIL_SEARCH_SCOPE,
   EMPTY_FILTERS,
-  CombineArchiveDialog,
-  CombineMailboxDialog,
-  CreateMailboxDialog,
-  DiagnosticsDialog,
   FilterPanel,
-  ImportDialog,
-  GmailDialog,
-  MailboxDropDialog,
-  MoveGmailConnectionDialog,
-  RenameDialog,
   type UiSearchFilters
-} from "./components/Dialogs.js";
+} from "./components/SearchFilterPanel.js";
 import { ApiClient, resolveRuntimeConfig, type UploadProgress } from "./lib/api.js";
 import {
   clearPersistedScope,
@@ -118,8 +109,6 @@ import { LoginScreen } from "./components/LoginScreen.js";
 import { TenantInvitationScreen } from "./components/TenantInvitationScreen.js";
 import type { ReviewAction } from "./components/MessageActionDialog.js";
 import type { DuplicateMoveRequest } from "./components/DuplicateGroupsDialog.js";
-import { StockTickerBar } from "./components/StockTickerBar.js";
-import { NewsTickerBar } from "./components/NewsTickerBar.js";
 import { displayAddress, formatDateTime } from "./lib/format.js";
 
 const GMAIL_OAUTH_RESULT_KEY = "archive-mail-gmail-oauth-result";
@@ -131,8 +120,8 @@ interface GmailOAuthResult {
 }
 
 type MobileView = "folders" | "messages" | "reader";
-type AppView = "mail" | "calendar" | "properties";
-type SmartMailbox = "starred";
+type AppView = "mail" | "calendar" | "tasks" | "properties";
+type SmartMailbox = "focus" | "inbox" | "starred";
 type RenameTarget =
   | { kind: "archive"; id: string; name: string }
   | { kind: "mailbox"; id: string; archiveId: string; name: string };
@@ -140,6 +129,7 @@ type RenameTarget =
 const SESSION_STORAGE_KEY = "archive-mail-session-token";
 const EMPTY_INBOX_CATEGORY_COUNTS: InboxCategoryCounts = {
   primary: 0,
+  jobs: 0,
   promotions: 0,
   social: 0,
   updates: 0,
@@ -166,13 +156,29 @@ const BULK_MOVE_LABELS: Record<BulkMoveDestination, { verb: string; noun: string
 
 const MAX_BULK_SELECTION = 500;
 const INITIAL_MAIL_WINDOW_DAYS = 5;
+const INITIAL_FOCUS_WINDOW_DAYS = 2;
 const INITIAL_MESSAGE_PAGE_SIZE = 50;
 const BACKGROUND_MESSAGE_PAGE_SIZE = 250;
 const HISTORY_MESSAGE_PAGE_SIZE = 100;
+const MAX_AUTOMATIC_RECENT_MESSAGES = 500;
 const CalendarView = lazy(async () => {
   const module = await import("./components/CalendarView.js");
   return { default: module.CalendarView };
 });
+const TasksView = lazy(async () => {
+  const module = await import("./components/TasksView.js");
+  return { default: module.TasksView };
+});
+const loadDialogs = () => import("./components/Dialogs.js");
+const ImportDialog = lazy(async () => ({ default: (await loadDialogs()).ImportDialog }));
+const RenameDialog = lazy(async () => ({ default: (await loadDialogs()).RenameDialog }));
+const CreateMailboxDialog = lazy(async () => ({ default: (await loadDialogs()).CreateMailboxDialog }));
+const CombineArchiveDialog = lazy(async () => ({ default: (await loadDialogs()).CombineArchiveDialog }));
+const CombineMailboxDialog = lazy(async () => ({ default: (await loadDialogs()).CombineMailboxDialog }));
+const MailboxDropDialog = lazy(async () => ({ default: (await loadDialogs()).MailboxDropDialog }));
+const GmailDialog = lazy(async () => ({ default: (await loadDialogs()).GmailDialog }));
+const MoveGmailConnectionDialog = lazy(async () => ({ default: (await loadDialogs()).MoveGmailConnectionDialog }));
+const DiagnosticsDialog = lazy(async () => ({ default: (await loadDialogs()).DiagnosticsDialog }));
 const PropertyManagementView = lazy(async () => {
   const module = await import("./components/PropertyManagementView.js");
   return { default: module.PropertyManagementView };
@@ -198,6 +204,7 @@ const MessageReader = lazy(async () => ({ default: (await loadMessageReader()).M
 
 function viewForPath(pathname = window.location.pathname): AppView {
   if (pathname.startsWith("/properties") || pathname.startsWith("/portal")) return "properties";
+  if (pathname.startsWith("/tasks")) return "tasks";
   if (pathname.startsWith("/calendar")) return "calendar";
   return "mail";
 }
@@ -208,21 +215,12 @@ export function App() {
   // Persistence scope. Every stored key is namespaced by this so one account never reads
   // another's state on a shared machine.
   const sessionUserId = session?.user.id;
-  const [stockQuotes, setStockQuotes] = useState<StockQuote[]>([]);
-  const [stockQuotesLoading, setStockQuotesLoading] = useState(false);
-  const [stockQuotesError, setStockQuotesError] = useState("");
-  const [newsHeadlines, setNewsHeadlines] = useState<NewsHeadline[]>([]);
-  const [newsHeadlinesLoading, setNewsHeadlinesLoading] = useState(false);
-  const [newsHeadlinesError, setNewsHeadlinesError] = useState("");
-  const [newsSecondsPerHeadline, setNewsSecondsPerHeadline] = useState(8);
-
   useEffect(() => {
     const preloadTimer = window.setTimeout(() => {
       void loadMessageReader();
     }, 500);
     return () => window.clearTimeout(preloadTimer);
   }, []);
-  const [stockSecondsPerSymbol, setStockSecondsPerSymbol] = useState(8);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [archives, setArchives] = useState<ArchiveModel[]>([]);
@@ -246,9 +244,10 @@ export function App() {
     // lastLocation/setLastLocation are excluded: writing here would re-trigger this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionUserId, selectedArchiveId, selectedFolderId]);
-  const [selectedSmartMailbox, setSelectedSmartMailbox] = useState<SmartMailbox | null>(null);
+  const [selectedSmartMailbox, setSelectedSmartMailbox] = useState<SmartMailbox | null>("focus");
   const [inboxCategory, setInboxCategory] = useState<InboxCategory>("primary");
   const [inboxCategoryCounts, setInboxCategoryCounts] = useState<InboxCategoryCounts>(EMPTY_INBOX_CATEGORY_COUNTS);
+  const [dailyFocusCount, setDailyFocusCount] = useState<number | null>(null);
   const [inboxTabSettings, setInboxTabSettings] = useState<InboxTabSettings>(() => defaultInboxTabSettings());
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<string>>(new Set());
@@ -362,6 +361,8 @@ export function App() {
   const gmailStatusRef = useRef(new Map<string, GmailConnection["status"]>());
   const messageRequestRef = useRef(0);
   const messageListRequestRef = useRef(0);
+  const mailVisibilityRef = useRef({ selectedSmartMailbox, showReadMessages });
+  mailVisibilityRef.current = { selectedSmartMailbox, showReadMessages };
 
   const readOnly = !session;
   const isAdmin = session?.role === "admin";
@@ -396,23 +397,26 @@ export function App() {
       navigateView("properties", true);
       return;
     }
-    if (viewMode === "calendar" && !canAccessScreen("calendar")) navigateView("mail", true);
+    if ((viewMode === "calendar" || viewMode === "tasks") && !canAccessScreen("calendar")) navigateView("mail", true);
     if (viewMode === "properties" && !canAccessScreen("properties")) navigateView("mail", true);
   }, [session, viewMode]);
   const selectedArchive = archives.find((archive) => archive.id === selectedArchiveId) ?? null;
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
+  const unifiedInbox = selectedSmartMailbox === "focus" || selectedSmartMailbox === "inbox";
   const searchFolderId = filters.folderId === ALL_MAIL_SEARCH_SCOPE
     ? null
-    : filters.folderId || selectedFolderId;
+    : filters.folderId || (unifiedInbox ? null : selectedFolderId);
   const visibleFolderId = searchFolderId;
   const visibleFolder = folders.find((folder) => folder.id === visibleFolderId) ?? null;
   const searchScopeLabel = filters.folderId === ALL_MAIL_SEARCH_SCOPE
     ? "Entire archive"
     : filters.folderId
       ? folders.find((folder) => folder.id === filters.folderId)?.path ?? "Selected mailbox"
-      : selectedFolder?.path ?? "All mail";
-  const showInboxCategories = visibleFolder?.name.trim().toLowerCase() === "inbox"
-    && selectedSmartMailbox === null;
+      : unifiedInbox
+        ? "Inbox"
+        : selectedFolder?.path ?? "All mail";
+  const showInboxCategories = unifiedInbox
+    || (visibleFolder?.name.trim().toLowerCase() === "inbox" && selectedSmartMailbox !== "starred");
   const activeFilterCount = Object.values(filters).filter((value) => value !== "" && value !== undefined).length;
 
   const showError = useCallback((value: string) => {
@@ -430,40 +434,6 @@ export function App() {
     setMessage((current) => current?.id === messageId ? { ...current, ...patch } : current);
   }, []);
 
-  const refreshStockQuotes = useCallback(async (client: ApiClient) => {
-    setStockQuotesLoading(true);
-    setStockQuotesError("");
-    try {
-      const [quotes, displaySettings] = await Promise.all([
-        client.stockQuotes(),
-        client.stockDisplaySettings().catch(() => null)
-      ]);
-      setStockQuotes(quotes);
-      if (displaySettings) setStockSecondsPerSymbol(displaySettings.secondsPerSymbol);
-    } catch (error) {
-      setStockQuotesError(error instanceof Error ? error.message : "Market prices are unavailable");
-    } finally {
-      setStockQuotesLoading(false);
-    }
-  }, []);
-
-  const refreshNewsHeadlines = useCallback(async (client: ApiClient) => {
-    setNewsHeadlinesLoading(true);
-    setNewsHeadlinesError("");
-    try {
-      const [headlines, displaySettings] = await Promise.all([
-        client.newsHeadlines(),
-        client.newsDisplaySettings().catch(() => null)
-      ]);
-      setNewsHeadlines(headlines);
-      if (displaySettings) setNewsSecondsPerHeadline(displaySettings.secondsPerHeadline);
-    } catch (error) {
-      setNewsHeadlinesError(error instanceof Error ? error.message : "Headlines are unavailable");
-    } finally {
-      setNewsHeadlinesLoading(false);
-    }
-  }, []);
-
   const loadAuthenticatedData = useCallback(async (
     client: ApiClient,
     accountRole: AuthSessionInfo["user"]["role"]
@@ -476,8 +446,6 @@ export function App() {
       return;
     }
     const loadedArchives = await client.listArchives();
-    void refreshStockQuotes(client);
-    void refreshNewsHeadlines(client);
     void client.flushClientDiagnostics().then(() => {
       setPendingDiagnosticCount(client.pendingDiagnosticCount());
     });
@@ -487,7 +455,7 @@ export function App() {
         ? current
         : loadedArchives[0]?.id ?? null
     ));
-  }, [refreshStockQuotes, refreshNewsHeadlines]);
+  }, []);
 
   // Only an admin can read the settings payload these live in. Everyone else keeps the
   // built-in intervals from lib/polling.ts, so a renter session still polls sanely.
@@ -513,24 +481,6 @@ export function App() {
     const settings = await api.updatePollingSettings({ key, ...patch });
     if (settings.polling) setPollingSettings(settings.polling);
   }, [api]);
-
-  usePollingLoop({
-    key: "stockQuotes",
-    settings: pollingSettings,
-    report: reportPolling,
-    active: Boolean(api) && canUseMail,
-    runImmediately: false,
-    run: () => api && refreshStockQuotes(api)
-  });
-
-  usePollingLoop({
-    key: "newsHeadlines",
-    settings: pollingSettings,
-    report: reportPolling,
-    active: Boolean(api) && canUseMail,
-    runImmediately: false,
-    run: () => api && refreshNewsHeadlines(api)
-  });
 
   const connect = useCallback(async () => {
     setInitializing(true);
@@ -776,13 +726,18 @@ export function App() {
     setLoadingMessages(true);
     try {
       if (!append && showInboxCategories) {
-        void api.inboxCategoryCounts({
+          void api.inboxCategoryCounts({
             archiveId: selectedArchiveId,
-            folderId: visibleFolderId ?? undefined,
-            isRead: showReadMessages ? undefined : false
+            folderId: unifiedInbox ? undefined : visibleFolderId ?? undefined,
+            inboxOnly: unifiedInbox ? true : undefined,
+            focus: selectedSmartMailbox === "focus" ? true : undefined,
+            isRead: selectedSmartMailbox === "focus" || showReadMessages ? undefined : false,
+            after: selectedSmartMailbox === "focus" ? startOfRecentWindow(INITIAL_FOCUS_WINDOW_DAYS) : undefined
           })
           .then((counts) => {
-            if (requestId === messageListRequestRef.current) setInboxCategoryCounts(counts);
+            if (requestId !== messageListRequestRef.current) return;
+            setInboxCategoryCounts(counts);
+            if (selectedSmartMailbox === "focus") setDailyFocusCount(counts.focus ?? focusCategoryTotal(counts));
           })
           .catch((error) => {
             if (requestId === messageListRequestRef.current) {
@@ -798,12 +753,16 @@ export function App() {
         const searchFilters: SearchFilters = {
           archiveId: selectedArchiveId,
           folderId: searchFolderId ?? undefined,
-          isRead: showReadMessages ? undefined : false,
+          inboxOnly: unifiedInbox ? true : undefined,
+          isRead: selectedSmartMailbox === "focus" || showReadMessages ? undefined : false,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
-          inboxCategory: showInboxCategories ? inboxCategory : undefined,
+          inboxCategory: showInboxCategories && selectedSmartMailbox !== "focus" ? inboxCategory : undefined,
+          focus: selectedSmartMailbox === "focus" ? true : undefined,
           from: filters.from || undefined,
           to: filters.to || undefined,
-          after: filters.after || undefined,
+          after: filters.after || (!filters.before && selectedSmartMailbox === "focus"
+            ? startOfRecentWindow(INITIAL_FOCUS_WINDOW_DAYS)
+            : undefined),
           before: filters.before || undefined,
           hasAttachment: filters.hasAttachment,
           sort,
@@ -820,9 +779,11 @@ export function App() {
         const baseFilters = {
           archiveId: selectedArchiveId,
           folderId: searchFolderId ?? undefined,
-          isRead: showReadMessages ? undefined : false,
+          inboxOnly: unifiedInbox ? true : undefined,
+          isRead: selectedSmartMailbox === "focus" || showReadMessages ? undefined : false,
           starred: selectedSmartMailbox === "starred" ? true : undefined,
-          inboxCategory: showInboxCategories ? inboxCategory : undefined,
+          inboxCategory: showInboxCategories && selectedSmartMailbox !== "focus" ? inboxCategory : undefined,
+          focus: selectedSmartMailbox === "focus" ? true : undefined,
           from: filters.from || undefined,
           to: filters.to || undefined,
           hasAttachment: filters.hasAttachment
@@ -848,6 +809,20 @@ export function App() {
         } else if (append) {
           const cutoff = historyCutoff;
           if (!cutoff) return;
+          // Keep the first paint and background work bounded. If an unusually busy recent
+          // window exceeds the cap, continue that window before crossing into older history.
+          if (!historyStarted && nextCursor) {
+            const page = await api.listMessages({
+              ...baseFilters,
+              after: cutoff,
+              cursor: nextCursor,
+              limit: HISTORY_MESSAGE_PAGE_SIZE
+            });
+            if (requestId !== messageListRequestRef.current) return;
+            setItems((current) => appendUniqueMessages(current, page.items.map(messageToItem)));
+            setNextCursor(page.nextCursor);
+            return;
+          }
           const page = await api.listMessages({
             ...baseFilters,
             before: new Date(new Date(cutoff).getTime() - 1).toISOString(),
@@ -860,7 +835,8 @@ export function App() {
           setHistoryExhausted(page.nextCursor === null);
           setNextCursor(page.nextCursor);
         } else {
-          const cutoff = new Date(Date.now() - INITIAL_MAIL_WINDOW_DAYS * 24 * 60 * 60 * 1_000).toISOString();
+          const windowDays = selectedSmartMailbox === "focus" ? INITIAL_FOCUS_WINDOW_DAYS : INITIAL_MAIL_WINDOW_DAYS;
+          const cutoff = startOfRecentWindow(windowDays);
           setRecentWindowActive(true);
           setHistoryCutoff(cutoff);
           setHistoryStarted(false);
@@ -875,20 +851,27 @@ export function App() {
           if (requestId !== messageListRequestRef.current) return;
           setItems(page.items.map(messageToItem));
 
-          // Paint the first page immediately, then finish the five-day window in the
-          // background. Older history stays server-side until the user asks for it.
-          while (page.nextCursor) {
+          // Paint the first page immediately, then continue the recent window in the
+          // background up to a safe DOM/network cap. Older history, and unusually busy
+          // recent windows, stay server-side until the user asks for them.
+          let automaticallyLoaded = page.items.length;
+          while (page.nextCursor && automaticallyLoaded < MAX_AUTOMATIC_RECENT_MESSAGES) {
             page = await api.listMessages({
               ...baseFilters,
               after: cutoff,
               cursor: page.nextCursor,
-              limit: BACKGROUND_MESSAGE_PAGE_SIZE
+              limit: Math.min(BACKGROUND_MESSAGE_PAGE_SIZE, MAX_AUTOMATIC_RECENT_MESSAGES - automaticallyLoaded)
             });
             if (requestId !== messageListRequestRef.current) return;
+            automaticallyLoaded += page.items.length;
+            const backgroundItems = page.items.map(messageToItem);
             startTransition(() => {
-              setItems((current) => appendUniqueMessages(current, page.items.map(messageToItem)));
+              setItems((current) => requestId === messageListRequestRef.current
+                ? appendUniqueMessages(current, backgroundItems)
+                : current);
             });
           }
+          setNextCursor(page.nextCursor);
         }
       }
       if (!showInboxCategories) setInboxCategoryCounts(EMPTY_INBOX_CATEGORY_COUNTS);
@@ -904,6 +887,7 @@ export function App() {
     foldersArchiveId,
     searchFolderId,
     visibleFolderId,
+    unifiedInbox,
     selectedSmartMailbox,
     showInboxCategories,
     inboxCategory,
@@ -1051,12 +1035,12 @@ export function App() {
       if (!readOnly && !detail.state.isRead) {
         void api.updateMessageState(detail.id, { isRead: true })
           .then((state) => {
-            if (requestId !== messageRequestRef.current) return;
+            // Opening another message must not discard this completed state change. Message ids
+            // are global, so this safely updates the old row even after the reader has moved on.
             mergeMessageState(detail.id, state);
-            void refreshMailboxCounts();
+            if (requestId === messageRequestRef.current) void refreshMailboxCounts();
           })
           .catch((error: unknown) => {
-            if (requestId !== messageRequestRef.current) return;
             showError(error instanceof Error
               ? `Message opened, but it could not be marked read: ${error.message}`
               : "Message opened, but it could not be marked read");
@@ -1075,10 +1059,13 @@ export function App() {
     messageId: string,
     state: MessageDetail["state"]
   ) => {
+    const visibility = mailVisibilityRef.current;
     setMessage((current) => current?.id === messageId ? { ...current, state } : current);
     setItems((current) => current.flatMap((item) => {
       if (item.message.id !== messageId) return [item];
-      if (!showReadMessages && state.isRead) return [];
+      // Focus is a complete today/yesterday safety net, not an unread queue.
+      // Reading a message must not make it disappear from the daily review.
+      if (visibility.selectedSmartMailbox !== "focus" && !visibility.showReadMessages && state.isRead) return [];
       return [{
         ...item,
         message: { ...item.message, state },
@@ -1108,7 +1095,8 @@ export function App() {
     setSelectedArchiveId(id);
     setFoldersArchiveId(null);
     setSelectedFolderId(null);
-    setSelectedSmartMailbox(null);
+    setSelectedSmartMailbox("focus");
+    setDailyFocusCount(null);
     setInboxCategory("primary");
     closeMessage();
   };
@@ -1121,8 +1109,19 @@ export function App() {
   };
 
   const selectInboxCategory = (category: InboxCategory) => {
+    if (unifiedInbox) {
+      setSelectedSmartMailbox("inbox");
+      setSelectedFolderId(null);
+    } else {
+      setSelectedSmartMailbox(null);
+    }
     setInboxCategory(category);
     closeMessage();
+  };
+
+  const selectInboxView = (view: InboxView) => {
+    if (view === "focus") selectSmartMailbox("focus");
+    else selectInboxCategory(view);
   };
 
   const selectSmartMailbox = (mailbox: SmartMailbox) => {
@@ -2084,7 +2083,7 @@ export function App() {
         return;
       }
       const moveAllFromSender = Boolean(senderAddress && destination) && window.confirm(
-        `Move every email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there. If Gmail mailbox sync is enabled, current Gmail messages move too.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
+        `Move every email from ${senderAddress} to ${destination?.path}, including messages outside the current list? Future incoming Inbox email from this sender will also be filed there. Custom sender folders organize this app and do not create Gmail labels.\n\nChoose OK to move all sender email, or Cancel to move only this email.`
       );
       restore = removeListItems(moveAllFromSender
         ? visibleIdsFromSender(senderAddress, messageId)
@@ -2233,12 +2232,16 @@ export function App() {
           const page = await api.search(searchTerm, {
             archiveId: selectedArchiveId,
             folderId: searchFolderId ?? undefined,
-            isRead: showReadMessages ? undefined : false,
+            inboxOnly: unifiedInbox ? true : undefined,
+            isRead: selectedSmartMailbox === "focus" || showReadMessages ? undefined : false,
             starred: selectedSmartMailbox === "starred" ? true : undefined,
-            inboxCategory: showInboxCategories ? inboxCategory : undefined,
+            inboxCategory: showInboxCategories && selectedSmartMailbox !== "focus" ? inboxCategory : undefined,
+            focus: selectedSmartMailbox === "focus" ? true : undefined,
             from: filters.from || undefined,
             to: filters.to || undefined,
-            after: filters.after || undefined,
+            after: filters.after || (!filters.before && selectedSmartMailbox === "focus"
+              ? startOfRecentWindow(INITIAL_FOCUS_WINDOW_DAYS)
+              : undefined),
             before: filters.before || undefined,
             hasAttachment: filters.hasAttachment,
             sort,
@@ -2251,12 +2254,16 @@ export function App() {
           const page = await api.listMessages({
             archiveId: selectedArchiveId,
             folderId: searchFolderId ?? undefined,
-            isRead: showReadMessages ? undefined : false,
+            inboxOnly: unifiedInbox ? true : undefined,
+            isRead: selectedSmartMailbox === "focus" || showReadMessages ? undefined : false,
             starred: selectedSmartMailbox === "starred" ? true : undefined,
-            inboxCategory: showInboxCategories ? inboxCategory : undefined,
+            inboxCategory: showInboxCategories && selectedSmartMailbox !== "focus" ? inboxCategory : undefined,
+            focus: selectedSmartMailbox === "focus" ? true : undefined,
             from: filters.from || undefined,
             to: filters.to || undefined,
-            after: filters.after || undefined,
+            after: filters.after || (!filters.before && selectedSmartMailbox === "focus"
+              ? startOfRecentWindow(INITIAL_FOCUS_WINDOW_DAYS)
+              : undefined),
             before: filters.before || undefined,
             hasAttachment: filters.hasAttachment,
             cursor,
@@ -2287,7 +2294,7 @@ export function App() {
     try {
       const result = await api.bulkMarkMessagesRead(messageIds);
       if (message && messageIds.includes(message.id)) {
-        if (showReadMessages) {
+        if (showReadMessages || selectedSmartMailbox === "focus") {
           setMessage({ ...message, state: { ...message.state, isRead: true } });
         } else {
           setSelectedMessageId(null);
@@ -2442,9 +2449,13 @@ export function App() {
       return;
     }
     const isSpamDestination = ["spam", "junk"].includes(destination.name.trim().toLowerCase());
+    const isProviderSystemDestination = ["archive", "archived", "trash", "deleted", "deleted items"]
+      .includes(destination.name.trim().toLowerCase());
     const confirmation = isSpamDestination
       ? `Move the selected messages to Spam, move every matching Inbox message from their senders, and automatically send future imported Inbox messages from those senders to Spam? If Gmail mailbox sync is enabled, current Gmail messages move too.`
-      : `Move ${messageIds.length.toLocaleString()} selected messages to ${destination.path}? If Gmail mailbox sync is enabled, the Gmail messages move too.`;
+      : `Move ${messageIds.length.toLocaleString()} selected messages to ${destination.path}? ${isProviderSystemDestination
+        ? "If Gmail mailbox sync is enabled, the Gmail messages move too."
+        : "Custom folders organize this app and do not create Gmail labels."}`;
     if (!window.confirm(confirmation)) return;
 
     setMoveBusy(true);
@@ -2683,7 +2694,11 @@ export function App() {
 
   const listTitle = searchTerm
     ? `Search in ${searchScopeLabel}: ${searchTerm}`
-    : selectedSmartMailbox === "starred"
+    : selectedSmartMailbox === "focus"
+      ? "Focus"
+      : selectedSmartMailbox === "inbox"
+        ? inboxTabSettings.tabs.find((tab) => tab.id === inboxCategory)?.label ?? "Inbox"
+      : selectedSmartMailbox === "starred"
       ? "Starred"
       : selectedFolder?.name ?? (selectedArchive ? "All mail" : "Messages");
   const messageListHasMore = recentWindowActive ? !historyExhausted : Boolean(nextCursor);
@@ -2691,8 +2706,10 @@ export function App() {
     ? historyStarted
       ? "Recent mail + older history"
       : loadingMessages
-        ? "Loading the last 5 days…"
-        : "Last 5 days loaded"
+        ? selectedSmartMailbox === "focus" ? "Checking today and yesterday…" : "Loading recent mail…"
+        : nextCursor
+          ? selectedSmartMailbox === "focus" ? "Today + yesterday · more available" : "Recent mail · more available"
+          : selectedSmartMailbox === "focus" ? "Today + yesterday" : "Recent mail loaded"
     : undefined;
 
   if (initializing) {
@@ -2744,7 +2761,7 @@ export function App() {
     <div className={`app-shell mobile-view-${mobileView}`}>
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark"><Archive size={20} /></span>
+          <span className="brand-mark"><Mail size={19} /></span>
           <span className="brand-name">{isRenter ? "Tenant Portal" : "Archive Mail"}</span>
           {viewMode === "mail" && (
             <button
@@ -2759,6 +2776,23 @@ export function App() {
             </button>
           )}
         </div>
+
+        {!isRenter && (
+          <nav className="primary-app-nav" aria-label="Workspace">
+            <button className={viewMode === "mail" ? "active" : ""} onClick={() => navigateView("mail")} aria-current={viewMode === "mail" ? "page" : undefined} aria-label="Mail" title="Mail">
+              <Mail size={17} /><span>Mail</span>
+            </button>
+            {canAccessScreen("calendar") && <button className={viewMode === "calendar" ? "active" : ""} onClick={() => navigateView("calendar")} aria-current={viewMode === "calendar" ? "page" : undefined} aria-label="Calendar" title="Calendar">
+              <CalendarDays size={17} /><span>Calendar</span>
+            </button>}
+            {canAccessScreen("calendar") && <button className={viewMode === "tasks" ? "active" : ""} onClick={() => navigateView("tasks")} aria-current={viewMode === "tasks" ? "page" : undefined} aria-label="Tasks" title="Tasks">
+              <CheckSquare2 size={17} /><span>Tasks</span>
+            </button>}
+            {canAccessScreen("ai") && <button className={askOpen ? "active ai" : "ai"} onClick={() => setAskOpen(true)} aria-pressed={askOpen} aria-label="Ask AI" title="Ask AI">
+              <Sparkles size={17} /><span>Ask AI</span>
+            </button>}
+          </nav>
+        )}
 
         {viewMode === "mail" ? (
           <div className="search-wrap">
@@ -2778,8 +2812,8 @@ export function App() {
           </div>
         ) : (
           <div className="module-context">
-            {viewMode === "calendar" ? <CalendarDays size={18} /> : <Building2 size={18} />}
-            <div><strong>{viewMode === "calendar" ? "Calendar" : "Property Management"}</strong><span>{viewMode === "calendar" ? "Events and to-dos" : "Portfolio and tenant portal"}</span></div>
+            {viewMode === "calendar" ? <CalendarDays size={18} /> : viewMode === "tasks" ? <CheckSquare2 size={18} /> : <Building2 size={18} />}
+            <div><strong>{viewMode === "calendar" ? "Calendar" : viewMode === "tasks" ? "Tasks" : "Property Management"}</strong><span>{viewMode === "calendar" ? "Plan your time" : viewMode === "tasks" ? "What needs your attention" : "Portfolio and tenant portal"}</span></div>
           </div>
         )}
 
@@ -2809,7 +2843,7 @@ export function App() {
               onClose={() => setFilterOpen(false)}
             />
           </div>}
-          {viewMode === "mail" && <button
+          {viewMode === "mail" && selectedSmartMailbox !== "focus" && <button
             className={`icon-button read-visibility-toggle ${showReadMessages ? "" : "active"}`}
             onClick={() => setShowReadMessages((current) => !current)}
             title={showReadMessages ? "Hide read emails in every folder" : "Show read emails in every folder"}
@@ -2818,16 +2852,6 @@ export function App() {
           >
             {showReadMessages ? <EyeOff size={18} /> : <Eye size={18} />}
           </button>}
-          {canAccessScreen("calendar") && (
-            <button
-              className={`icon-button calendar-trigger ${viewMode === "calendar" ? "active" : ""}`}
-              onClick={() => navigateView(viewMode === "calendar" ? "mail" : "calendar")}
-              title={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
-              aria-label={viewMode === "calendar" ? "Back to mail" : "Open calendar"}
-            >
-              {viewMode === "calendar" ? <Mail size={18} /> : <CalendarDays size={18} />}
-            </button>
-          )}
           {!isRenter && canAccessScreen("properties") && (
             <button
               className={`icon-button properties-trigger ${viewMode === "properties" ? "active" : ""}`}
@@ -2841,11 +2865,6 @@ export function App() {
           {!readOnly && canAccessScreen("compose") && (
             <button className="icon-button drafts-trigger" onClick={openDrafts} title="Open drafts" aria-label="Open drafts">
               <FileEdit size={18} />
-            </button>
-          )}
-          {canAccessScreen("ai") && (
-            <button className="icon-button ask-trigger" onClick={() => setAskOpen(true)} title="Ask Archive Mail" aria-label="Ask Archive Mail">
-              <Sparkles size={18} />
             </button>
           )}
           {canAccessScreen("ai") && (
@@ -2870,8 +2889,8 @@ export function App() {
             </button>
           )}
           {!readOnly && canAccessScreen("compose") && (
-            <button className="icon-button compose-trigger" onClick={() => openCompose()} title="Compose email" aria-label="Compose email">
-              <MailPlus size={18} />
+            <button className="primary-button compose-trigger" onClick={() => openCompose()} title="Compose email" aria-label="Compose email">
+              <MailPlus size={17} /><span>Compose</span>
             </button>
           )}
           {!readOnly && (isAdmin || isRenter || canAccessScreen("settings")) && (
@@ -2880,12 +2899,7 @@ export function App() {
               {isAdmin && pendingDiagnosticCount > 0 && <span className="diagnostic-count">{Math.min(99, pendingDiagnosticCount)}</span>}
             </button>
           )}
-          {!readOnly && canAccessScreen("import") && (
-            <button className="primary-button top-import" onClick={openImport}>
-              <Import size={17} /> <span>Import</span>
-            </button>
-          )}
-          <span className="signed-in-user" title={`${session.user.displayName} · ${session.role}`}>{session.user.username}</span>
+          <span className="signed-in-user" title={`${session.user.displayName} · ${session.role}`}>{session.user.displayName}</span>
           <button className="icon-button logout-trigger" onClick={() => void logout()} title="Sign out" aria-label="Sign out">
             <LogOut size={18} />
           </button>
@@ -2897,6 +2911,13 @@ export function App() {
           <div className={`workspace-view ${viewMode === "calendar" ? "active" : ""}`} aria-hidden={viewMode !== "calendar"}>
             <Suspense fallback={<div className="calendar-source-loading"><LoaderCircle className="spin" size={20} /> Loading calendar workspace…</div>}>
               <CalendarView api={api} connections={gmailConnections} active={viewMode === "calendar"} onAddGoogle={openGmail} onReauthorize={reauthorizeGmail} onError={showError} />
+            </Suspense>
+          </div>
+        )}
+        {visitedViews.has("tasks") && api && (
+          <div className={`workspace-view ${viewMode === "tasks" ? "active" : ""}`} aria-hidden={viewMode !== "tasks"}>
+            <Suspense fallback={<div className="tasks-source-loading"><LoaderCircle className="spin" size={20} /> Loading your tasks…</div>}>
+              <TasksView api={api} active={viewMode === "tasks"} onError={showError} />
             </Suspense>
           </div>
         )}
@@ -2915,6 +2936,7 @@ export function App() {
               selectedArchiveId={selectedArchiveId}
               selectedFolderId={selectedFolderId}
               selectedSmartMailbox={selectedSmartMailbox}
+              focusCount={dailyFocusCount ?? undefined}
               readOnly={readOnly}
               draggedMessage={draggedMessage}
               draggedMessageIds={draggedMessageIds}
@@ -2950,7 +2972,11 @@ export function App() {
               searching={Boolean(searchTerm)}
               hasMore={messageListHasMore}
               rangeLabel={messageRangeLabel}
-              loadMoreLabel={recentWindowActive && !historyStarted ? "Load messages older than 5 days" : "Load more"}
+              loadMoreLabel={recentWindowActive && !historyStarted
+                ? nextCursor
+                  ? selectedSmartMailbox === "focus" ? "Load more recent important mail" : "Load more recent mail"
+                  : selectedSmartMailbox === "focus" ? "Show earlier important mail" : "Show earlier mail"
+                : "Load more"}
               readOnly={readOnly}
               onSelect={(selected) => void openMessage(selected)}
               onDragStart={(target, messageIds) => {
@@ -2964,10 +2990,10 @@ export function App() {
               onLoadMore={() => void loadMessages(true)}
               onMobileBack={() => setMobileView("folders")}
               inboxCategories={showInboxCategories ? {
-                active: inboxCategory,
+                active: selectedSmartMailbox === "focus" ? "focus" : inboxCategory,
                 counts: inboxCategoryCounts,
                 tabs: inboxTabSettings.tabs,
-                onSelect: selectInboxCategory
+                onSelect: selectInboxView
               } : null}
               selectedIds={bulkSelectedIds}
               onToggleSelect={toggleBulkSelect}
@@ -2999,6 +3025,7 @@ export function App() {
               api={api}
               connections={gmailConnections}
               onMobileBack={closeMessage}
+              onOpenMessage={(messageId) => void openMessage({ id: messageId }, false)}
               onUpdateState={updateState}
               onError={showError}
               onReply={(target) => openReply(target, "reply")}
@@ -3014,21 +3041,6 @@ export function App() {
             /></Suspense>}
         </div>
       </main>
-
-      {!isRenter && <NewsTickerBar
-        headlines={newsHeadlines}
-        loading={newsHeadlinesLoading}
-        error={newsHeadlinesError}
-        secondsPerHeadline={newsSecondsPerHeadline}
-        onRefresh={() => { if (api) void refreshNewsHeadlines(api); }}
-      />}
-      {!isRenter && <StockTickerBar
-        quotes={stockQuotes}
-        loading={stockQuotesLoading}
-        error={stockQuotesError}
-        secondsPerSymbol={stockSecondsPerSymbol}
-        onRefresh={() => { if (api) void refreshStockQuotes(api); }}
-      />}
 
       <nav className={`mobile-nav ${canAccessScreen("properties") ? "has-properties" : ""} ${isRenter ? "renter-only" : ""}`} aria-label="Mobile navigation">
         {canUseMail && <button className={viewMode === "mail" && mobileView === "folders" ? "selected" : ""} onClick={() => {
@@ -3058,12 +3070,12 @@ export function App() {
             <CalendarDays size={19} /><span>Calendar</span>
           </button>
         )}
-        {canAccessScreen("properties") && (
-          <button className={viewMode === "properties" ? "selected" : ""} onClick={() => {
+        {canAccessScreen("calendar") && (
+          <button className={viewMode === "tasks" ? "selected" : ""} onClick={() => {
             setMobileMenuOpen(false);
-            navigateView("properties");
+            navigateView("tasks");
           }}>
-            <Building2 size={19} /><span>Properties</span>
+            <CheckSquare2 size={19} /><span>Tasks</span>
           </button>
         )}
         <button className={mobileMenuOpen ? "selected" : ""} onClick={() => setMobileMenuOpen((open) => !open)} aria-expanded={mobileMenuOpen}>
@@ -3088,6 +3100,7 @@ export function App() {
               {canAccessScreen("ai") && <button onClick={() => { setMobileMenuOpen(false); openDuplicates(); }}><Copy size={20} /><span>Duplicates</span></button>}
               {canAccessScreen("ai") && <button onClick={() => { setMobileMenuOpen(false); openReviewQueue(); }}><BrainCircuit size={20} /><span>AI review</span>{(reviewQueue?.totalItems ?? 0) > 0 && <small>{reviewQueue!.totalItems}</small>}</button>}
               {canUseMail && <button onClick={() => { setMobileMenuOpen(false); openGmail(); }}><RefreshCw size={20} /><span>Gmail sync</span></button>}
+              {canAccessScreen("properties") && <button onClick={() => { setMobileMenuOpen(false); navigateView("properties"); }}><Building2 size={20} /><span>Properties</span></button>}
               {!readOnly && canAccessScreen("import") && <button onClick={() => { setMobileMenuOpen(false); openImport(); }}><Import size={20} /><span>Import</span></button>}
               {!readOnly && (isAdmin || isRenter || canAccessScreen("settings")) && <button onClick={() => { setMobileMenuOpen(false); setSettingsOpen(true); }}><SettingsIcon size={20} /><span>{isAdmin ? "Admin" : "Account"}</span>{isAdmin && pendingDiagnosticCount > 0 && <small>{pendingDiagnosticCount}</small>}</button>}
             </div>
@@ -3096,7 +3109,8 @@ export function App() {
         </div>
       )}
 
-      <ImportDialog
+      <Suspense fallback={null}>
+      {importOpen && <ImportDialog
         open={importOpen}
         busy={importBusy}
         progress={importProgress}
@@ -3112,14 +3126,14 @@ export function App() {
         }}
         onCancelUpload={() => void cancelUpload()}
         onImport={(file, ocr) => void startImport(file, ocr)}
-      />
-      <RenameDialog
+      />}
+      {renameTarget && <RenameDialog
         target={renameTarget}
         busy={renameBusy}
         onClose={() => setRenameTarget(null)}
         onRename={(name) => void renameSelected(name)}
-      />
-      <CreateMailboxDialog
+      />}
+      {createMailboxOpen && <CreateMailboxDialog
         open={createMailboxOpen}
         archive={selectedArchive}
         folders={folders}
@@ -3130,30 +3144,30 @@ export function App() {
           setCreateMailboxParentId(null);
         }}
         onCreate={(name, parentId) => void createMailbox(name, parentId)}
-      />
-      <CombineArchiveDialog
+      />}
+      {combineSource && <CombineArchiveDialog
         source={combineSource}
         archives={archives}
         busy={combineBusy}
         onClose={() => setCombineSource(null)}
         onCombine={(targetArchiveId) => void combineArchives(targetArchiveId)}
-      />
-      <CombineMailboxDialog
+      />}
+      {combineMailboxSource && <CombineMailboxDialog
         source={combineMailboxSource}
         folders={folders}
         busy={combineMailboxBusy}
         onClose={() => setCombineMailboxSource(null)}
         onCombine={(targetFolderId) => void combineMailboxes(targetFolderId)}
-      />
-      <MailboxDropDialog
+      />}
+      {mailboxDrop && <MailboxDropDialog
         source={mailboxDrop?.source ?? null}
         target={mailboxDrop?.target ?? null}
         busy={mailboxDropBusy}
         onClose={() => setMailboxDrop(null)}
         onMerge={() => void organizeDroppedMailbox("merge")}
         onMoveAsChild={() => void organizeDroppedMailbox("child")}
-      />
-      <GmailDialog
+      />}
+      {gmailOpen && <GmailDialog
         open={gmailOpen}
         archives={archives}
         selectedArchiveId={selectedArchiveId}
@@ -3178,8 +3192,8 @@ export function App() {
           setGmailMoveConnection(connection);
         }}
         onDisconnect={(connection) => void disconnectGmail(connection)}
-      />
-      <MoveGmailConnectionDialog
+      />}
+      {gmailMoveConnection && <MoveGmailConnectionDialog
         connection={gmailMoveConnection}
         archives={archives}
         busy={gmailMoveBusy}
@@ -3187,8 +3201,7 @@ export function App() {
         onClose={() => { if (!gmailMoveBusy) setGmailMoveConnection(null); }}
         onLoadFolders={loadFoldersForGmail}
         onMove={(destination) => void moveGmailConnection(destination)}
-      />
-      <Suspense fallback={null}>
+      />}
       {composeOpen && <ComposeDialog
         open={composeOpen}
         connections={gmailConnections}
@@ -3370,8 +3383,8 @@ export function App() {
             pendingDiagnosticCount={pendingDiagnosticCount}
             onAddGoogleCalendar={() => { setSettingsOpen(false); openGmail(); }}
             onReauthorizeGoogleCalendar={(connection) => { setSettingsOpen(false); reauthorizeGmail(connection); }}
-            onStockSettingsChanged={() => { if (api) void refreshStockQuotes(api); }}
-            onNewsSettingsChanged={() => { if (api) void refreshNewsHeadlines(api); }}
+            onStockSettingsChanged={() => undefined}
+            onNewsSettingsChanged={() => undefined}
             onInboxTabSettingsChanged={(settings) => {
               if (settings.archiveId !== selectedArchiveId) return;
               setInboxTabSettings(settings);
@@ -3384,7 +3397,7 @@ export function App() {
           />
         </Suspense>
       )}
-      <DiagnosticsDialog
+      {diagnosticsOpen && <Suspense fallback={null}><DiagnosticsDialog
         open={diagnosticsOpen}
         data={diagnostics}
         loading={diagnosticsLoading}
@@ -3394,7 +3407,7 @@ export function App() {
         onRefresh={() => void refreshDiagnostics()}
         onDownload={() => void downloadDiagnostics()}
         onClear={() => void clearDiagnostics()}
-      />
+      /></Suspense>}
       {notice && (
         <div className="toast" role="status">
           <Filter size={16} />
@@ -3422,4 +3435,21 @@ function appendUniqueMessages(
   const existing = new Set(current.map((item) => item.message.id));
   const unique = incoming.filter((item) => !existing.has(item.message.id));
   return unique.length === 0 ? current : [...current, ...unique];
+}
+
+function focusCategoryTotal(counts: InboxCategoryCounts): number {
+  return counts.primary
+    + counts.jobs
+    + counts.updates
+    + counts.bills
+    + counts.medical
+    + counts.mail_tracking;
+}
+
+/** Calendar-day windows are easier to trust than rolling-hour windows around DST and bedtime. */
+function startOfRecentWindow(days: number): string {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - Math.max(0, days - 1));
+  return start.toISOString();
 }

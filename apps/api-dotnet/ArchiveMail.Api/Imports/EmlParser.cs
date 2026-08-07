@@ -35,6 +35,11 @@ public static class EmlParser
                 group => string.Join("\n", group.Select(header => header.Value)),
                 StringComparer.OrdinalIgnoreCase);
         var internetMessageId = string.IsNullOrWhiteSpace(message.MessageId) ? null : message.MessageId.Trim();
+        var conversationKey = ConversationKey(
+            archiveId,
+            internetMessageId,
+            message.References,
+            message.InReplyTo);
         var stableInput = $"{relativePath}\n{internetMessageId ?? string.Empty}";
         var stableHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(stableInput))).ToLowerInvariant();
         var recipients = to.Concat(cc).Concat(bcc).Select(address => address.Address);
@@ -52,7 +57,7 @@ public static class EmlParser
             folderPath,
             $"eml:{stableHash}",
             internetMessageId,
-            null,
+            conversationKey,
             string.IsNullOrWhiteSpace(message.Subject) ? "(No subject)" : message.Subject.Trim(),
             string.IsNullOrWhiteSpace(sender?.Name) ? null : sender.Name.Trim(),
             sender?.Address?.Trim() ?? string.Empty,
@@ -71,6 +76,27 @@ public static class EmlParser
             inboxCategory,
             createdAt,
             relativePath);
+    }
+
+    /// <summary>
+    /// Uses the oldest RFC 5322 reference as the stable root of a conversation.  A root message
+    /// falls back to its own Message-Id.  The archive namespace prevents two imported accounts
+    /// that happen to contain the same public Message-Id from sharing follow-up or reply state.
+    /// Messages without any usable id deliberately keep a null key and use their local id as the
+    /// legacy fallback in repository queries.
+    /// </summary>
+    internal static string? ConversationKey(
+        string archiveId,
+        string? internetMessageId,
+        IEnumerable<string> references,
+        string? inReplyTo)
+    {
+        var root = references.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+            ?? (string.IsNullOrWhiteSpace(inReplyTo) ? null : inReplyTo)
+            ?? (string.IsNullOrWhiteSpace(internetMessageId) ? null : internetMessageId);
+        if (root is null) return null;
+        var normalized = root.Trim().Trim('<', '>').Trim();
+        return normalized.Length == 0 ? null : $"archive:{archiveId}:rfc822:{normalized}";
     }
 
     private static IReadOnlyList<EmailAddressDto> Addresses(InternetAddressList list) =>

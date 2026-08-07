@@ -48,6 +48,7 @@ public sealed class DatabaseInitializer(
         await EnsureDefaultAdministratorAsync(connection, cancellationToken);
         await using (var command = SchemaCommand(LegacyOwnershipRepairSql, connection))
             await command.ExecuteNonQueryAsync(cancellationToken);
+        await ApplyCareerCategoryBackfillAsync(connection, cancellationToken);
         await schemaContract.ValidateAsync(connection, schema, cancellationToken);
         logger.LogInformation("C# PostgreSQL schema is ready in {Schema}", schema);
     }
@@ -79,6 +80,105 @@ public sealed class DatabaseInitializer(
         await insert.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    internal const string CareerCategoryMigrationId = "2026-08-07-career-category-v1";
+    internal const int CareerCategoryBackfillBatchSize = 2_000;
+    internal const string CareerCategoryMigrationLockSql =
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0));";
+    internal const string CareerCategoryMigrationAppliedSql =
+        "SELECT EXISTS(SELECT 1 FROM app_data_migrations WHERE id=$1);";
+    internal const string CareerCategoryMigrationRecordSql =
+        "INSERT INTO app_data_migrations(id,applied_at,affected_rows) VALUES($1,$2,$3);";
+    internal const string CareerCategoryBackfillSql = """
+        WITH candidates AS (
+          SELECT message.ctid
+          FROM messages message
+          JOIN folders folder ON folder.id = message.folder_id
+          WHERE lower(trim(folder.name)) = 'inbox'
+            AND message.inbox_category IN ('primary', 'updates', 'promotions', 'social')
+            -- A reply stays in People even when it came through a job platform or mentions an
+            -- interview. Keep both RFC reply headers and common reply/forward subjects protected.
+            AND lower(message.subject) !~ '^[[:space:]]*(\[[^]]+\][[:space:]]*)*(re|fwd?):[[:space:]]*'
+            AND message.headers_json !~* '"(in-reply-to|references)"[[:space:]]*:'
+            AND (
+              lower(split_part(message.sender_address, '@', 2)) = ANY (ARRAY[
+                'indeed.com','glassdoor.com','ziprecruiter.com','monster.com','greenhouse.io',
+                'lever.co','myworkdayjobs.com','workday.com','icims.com','smartrecruiters.com'
+              ]::text[])
+              OR lower(split_part(message.sender_address, '@', 2)) LIKE ANY (ARRAY[
+                '%.indeed.com','%.glassdoor.com','%.ziprecruiter.com','%.monster.com','%.greenhouse.io',
+                '%.lever.co','%.myworkdayjobs.com','%.workday.com','%.icims.com','%.smartrecruiters.com'
+              ]::text[])
+              OR lower(message.subject) ~ (
+                'application[[:space:]]+(received|status|update)'
+                || '|thank you for applying|your (application|candidacy|resume|résumé)'
+                || '|career opportunity|hiring manager|talent acquisition|job alert'
+                || '|jobs?[[:space:]]+(for you|matching)'
+                || '|interview[[:space:]]+(for|with|invitation|request|scheduled|availability|confirmation)'
+                || '|(phone|video|onsite|technical|final)[[:space:]]+interview'
+                || '|schedule[^a-z]+(an[[:space:]]+)?interview|your[[:space:]]+interview'
+                || '|(^|[^a-z])recruiter([^a-z]|$)'
+              )
+            )
+          ORDER BY message.id
+          LIMIT $1
+          FOR UPDATE OF message SKIP LOCKED
+        )
+        UPDATE messages message
+        SET inbox_category = 'jobs'
+        FROM candidates
+        WHERE message.ctid = candidates.ctid;
+        """;
+
+    private static async Task ApplyCareerCategoryBackfillAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var migrationLock = new NpgsqlCommand(
+            CareerCategoryMigrationLockSql, connection, transaction))
+        {
+            migrationLock.Parameters.AddWithValue(CareerCategoryMigrationId);
+            await migrationLock.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var applied = new NpgsqlCommand(
+            CareerCategoryMigrationAppliedSql, connection, transaction))
+        {
+            applied.Parameters.AddWithValue(CareerCategoryMigrationId);
+            if (Convert.ToBoolean(await applied.ExecuteScalarAsync(cancellationToken)))
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return;
+            }
+        }
+
+        long affectedRows = 0;
+        while (true)
+        {
+            await using var batch = new NpgsqlCommand(
+                CareerCategoryBackfillSql, connection, transaction)
+            {
+                CommandTimeout = SchemaCommandTimeoutSeconds
+            };
+            batch.Parameters.AddWithValue(CareerCategoryBackfillBatchSize);
+            var affected = await batch.ExecuteNonQueryAsync(cancellationToken);
+            affectedRows += affected;
+            if (affected < CareerCategoryBackfillBatchSize) break;
+        }
+
+        await using (var record = new NpgsqlCommand(
+            CareerCategoryMigrationRecordSql, connection, transaction))
+        {
+            record.Parameters.AddWithValue(CareerCategoryMigrationId);
+            record.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+            record.Parameters.AddWithValue(affectedRows);
+            await record.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     // The Lithuanian trainer was removed. Dropping in dependency order rather than with CASCADE
     // so an unexpected dependant surfaces as an error instead of being silently destroyed.
     internal const string LearningTeardownSql = """
@@ -97,9 +197,47 @@ public sealed class DatabaseInitializer(
         )
         WHERE owner_user_id IS NULL;
         ALTER TABLE todos ALTER COLUMN owner_user_id SET NOT NULL;
+
+        -- Legacy Apple accounts were global. Prefer the owner of a Gmail connection with the same
+        -- account address; otherwise assign the account to the oldest administrator (or oldest user
+        -- if no administrator exists). This preserves the most likely owner without ever leaving a
+        -- credential visible to every signed-in user.
+        UPDATE calendar_accounts account
+        SET owner_user_id = (
+          SELECT archive.owner_user_id
+          FROM gmail_connections gmail
+          JOIN archives archive ON archive.id = gmail.archive_id
+          WHERE lower(gmail.email) = lower(account.username)
+            AND archive.owner_user_id IS NOT NULL
+          ORDER BY gmail.created_at
+          LIMIT 1
+        )
+        WHERE account.owner_user_id IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM gmail_connections gmail
+            JOIN archives archive ON archive.id = gmail.archive_id
+            WHERE lower(gmail.email) = lower(account.username)
+              AND archive.owner_user_id IS NOT NULL
+          );
+        UPDATE calendar_accounts account
+        SET owner_user_id = (
+          SELECT id
+          FROM users
+          ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, created_at
+          LIMIT 1
+        )
+        WHERE account.owner_user_id IS NULL;
+        ALTER TABLE calendar_accounts ALTER COLUMN owner_user_id SET NOT NULL;
         """;
 
     internal const string CoreSchemaSql = """
+        CREATE TABLE IF NOT EXISTS app_data_migrations (
+          id TEXT PRIMARY KEY,
+          applied_at TEXT NOT NULL,
+          affected_rows BIGINT NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS users (
           id TEXT PRIMARY KEY,
           username TEXT NOT NULL,
@@ -207,7 +345,7 @@ public sealed class DatabaseInitializer(
           attachment_count BIGINT NOT NULL DEFAULT 0,
           size_bytes BIGINT NOT NULL DEFAULT 0,
           inbox_category TEXT NOT NULL DEFAULT 'primary' CHECK(inbox_category IN (
-            'primary', 'promotions', 'social', 'updates', 'bills', 'medical', 'mail_tracking'
+            'primary', 'jobs', 'promotions', 'social', 'updates', 'bills', 'medical', 'mail_tracking'
           )),
           content_sha256 TEXT,
           raw_sha256 TEXT,
@@ -220,6 +358,23 @@ public sealed class DatabaseInitializer(
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS raw_sha256 TEXT;
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS simhash BIGINT;
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS fingerprinted_at TEXT;
+        -- Existing databases keep the original generated CHECK constraint. Upgrade it once so
+        -- Career can be introduced without weakening validation for every other category.
+        DO $archive_mail$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'messages'::regclass
+              AND conname = 'messages_inbox_category_check'
+              AND pg_get_constraintdef(oid) NOT LIKE '%jobs%'
+          ) THEN
+            ALTER TABLE messages DROP CONSTRAINT messages_inbox_category_check;
+            ALTER TABLE messages ADD CONSTRAINT messages_inbox_category_check CHECK(inbox_category IN (
+              'primary', 'jobs', 'promotions', 'social', 'updates', 'bills', 'medical', 'mail_tracking'
+            ));
+          END IF;
+        END
+        $archive_mail$;
         CREATE INDEX IF NOT EXISTS messages_content_hash_idx ON messages(content_sha256)
           WHERE content_sha256 IS NOT NULL;
         CREATE INDEX IF NOT EXISTS messages_internet_id_idx ON messages(archive_id, internet_message_id)
@@ -252,6 +407,23 @@ public sealed class DatabaseInitializer(
         CREATE INDEX IF NOT EXISTS messages_archive_sender_lower_folder_idx ON messages(
           archive_id, lower(sender_address), folder_id);
         CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(archive_id, conversation_key);
+        -- Older imports left conversation_key null even though their RFC headers were retained.
+        -- Recover the oldest References id (or In-Reply-To / Message-Id fallback) in one set-based
+        -- pass. Regex extraction intentionally avoids casting legacy headers_json: a malformed old
+        -- row should not prevent the application from starting.
+        WITH conversation_roots AS (
+          SELECT id, archive_id, COALESCE(
+            substring(headers_json FROM '"references"[[:space:]]*:[[:space:]]*"<([^>]+)>'),
+            substring(headers_json FROM '"in-reply-to"[[:space:]]*:[[:space:]]*"<([^>]+)>'),
+            NULLIF(trim(BOTH '<> ' FROM internet_message_id), '')
+          ) AS root_id
+          FROM messages
+          WHERE conversation_key IS NULL OR conversation_key = ''
+        )
+        UPDATE messages message
+        SET conversation_key = 'archive:' || roots.archive_id || ':rfc822:' || roots.root_id
+        FROM conversation_roots roots
+        WHERE message.id = roots.id AND roots.root_id IS NOT NULL;
         DO $archive_mail$
         BEGIN
           IF to_regclass('messages_archive_id_source_key_key') IS NULL
@@ -937,6 +1109,7 @@ public sealed class DatabaseInitializer(
 
         CREATE TABLE IF NOT EXISTS calendar_accounts (
           id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           provider TEXT NOT NULL CHECK(provider IN ('apple')),
           label TEXT NOT NULL,
           username TEXT NOT NULL,
@@ -947,7 +1120,9 @@ public sealed class DatabaseInitializer(
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        ALTER TABLE calendar_accounts ADD COLUMN IF NOT EXISTS owner_user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
         CREATE INDEX IF NOT EXISTS calendar_accounts_provider_idx ON calendar_accounts(provider, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS calendar_accounts_owner_idx ON calendar_accounts(owner_user_id, updated_at DESC);
 
         INSERT INTO reply_styles(id, name, tone, instructions, is_default, created_at, updated_at)
         SELECT gen_random_uuid()::text, 'Professional', 'Professional and friendly',

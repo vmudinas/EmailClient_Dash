@@ -98,6 +98,78 @@ public sealed class GmailServiceTests : IDisposable
     }
 
     [Fact]
+    public void IncrementalSyncOverlapsThePreviousWatermark()
+    {
+        var query = GmailService.BuildIncrementalQuery(
+            "newer_than:30d",
+            "2026-08-06T12:10:00.0000000+00:00");
+
+        var expected = new DateTimeOffset(2026, 8, 6, 12, 5, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+        Assert.Equal($"newer_than:30d after:{expected}", query);
+    }
+
+    [Fact]
+    public void FirstSyncDoesNotInventAWatermark()
+    {
+        Assert.Equal("newer_than:30d", GmailService.BuildIncrementalQuery(" newer_than:30d ", null));
+    }
+
+    [Fact]
+    public void GmailConversationKeysAreConnectionScoped()
+    {
+        Assert.Equal("gmail:connection-1:thread-1", GmailService.GmailConversationKey("connection-1", "thread-1"));
+        Assert.NotEqual(
+            GmailService.GmailConversationKey("connection-1", "thread-1"),
+            GmailService.GmailConversationKey("connection-2", "thread-1"));
+    }
+
+    [Fact]
+    public void GmailLabelsCannotHideAReplyOrOverwriteAHighValueCategory()
+    {
+        var reply = GmailService.ApplyGmailLabels(
+            "person@example.test", "Re: project", "Following up",
+            "{\"in-reply-to\":\"<first@example.test>\"}",
+            new HashSet<string> { "CATEGORY_PROMOTIONS", "INBOX" });
+        var job = GmailService.ApplyGmailLabels(
+            "recruiter@example.test", "Interview for the platform role", "",
+            "{}", new HashSet<string> { "CATEGORY_UPDATES" });
+
+        Assert.Equal("primary", reply.Category);
+        Assert.Equal("jobs", job.Category);
+        Assert.Contains("CATEGORY_PROMOTIONS", reply.HeadersJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GmailLabelsStillClassifyOrdinaryBulkMail()
+    {
+        var result = GmailService.ApplyGmailLabels(
+            "store@example.test", "An ordinary message", "",
+            "{}", new HashSet<string> { "CATEGORY_PROMOTIONS" });
+
+        Assert.Equal("promotions", result.Category);
+    }
+
+    [Fact]
+    public void ReplySendCarriesRfcHeadersAndTheGmailThreadId()
+    {
+        var message = new MimeMessage();
+        GmailService.ApplyReplyHeaders(message, "<source@example.com>");
+        var payload = GmailService.BuildSendPayload("message"u8.ToArray(), "thread-1");
+
+        Assert.Equal("source@example.com", message.InReplyTo);
+        Assert.Contains("source@example.com", message.References);
+        Assert.Equal("thread-1", payload.GetProperty("threadId").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("raw").GetString()));
+    }
+
+    [Fact]
+    public void InterruptedSyncRecoveryMakesConnectionsSchedulableAgain()
+    {
+        Assert.Contains("WHERE status='syncing'", GmailService.RecoverInterruptedSyncsSql, StringComparison.Ordinal);
+        Assert.Contains("SET status='connected'", GmailService.RecoverInterruptedSyncsSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ExistingGmailSchemaGetsProgressDefaultsRepaired()
     {
         Assert.Contains(
@@ -142,6 +214,92 @@ public sealed class GmailServiceTests : IDisposable
     public void RetriesOnlyTransientGoogleResponses(HttpStatusCode status, bool expected)
     {
         Assert.Equal(expected, GmailService.TransientGoogleStatus(status));
+    }
+
+    [Fact]
+    public void MailboxActionsBuildExactIdempotentGmailLabelMutations()
+    {
+        var payload = GmailService.BuildBatchModifyPayload(
+            ["gmail-message-1", "gmail-message-2"],
+            [GmailMailboxAction.Read, GmailMailboxAction.Star, GmailMailboxAction.Archive]);
+
+        Assert.Equal(
+            ["gmail-message-1", "gmail-message-2"],
+            payload.GetProperty("ids").EnumerateArray().Select(value => value.GetString()!).ToArray());
+        Assert.Equal(
+            ["STARRED"],
+            payload.GetProperty("addLabelIds").EnumerateArray().Select(value => value.GetString()!).ToArray());
+        Assert.Equal(
+            ["INBOX", "UNREAD"],
+            payload.GetProperty("removeLabelIds").EnumerateArray().Select(value => value.GetString()!).ToArray());
+    }
+
+    [Theory]
+    [InlineData("Spam", "SPAM")]
+    [InlineData("Trash", "TRASH")]
+    public void SpamAndTrashLeaveTheInboxUsingTheirProviderSystemLabel(
+        string actionName, string expectedLabel)
+    {
+        var action = Enum.Parse<GmailMailboxAction>(actionName);
+        var payload = GmailService.BuildBatchModifyPayload(["message-1"], [action]);
+        var added = payload.GetProperty("addLabelIds").EnumerateArray().Select(value => value.GetString()!).ToArray();
+        var removed = payload.GetProperty("removeLabelIds").EnumerateArray().Select(value => value.GetString()!).ToArray();
+
+        Assert.Equal([expectedLabel], added);
+        Assert.Equal(["INBOX"], removed);
+    }
+
+    [Theory]
+    [InlineData("Archive", "Archive")]
+    [InlineData("Archived", "Archive")]
+    [InlineData("Trash", "Trash")]
+    [InlineData("Deleted Items", "Trash")]
+    [InlineData("Spam", "Spam")]
+    [InlineData("Junk", "Spam")]
+    public void SpecialLocalDestinationsMapToGmailSystemActions(
+        string destination, string expectedActionName)
+    {
+        var expected = Enum.Parse<GmailMailboxAction>(expectedActionName);
+        Assert.Equal(expected, GmailService.DestinationAction(destination));
+    }
+
+    [Fact]
+    public void CustomLocalFoldersDoNotInventGmailLabels()
+    {
+        Assert.Null(GmailService.DestinationAction("Receipts"));
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    public void MailboxPropagationRequiresBothTheSettingAndModifyGrant(
+        bool configured, bool granted, bool expected)
+    {
+        Assert.Equal(expected, GmailService.ShouldSyncMailboxActions(configured, granted));
+    }
+
+    [Fact]
+    public void MailboxMessageResolutionIsOwnerAndConnectionScoped()
+    {
+        Assert.Contains("a.owner_user_id=$2", GmailService.MailboxMessageLookupSql, StringComparison.Ordinal);
+        Assert.Contains("g.archive_id=m.archive_id", GmailService.MailboxMessageLookupSql, StringComparison.Ordinal);
+        Assert.Contains("starts_with(m.source_key,'gmail:' || lower(g.email) || ':')",
+            GmailService.MailboxMessageLookupSql, StringComparison.Ordinal);
+        Assert.Contains("a.owner_user_id=$2", GmailService.SenderSpamExpansionSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $3", GmailService.SenderSpamExpansionSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OnlyGmailBatchModifyPostsAreRetried()
+    {
+        Assert.True(GmailService.IsRetryableMailboxMutation(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify", HttpMethod.Post));
+        Assert.False(GmailService.IsRetryableMailboxMutation(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send", HttpMethod.Post));
+        Assert.False(GmailService.IsRetryableMailboxMutation(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify", HttpMethod.Get));
     }
 
     [Fact]

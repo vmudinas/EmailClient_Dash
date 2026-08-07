@@ -24,8 +24,10 @@ public sealed record GmailConnectionDto(
 internal sealed record PendingGmailAuthorization(
     JsonElement Request,string OwnerUserId,string Verifier,string RedirectUri,DateTimeOffset ExpiresAt,bool ModifyRequested);
 internal sealed record GmailConnectionRecord(GmailConnectionDto Public,string RefreshToken,string? AccessToken,string? AccessTokenExpiresAt);
+internal sealed record GmailMessageReference(string Id,string? ThreadId);
+internal sealed record GmailReplySource(string MessageId,string ConversationKey,string? InternetMessageId,string? GmailThreadId);
 
-public sealed class GmailService(
+public sealed partial class GmailService(
     NpgsqlDataSource database,
     AppSettingsService settings,
     ObservabilityRepository observations,
@@ -37,6 +39,14 @@ public sealed class GmailService(
     ILogger<GmailService> logger)
 {
     private const string GmailApi="https://gmail.googleapis.com/gmail/v1";
+    private static readonly TimeSpan IncrementalOverlap = TimeSpan.FromMinutes(5);
+    internal const string RecoverInterruptedSyncsSql = """
+      UPDATE gmail_connections
+      SET status='connected',
+          last_error='The previous Gmail sync was interrupted. A recovery sync has been queued.',
+          updated_at=$1
+      WHERE status='syncing'
+      """;
     internal const string ConnectionUpsertSql = """
       INSERT INTO gmail_connections(
         id,email,archive_id,folder_id,query,ocr_enabled,refresh_token,access_token,access_token_expires_at,
@@ -81,6 +91,65 @@ public sealed class GmailService(
         var result = new List<ScheduledGmailConnection>();
         while (await reader.ReadAsync(token)) result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
         return result;
+    }
+
+    internal async Task RecoverInterruptedSyncsAsync(CancellationToken token)
+    {
+        await using var command = database.CreateCommand(RecoverInterruptedSyncsSql);
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
+    }
+
+    internal static string BuildIncrementalQuery(string configuredQuery,string? lastSyncedAt)
+    {
+        if (string.IsNullOrWhiteSpace(lastSyncedAt)
+            || !DateTimeOffset.TryParse(lastSyncedAt,CultureInfo.InvariantCulture,DateTimeStyles.RoundtripKind,out var last))
+            return configuredQuery.Trim();
+        // Gmail's search watermark is second-granular and a list request is not a durable snapshot.
+        // Re-reading a short overlap is cheap because source_key is idempotent, and closes both the
+        // same-second boundary and the window where a message arrives while a sync is still running.
+        var overlapStart=last.Subtract(IncrementalOverlap).ToUnixTimeSeconds();
+        return $"{configuredQuery.Trim()} after:{overlapStart}".Trim();
+    }
+
+    internal static string GmailConversationKey(string connectionId,string threadId) =>
+        $"gmail:{connectionId}:{threadId}";
+
+    internal static void ApplyReplyHeaders(MimeMessage message,string? internetMessageId)
+    {
+        if(string.IsNullOrWhiteSpace(internetMessageId))return;
+        var normalized=internetMessageId.Trim().Trim('<','>');
+        if(normalized.Length==0)return;
+        message.InReplyTo=normalized;
+        message.References.Add(normalized);
+    }
+
+    internal static JsonElement BuildSendPayload(byte[] rawMessage,string? threadId) =>
+        string.IsNullOrWhiteSpace(threadId)
+            ? JsonSerializer.SerializeToElement(new{raw=Base64Url(rawMessage)})
+            : JsonSerializer.SerializeToElement(new{raw=Base64Url(rawMessage),threadId});
+
+    internal static (string Category,string HeadersJson) ApplyGmailLabels(
+        string senderAddress,string subject,string bodyText,string headersJson,IReadOnlySet<string> labels)
+    {
+        Dictionary<string,string> parsed;
+        try
+        {
+            parsed=JsonSerializer.Deserialize<Dictionary<string,string>>(headersJson)
+                ?? new Dictionary<string,string>();
+        }
+        catch(JsonException)
+        {
+            parsed=new Dictionary<string,string>();
+        }
+        var headers=new Dictionary<string,string>(parsed,StringComparer.OrdinalIgnoreCase);
+        if(labels.Count>0)
+            headers["x-archive-mail-gmail-label-ids"]=string.Join(',',labels.Order(StringComparer.Ordinal));
+        // Run provider labels through the same precedence rules as every other import. Replies and
+        // high-value semantic categories (career, money, health and deliveries) are intentionally
+        // evaluated before Gmail's coarse Promotions/Social/Updates buckets.
+        return (MessageCategorizer.Classify(senderAddress,subject,bodyText,headers),
+            JsonSerializer.Serialize(headers));
     }
 
     public object StartAuthorization(JsonElement request,string owner,string redirectUri)
@@ -185,7 +254,11 @@ public sealed class GmailService(
 
     public async Task<object> SendAsync(string id,string owner,JsonElement input,CancellationToken token)
     {
-        var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");if(!connection.Public.CanSend)throw new InvalidOperationException("Reconnect this account to grant Gmail send permission");var accessToken=await AccessTokenAsync(connection,token);var message=new MimeMessage();
+        var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");
+        if(!connection.Public.CanSend)throw new InvalidOperationException("Reconnect this account to grant Gmail send permission");
+        var accessToken=await AccessTokenAsync(connection,token);
+        var source=await ReplySourceAsync(Text(input,"sourceMessageId"),id,owner,token);
+        var message=new MimeMessage{Date=DateTimeOffset.Now};
         // Last gate before the message leaves. Every send path reaches this line, so refusing an
         // address here is what makes the allowlist a guarantee rather than a UI default. The
         // connection's own address is not a fallback: it is exactly the address we do not want
@@ -193,7 +266,12 @@ public sealed class GmailService(
         // Callers that care about the recruiter/development split resolve it when the draft is
         // written, where the flag lives; anything arriving here without a choice is general mail.
         var fromAddress=SendingIdentity.Resolve(Text(input,"fromAddress"),developmentRelated:false);
-        message.From.Add(MailboxAddress.Parse(fromAddress));foreach(var value in Strings(input,"to"))message.To.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"cc"))message.Cc.Add(MailboxAddress.Parse(value));foreach(var value in Strings(input,"bcc"))message.Bcc.Add(MailboxAddress.Parse(value));message.Subject=Text(input,"subject")??"";
+        message.From.Add(MailboxAddress.Parse(fromAddress));
+        foreach(var value in Strings(input,"to"))message.To.Add(MailboxAddress.Parse(value));
+        foreach(var value in Strings(input,"cc"))message.Cc.Add(MailboxAddress.Parse(value));
+        foreach(var value in Strings(input,"bcc"))message.Bcc.Add(MailboxAddress.Parse(value));
+        message.Subject=Text(input,"subject")??"";
+        ApplyReplyHeaders(message,source?.InternetMessageId);
         // A resume was previously stored on the draft and shown as attached, but never actually
         // added to the outgoing message: the body was a bare TextPart, so recipients received the
         // text and no file. Build through BodyBuilder so the file genuinely travels with the mail.
@@ -205,7 +283,29 @@ public sealed class GmailService(
             await AddResumeAttachmentAsync(body,resume,token);
         }
         message.Body=body.ToMessageBody();
-        await using var stream=new MemoryStream();await message.WriteToAsync(stream,token);var payload=JsonSerializer.SerializeToElement(new{raw=Base64Url(stream.ToArray())});var sent=await GoogleJsonAsync($"{GmailApi}/users/me/messages/send",accessToken,HttpMethod.Post,payload,token);return new{id=sent.GetProperty("id").GetString(),threadId=sent.TryGetProperty("threadId",out var thread)?thread.GetString():null,localCopyImported=false};
+        await using var stream=new MemoryStream();
+        await message.WriteToAsync(stream,token);
+        var payload=BuildSendPayload(stream.ToArray(),source?.GmailThreadId);
+        var sent=await GoogleJsonAsync($"{GmailApi}/users/me/messages/send",accessToken,HttpMethod.Post,payload,token);
+        var sentId=sent.GetProperty("id").GetString();
+        var sentThreadId=sent.TryGetProperty("threadId",out var thread)?thread.GetString():null;
+        if(source is not null)
+        {
+            try{await RecordReplyAsync(source,sentId,token);}
+            catch(Exception error){logger.LogWarning(error,"Sent Gmail reply {SentId}, but could not record its local conversation state",sentId);}
+        }
+        return new{id=sentId,threadId=sentThreadId,localCopyImported=false};
+    }
+
+    internal static async Task AddResumeAttachmentAsync(BodyBuilder body,ResumeContent resume,CancellationToken token)
+    {
+        // MimeKit keeps the supplied stream as the attachment body. The previous implementation
+        // disposed that stream before WriteToAsync serialized the message, so every AI draft with
+        // a resume failed at send time with ObjectDisposedException and surfaced as a bare 500.
+        // Copy the bounded resume asset into the MIME part so serialization no longer depends on
+        // the source file staying open.
+        var content=await File.ReadAllBytesAsync(resume.FullPath,token);
+        body.Attachments.Add(resume.Filename,content,ContentType.Parse(resume.ContentType));
     }
 
     internal static async Task AddResumeAttachmentAsync(BodyBuilder body,ResumeContent resume,CancellationToken token)
@@ -221,6 +321,46 @@ public sealed class GmailService(
 
     public async Task<IReadOnlyList<object>> SendAsAsync(string id,string owner,CancellationToken token){var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");var accessToken=await AccessTokenAsync(connection,token);var json=await GoogleJsonAsync($"{GmailApi}/users/me/settings/sendAs",accessToken,HttpMethod.Get,null,token);if(!json.TryGetProperty("sendAs",out var values)||values.ValueKind!=JsonValueKind.Array)return[];return values.EnumerateArray().Where(item=>item.TryGetProperty("sendAsEmail",out _)).Select(item=>(object)new{email=item.GetProperty("sendAsEmail").GetString(),displayName=item.TryGetProperty("displayName",out var display)?display.GetString()??"":"",isPrimary=item.TryGetProperty("isPrimary",out var primary)&&primary.GetBoolean(),isDefault=item.TryGetProperty("isDefault",out var fallback)&&fallback.GetBoolean()}).ToArray();}
 
+    private async Task<GmailReplySource?> ReplySourceAsync(string? messageId,string connectionId,string owner,CancellationToken token)
+    {
+        if(string.IsNullOrWhiteSpace(messageId))return null;
+        const string sql="""
+          SELECT m.id,COALESCE(NULLIF(m.conversation_key,''),m.id),m.internet_message_id
+          FROM messages m JOIN archives a ON a.id=m.archive_id
+          WHERE m.id=$1 AND a.owner_user_id=$2
+          """;
+        await using var command=database.CreateCommand(sql);
+        command.Parameters.AddWithValue(messageId);
+        command.Parameters.AddWithValue(owner);
+        await using var reader=await command.ExecuteReaderAsync(token);
+        if(!await reader.ReadAsync(token))throw new MailNotFoundException("Reply source message not found");
+        var conversationKey=reader.GetString(1);
+        var internetMessageId=reader.IsDBNull(2)?null:reader.GetString(2).Trim().Trim('<','>');
+        var prefix=$"gmail:{connectionId}:";
+        var gmailThreadId=conversationKey.StartsWith(prefix,StringComparison.Ordinal)
+            ? conversationKey[prefix.Length..]
+            : null;
+        return new(reader.GetString(0),conversationKey,internetMessageId,gmailThreadId);
+    }
+
+    private async Task RecordReplyAsync(GmailReplySource source,string? sentExternalId,CancellationToken token)
+    {
+        const string sql="""
+          INSERT INTO conversation_replies(conversation_key,source_message_id,sent_external_id,replied_at)
+          VALUES($1,$2,$3,$4)
+          ON CONFLICT(conversation_key) DO UPDATE SET
+            source_message_id=EXCLUDED.source_message_id,
+            sent_external_id=EXCLUDED.sent_external_id,
+            replied_at=EXCLUDED.replied_at
+          """;
+        await using var command=database.CreateCommand(sql);
+        command.Parameters.AddWithValue(source.ConversationKey);
+        command.Parameters.AddWithValue(source.MessageId);
+        command.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlDbType.Text,Value=(object?)sentExternalId??DBNull.Value});
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
+    }
+
     public async Task<JsonElement> GoogleRequestAsync(string id,string owner,string url,HttpMethod method,JsonElement? body,CancellationToken token)
     {var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");if(!connection.Public.CanManageCalendar)throw new InvalidOperationException("Reconnect this account to grant Google Calendar permission");return await GoogleJsonAsync(url,await AccessTokenAsync(connection,token),method,body,token);}
 
@@ -232,11 +372,71 @@ public sealed class GmailService(
         GmailConnectionRecord? connection=null;
         try
         {
-            connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");var accessToken=await AccessTokenAsync(connection,token);var query=full?"":connection.Public.Query;if(!full&&connection.Public.LastSyncedAt is not null&&DateTimeOffset.TryParse(connection.Public.LastSyncedAt,out var last))query=$"{query} after:{last.ToUnixTimeSeconds()}".Trim();var ids=await ListMessageIdsAsync(accessToken,query,token);await UpdateSyncAsync(id,"syncing",0,ids.Count,0,null,token,full?"":null);
-            var staging=Path.Combine(active.DataDirectory,"gmail-staging",id,Guid.NewGuid().ToString("N"));Directory.CreateDirectory(staging);jobId=Guid.NewGuid().ToString();var now=DateTimeOffset.UtcNow.ToString("O");await CreateSyncJobAsync(jobId,connection.Public,staging,ids.Count,now,token);var job=new ImportJobRecord(new(jobId,connection.Public.ArchiveId,connection.Public.Email,"gmail","running","indexing",0,ids.Count,0,0,0,connection.Public.OcrEnabled,true,"Syncing Gmail",now,now),staging,true,JsonDocument.Parse("{}"),staging,"gmail",1);long processed=0,imported=0;
-            for(var offset=0;offset<ids.Count;offset+=100){token.ThrowIfCancellationRequested();var parsed=new List<ParsedMessage>();var readStates=new Dictionary<string,bool>();foreach(var messageId in ids.Skip(offset).Take(100)){var sourceKey=$"gmail:{connection.Public.Email.ToLowerInvariant()}:{messageId}";if(await MessageExistsAsync(connection.Public.ArchiveId,sourceKey,token)){processed++;continue;}var raw=await GoogleJsonAsync($"{GmailApi}/users/me/messages/{Uri.EscapeDataString(messageId)}?format=raw",await AccessTokenAsync(await GetAsync(id,owner,token)??connection,token),HttpMethod.Get,null,token);if(!raw.TryGetProperty("raw",out var encoded))continue;var file=Path.Combine(staging,$"{messageId}.eml");await File.WriteAllBytesAsync(file,Base64UrlDecode(encoded.GetString()??""),token);var item=await EmlParser.ParseAsync(connection.Public.ArchiveId,staging,file,token);var labels=raw.TryGetProperty("labelIds",out var labelArray)&&labelArray.ValueKind==JsonValueKind.Array?labelArray.EnumerateArray().Select(value=>value.GetString()??"").ToHashSet():[];var folder=ResolveFolder(connection.Public.FolderPath,labels);var category=labels.Contains("CATEGORY_PROMOTIONS")?"promotions":labels.Contains("CATEGORY_SOCIAL")?"social":labels.Contains("CATEGORY_UPDATES")?"updates":item.InboxCategory;parsed.Add(item with{SourceKey=sourceKey,FolderPath=folder,InboxCategory=category,SourceFile=Path.GetFileName(file)});readStates[sourceKey]=!labels.Contains("UNREAD");processed++;}
-                if(parsed.Count>0){imported+=parsed.Count;var checkpoint=new ImportCheckpoint(2,"indexing",parsed[^1].SourceFile,processed,ids.Count,$"gmail:{id}");await writer.CommitAsync(job,parsed,checkpoint,TimeSpan.FromMinutes(5),token);await ApplyReadStatesAsync(connection.Public.ArchiveId,readStates,token);}await UpdateSyncAsync(id,"syncing",processed,ids.Count,imported,null,token);}
-            await jobs.MarkCompletedAsync(jobId,token);await UpdateSyncAsync(id,"connected",processed,ids.Count,imported,null,token,lastSyncedAt:DateTimeOffset.UtcNow.ToString("O"));
+            connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");
+            var accessToken=await AccessTokenAsync(connection,token);
+            // Persist the beginning of the scan, not its completion. Any message arriving while
+            // this run is downloading remains newer than this watermark and is eligible next run.
+            var syncStartedAt=DateTimeOffset.UtcNow;
+            var query=full?"":BuildIncrementalQuery(connection.Public.Query,connection.Public.LastSyncedAt);
+            var references=await ListMessageReferencesAsync(accessToken,query,token);
+            await UpdateSyncAsync(id,"syncing",0,references.Count,0,null,token);
+
+            var staging=Path.Combine(active.DataDirectory,"gmail-staging",id,Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(staging);
+            jobId=Guid.NewGuid().ToString();
+            var now=DateTimeOffset.UtcNow.ToString("O");
+            await CreateSyncJobAsync(jobId,connection.Public,staging,references.Count,now,token);
+            var job=new ImportJobRecord(new(jobId,connection.Public.ArchiveId,connection.Public.Email,"gmail","running","indexing",0,references.Count,0,0,0,connection.Public.OcrEnabled,true,"Syncing Gmail",now,now),staging,true,JsonDocument.Parse("{}"),staging,"gmail",1);
+            long processed=0,imported=0;
+            var sourcePrefix=$"gmail:{connection.Public.Email.ToLowerInvariant()}:";
+            for(var offset=0;offset<references.Count;offset+=100)
+            {
+                token.ThrowIfCancellationRequested();
+                var batch=references.Skip(offset).Take(100).ToArray();
+                var sourceKeys=batch.Select(item=>sourcePrefix+item.Id).ToArray();
+                var existing=await ExistingSourceKeysAsync(connection.Public.ArchiveId,sourceKeys,token);
+                await ApplyConversationKeysAsync(connection.Public.ArchiveId,id,sourcePrefix,batch,existing,token);
+
+                var parsed=new List<ParsedMessage>();
+                var readStates=new Dictionary<string,bool>();
+                foreach(var reference in batch)
+                {
+                    var sourceKey=sourcePrefix+reference.Id;
+                    if(existing.Contains(sourceKey)){processed++;continue;}
+                    var raw=await GoogleJsonAsync($"{GmailApi}/users/me/messages/{Uri.EscapeDataString(reference.Id)}?format=raw",accessToken,HttpMethod.Get,null,token);
+                    if(!raw.TryGetProperty("raw",out var encoded)||string.IsNullOrWhiteSpace(encoded.GetString()))
+                        throw new InvalidOperationException($"Gmail did not return message content for {reference.Id}");
+                    var file=Path.Combine(staging,$"{reference.Id}.eml");
+                    await File.WriteAllBytesAsync(file,Base64UrlDecode(encoded.GetString()!),token);
+                    var item=await EmlParser.ParseAsync(connection.Public.ArchiveId,staging,file,token);
+                    var labels=raw.TryGetProperty("labelIds",out var labelArray)&&labelArray.ValueKind==JsonValueKind.Array
+                        ? labelArray.EnumerateArray().Select(value=>value.GetString()??"").ToHashSet()
+                        : [];
+                    var folder=ResolveFolder(connection.Public.FolderPath,labels);
+                    var classified=ApplyGmailLabels(
+                        item.SenderAddress,item.Subject,item.BodyText,item.HeadersJson,labels);
+                    var providerThread=Text(raw,"threadId")??reference.ThreadId;
+                    var conversationKey=string.IsNullOrWhiteSpace(providerThread)
+                        ? item.ConversationKey
+                        : GmailConversationKey(id,providerThread);
+                    parsed.Add(item with{SourceKey=sourceKey,FolderPath=folder,
+                        InboxCategory=classified.Category,HeadersJson=classified.HeadersJson,
+                        ConversationKey=conversationKey,SourceFile=Path.GetFileName(file)});
+                    readStates[sourceKey]=!labels.Contains("UNREAD");
+                    processed++;
+                }
+                if(parsed.Count>0)
+                {
+                    imported+=parsed.Count;
+                    var checkpoint=new ImportCheckpoint(2,"indexing",parsed[^1].SourceFile,processed,references.Count,$"gmail:{id}");
+                    await writer.CommitAsync(job,parsed,checkpoint,TimeSpan.FromMinutes(5),token);
+                    await ApplyReadStatesAsync(connection.Public.ArchiveId,readStates,token);
+                }
+                await UpdateSyncAsync(id,"syncing",processed,references.Count,imported,null,token);
+            }
+            await jobs.MarkCompletedAsync(jobId,token);
+            await UpdateSyncAsync(id,"connected",processed,references.Count,imported,null,token,
+                lastSyncedAt:syncStartedAt.ToString("O"));
         }
         catch(Exception error)
         {
@@ -265,12 +465,32 @@ public sealed class GmailService(
     }
 
     private async Task CreateSyncJobAsync(string jobId,GmailConnectionDto connection,string staging,long total,string now,CancellationToken token){const string sql="""INSERT INTO import_jobs(id,archive_id,source_path,source_name,source_type,status,phase,processed_items,total_items,processed_bytes,total_bytes,error_count,ocr_enabled,can_resume,temporary_source,checkpoint_json,checkpoint_version,staging_path,parser_name,created_at,updated_at) VALUES($1,$2,$3,$4,'gmail','running','indexing',0,$5,0,0,0,$6,1,1,'{}',2,$3,'gmail-api',$7,$7)""";await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(jobId);command.Parameters.AddWithValue(connection.ArchiveId);command.Parameters.AddWithValue(staging);command.Parameters.AddWithValue(connection.Email);command.Parameters.AddWithValue(total);command.Parameters.AddWithValue(connection.OcrEnabled?1:0);command.Parameters.AddWithValue(now);await command.ExecuteNonQueryAsync(token);}
-    private async Task<IReadOnlyList<string>> ListMessageIdsAsync(string accessToken,string query,CancellationToken token){var result=new List<string>();string? page=null;do{var url=$"{GmailApi}/users/me/messages?maxResults=500"+(query.Length>0?$"&q={Uri.EscapeDataString(query)}":"")+(page is null?"":$"&pageToken={Uri.EscapeDataString(page)}");var json=await GoogleJsonAsync(url,accessToken,HttpMethod.Get,null,token);if(json.TryGetProperty("messages",out var messages)&&messages.ValueKind==JsonValueKind.Array)result.AddRange(messages.EnumerateArray().Select(item=>item.GetProperty("id").GetString()).Where(value=>value is not null)!);page=json.TryGetProperty("nextPageToken",out var next)?next.GetString():null;}while(page is not null);return result;}
+    private async Task<IReadOnlyList<GmailMessageReference>> ListMessageReferencesAsync(string accessToken,string query,CancellationToken token)
+    {
+        var result=new List<GmailMessageReference>();
+        string? page=null;
+        do
+        {
+            var url=$"{GmailApi}/users/me/messages?maxResults=500"
+                +(query.Length>0?$"&q={Uri.EscapeDataString(query)}":"")
+                +(page is null?"":$"&pageToken={Uri.EscapeDataString(page)}");
+            var json=await GoogleJsonAsync(url,accessToken,HttpMethod.Get,null,token);
+            if(json.TryGetProperty("messages",out var messages)&&messages.ValueKind==JsonValueKind.Array)
+                foreach(var item in messages.EnumerateArray())
+                    if(Text(item,"id") is {Length:>0} messageId)
+                        result.Add(new(messageId,Text(item,"threadId")));
+            page=json.TryGetProperty("nextPageToken",out var next)?next.GetString():null;
+        }while(page is not null);
+        return result;
+    }
     private async Task<GmailConnectionRecord?> GetAsync(string id,string owner,CancellationToken token){const string sql="""SELECT g.id,g.email,g.archive_id,a.name,g.folder_id,f.path,g.query,g.ocr_enabled<>0,g.can_send<>0,g.can_modify_mailbox<>0,g.can_manage_calendar<>0,g.status,g.processed_items,g.total_items,g.imported_items,g.last_synced_at,g.last_error,g.created_at,g.updated_at,g.refresh_token,g.access_token,g.access_token_expires_at FROM gmail_connections g JOIN archives a ON a.id=g.archive_id JOIN folders f ON f.id=g.folder_id WHERE g.id=$1 AND a.owner_user_id=$2""";await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(id);command.Parameters.AddWithValue(owner);await using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return null;var value=ReadPublic(reader);return new(value,reader.GetString(19),reader.IsDBNull(20)?null:reader.GetString(20),reader.IsDBNull(21)?null:reader.GetString(21));}
     private async Task<string> AccessTokenAsync(GmailConnectionRecord record,CancellationToken token){if(record.AccessToken is not null&&DateTimeOffset.TryParse(record.AccessTokenExpiresAt,out var expires)&&expires>DateTimeOffset.UtcNow.AddMinutes(1))return record.AccessToken;var configured=settings.Current().GmailValue;if(string.IsNullOrWhiteSpace(configured.ClientId))throw new InvalidOperationException("Gmail OAuth configuration is missing; restore it in Admin settings and reauthorize the account");var tokenFields=new Dictionary<string,string>{{"client_id",configured.ClientId},{"refresh_token",record.RefreshToken},{"grant_type","refresh_token"}};if(!string.IsNullOrWhiteSpace(configured.ClientSecret))tokenFields["client_secret"]=configured.ClientSecret;using var form=new FormUrlEncodedContent(tokenFields);using var response=await clients.CreateClient("gmail").PostAsync("https://oauth2.googleapis.com/token",form,token);var body=await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken:token);if(!response.IsSuccessStatusCode){var reason=Text(body,"error_description")??Text(body,"error")??$"HTTP {(int)response.StatusCode}";throw new InvalidOperationException($"Google access token refresh failed: {reason}");}var access=body.GetProperty("access_token").GetString()!;var expiresAt=DateTimeOffset.UtcNow.AddSeconds(Seconds(body,"expires_in",3600)).ToString("O");await using var command=database.CreateCommand("UPDATE gmail_connections SET access_token=$2,access_token_expires_at=$3,updated_at=$4 WHERE id=$1");command.Parameters.AddWithValue(record.Public.Id);command.Parameters.AddWithValue(access);command.Parameters.AddWithValue(expiresAt);command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));await command.ExecuteNonQueryAsync(token);return access;}
     private async Task<JsonElement> GoogleJsonAsync(string url,string accessToken,HttpMethod method,JsonElement? body,CancellationToken token)
     {
-        var maxAttempts=method==HttpMethod.Get?3:1;
+        // Gmail's batchModify operation is idempotent: adding an existing label or removing an
+        // absent label has the same result. Retrying those user actions closes a common failure
+        // mode on brief 429/5xx responses without ever retrying a send operation.
+        var maxAttempts=method==HttpMethod.Get||IsRetryableMailboxMutation(url,method)?3:1;
         for(var attempt=1;attempt<=maxAttempts;attempt++)
         {
             try
@@ -297,11 +517,59 @@ public sealed class GmailService(
         throw new InvalidOperationException("Google API request failed");
     }
     internal static bool TransientGoogleStatus(HttpStatusCode status)=>(int)status is 429 or 500 or 502 or 503 or 504;
+    internal static bool IsRetryableMailboxMutation(string url,HttpMethod method) =>
+        method==HttpMethod.Post&&url.EndsWith("/messages/batchModify",StringComparison.Ordinal);
     private static Task RetryDelayAsync(int attempt,CancellationToken token)=>Task.Delay(TimeSpan.FromSeconds(1<<Math.Min(attempt-1,3)),token);
     private async Task UpdateSyncAsync(string id,string status,long processed,long? total,long imported,string? error,CancellationToken token,string? query=null,string? lastSyncedAt=null){const string sql="UPDATE gmail_connections SET status=$2,processed_items=$3,total_items=$4,imported_items=$5,last_error=$6,query=COALESCE($7,query),last_synced_at=COALESCE($8,last_synced_at),updated_at=$9 WHERE id=$1";await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(id);command.Parameters.AddWithValue(status);command.Parameters.AddWithValue(processed);command.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlDbType.Bigint,Value=(object?)total??DBNull.Value});command.Parameters.AddWithValue(imported);command.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlDbType.Text,Value=(object?)error??DBNull.Value});command.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlDbType.Text,Value=(object?)query??DBNull.Value});command.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlDbType.Text,Value=(object?)lastSyncedAt??DBNull.Value});command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));await command.ExecuteNonQueryAsync(token);}
     private async Task FinishSyncAsync(string id,string status,string? error,CancellationToken token){const string sql="UPDATE gmail_connections SET status=$2,last_error=$3,updated_at=$4 WHERE id=$1";await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(id);command.Parameters.AddWithValue(status);command.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlDbType.Text,Value=(object?)error??DBNull.Value});command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));await command.ExecuteNonQueryAsync(token);}
-    private async Task<bool> MessageExistsAsync(string archive,string key,CancellationToken token){await using var command=database.CreateCommand("SELECT EXISTS(SELECT 1 FROM messages WHERE archive_id=$1 AND source_key=$2)");command.Parameters.AddWithValue(archive);command.Parameters.AddWithValue(key);return Convert.ToBoolean(await command.ExecuteScalarAsync(token));}
-    private async Task ApplyReadStatesAsync(string archive,IReadOnlyDictionary<string,bool> states,CancellationToken token){foreach(var pair in states){await using var command=database.CreateCommand("UPDATE message_state s SET is_read=$3,updated_at=$4 FROM messages m WHERE m.id=s.message_id AND m.archive_id=$1 AND m.source_key=$2");command.Parameters.AddWithValue(archive);command.Parameters.AddWithValue(pair.Key);command.Parameters.AddWithValue(pair.Value?1:0);command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));await command.ExecuteNonQueryAsync(token);}}
+    private async Task<HashSet<string>> ExistingSourceKeysAsync(string archive,string[] keys,CancellationToken token)
+    {
+        if(keys.Length==0)return[];
+        await using var command=database.CreateCommand("SELECT source_key FROM messages WHERE archive_id=$1 AND source_key=ANY($2)");
+        command.Parameters.AddWithValue(archive);
+        command.Parameters.AddWithValue(keys);
+        await using var reader=await command.ExecuteReaderAsync(token);
+        var result=new HashSet<string>(StringComparer.Ordinal);
+        while(await reader.ReadAsync(token))result.Add(reader.GetString(0));
+        return result;
+    }
+
+    private async Task ApplyConversationKeysAsync(string archive,string connectionId,string sourcePrefix,
+        IReadOnlyList<GmailMessageReference> references,IReadOnlySet<string> existing,CancellationToken token)
+    {
+        var values=references
+            .Where(item=>!string.IsNullOrWhiteSpace(item.ThreadId)&&existing.Contains(sourcePrefix+item.Id))
+            .Select(item=>(Source:sourcePrefix+item.Id,Conversation:GmailConversationKey(connectionId,item.ThreadId!)))
+            .ToArray();
+        if(values.Length==0)return;
+        const string sql="""
+          UPDATE messages m SET conversation_key=data.conversation_key
+          FROM unnest($2::text[],$3::text[]) AS data(source_key,conversation_key)
+          WHERE m.archive_id=$1 AND m.source_key=data.source_key
+            AND m.conversation_key IS DISTINCT FROM data.conversation_key
+          """;
+        await using var command=database.CreateCommand(sql);
+        command.Parameters.AddWithValue(archive);
+        command.Parameters.AddWithValue(values.Select(value=>value.Source).ToArray());
+        command.Parameters.AddWithValue(values.Select(value=>value.Conversation).ToArray());
+        await command.ExecuteNonQueryAsync(token);
+    }
+
+    private async Task ApplyReadStatesAsync(string archive,IReadOnlyDictionary<string,bool> states,CancellationToken token)
+    {
+        if(states.Count==0)return;
+        const string sql="""
+          UPDATE message_state s SET is_read=data.is_read,updated_at=$4
+          FROM messages m,unnest($2::text[],$3::bigint[]) AS data(source_key,is_read)
+          WHERE m.id=s.message_id AND m.archive_id=$1 AND m.source_key=data.source_key
+          """;
+        await using var command=database.CreateCommand(sql);
+        command.Parameters.AddWithValue(archive);
+        command.Parameters.AddWithValue(states.Keys.ToArray());
+        command.Parameters.AddWithValue(states.Values.Select(value=>value?1L:0L).ToArray());
+        command.Parameters.AddWithValue(DateTimeOffset.UtcNow.ToString("O"));
+        await command.ExecuteNonQueryAsync(token);
+    }
     private static async Task<bool> OwnsArchiveAsync(NpgsqlConnection connection,NpgsqlTransaction tx,string archive,string owner,CancellationToken token){await using var command=new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM archives WHERE id=$1 AND owner_user_id=$2)",connection,tx);command.Parameters.AddWithValue(archive);command.Parameters.AddWithValue(owner);return Convert.ToBoolean(await command.ExecuteScalarAsync(token));}
     private static GmailConnectionDto ReadPublic(NpgsqlDataReader r)=>new(r.GetString(0),r.GetString(1),r.GetString(2),r.GetString(3),r.GetString(4),r.GetString(5),r.GetString(6),r.GetBoolean(7),r.GetBoolean(8),r.GetBoolean(9),r.GetBoolean(10),r.GetString(11),r.GetInt64(12),r.IsDBNull(13)?null:r.GetInt64(13),r.GetInt64(14),r.IsDBNull(15)?null:r.GetString(15),r.IsDBNull(16)?null:r.GetString(16),r.GetString(17),r.GetString(18));
     private static string ResolveFolder(string root,IReadOnlySet<string> labels)=>labels.Contains("TRASH")?$"{root}/Trash":labels.Contains("SPAM")?$"{root}/Spam":labels.Contains("SENT")?$"{root}/Sent":labels.Contains("DRAFT")?$"{root}/Drafts":labels.Contains("INBOX")?$"{root}/Inbox":$"{root}/Archived";
@@ -334,7 +602,34 @@ public sealed class GmailScheduledSyncService(GmailService gmail,AppSettingsServ
     // Reading the interval and awaiting the delay sit inside the guard with everything else: they
     // decrypt saved settings and observe the shutdown token, and an exception from either escaping
     // ExecuteAsync faults this service. Every other worker here already guards its whole loop.
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken){while(!stoppingToken.IsCancellationRequested){try{var minutes=Math.Clamp(settings.Current().GmailValue.SyncIntervalMinutes,1,1440);await Task.Delay(TimeSpan.FromMinutes(minutes),stoppingToken);foreach(var connection in await gmail.ListAsyncForSchedule(stoppingToken))if(connection.Status!="syncing")await gmail.StartSyncAsync(connection.Id,connection.OwnerUserId,false,stoppingToken);}catch(OperationCanceledException)when(stoppingToken.IsCancellationRequested){break;}catch(Exception error){logger.LogError(error,"Scheduled Gmail synchronization failed");await Task.Delay(TimeSpan.FromMinutes(1),CancellationToken.None);}}}
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try{await gmail.RecoverInterruptedSyncsAsync(stoppingToken);}
+        catch(OperationCanceledException)when(stoppingToken.IsCancellationRequested){return;}
+        catch(Exception error){logger.LogError(error,"Interrupted Gmail sync recovery failed");}
+
+        while(!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                foreach(var connection in await gmail.ListAsyncForSchedule(stoppingToken))
+                {
+                    if(connection.Status=="syncing")continue;
+                    try{await gmail.StartSyncAsync(connection.Id,connection.OwnerUserId,false,stoppingToken);}
+                    catch(Exception error){logger.LogError(error,"Scheduled Gmail synchronization failed for {ConnectionId}",connection.Id);}
+                }
+                var minutes=Math.Clamp(settings.Current().GmailValue.SyncIntervalMinutes,1,1440);
+                await Task.Delay(TimeSpan.FromMinutes(minutes),stoppingToken);
+            }
+            catch(OperationCanceledException)when(stoppingToken.IsCancellationRequested){break;}
+            catch(Exception error)
+            {
+                logger.LogError(error,"Scheduled Gmail synchronization failed");
+                try{await Task.Delay(TimeSpan.FromMinutes(1),stoppingToken);}
+                catch(OperationCanceledException)when(stoppingToken.IsCancellationRequested){break;}
+            }
+        }
+    }
 }
 
 public sealed record ScheduledGmailConnection(string Id,string OwnerUserId,string Status);

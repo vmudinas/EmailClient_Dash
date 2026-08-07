@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InboxCategoryCounts, MessageSummary } from "@email-client/shared";
 import { DEFAULT_INBOX_TABS } from "@email-client/shared";
@@ -42,6 +42,17 @@ const BULK_SELECTION_PROPS = {
   onToggleRead: vi.fn()
 };
 
+const EMPTY_INBOX_COUNTS: InboxCategoryCounts = {
+  primary: 0,
+  jobs: 0,
+  promotions: 0,
+  social: 0,
+  updates: 0,
+  bills: 0,
+  medical: 0,
+  mail_tracking: 0
+};
+
 afterEach(cleanup);
 
 describe("MessageList drag and drop", () => {
@@ -66,7 +77,8 @@ describe("MessageList drag and drop", () => {
         {...BULK_SELECTION_PROPS}
       />
     );
-    const row = screen.getByRole("option");
+    expect(screen.getByRole("list", { name: "Inbox" })).toBeTruthy();
+    const row = screen.getByRole("listitem");
 
     fireEvent.dragStart(row, { dataTransfer: { effectAllowed: "", setData } });
     expect(setData).toHaveBeenCalledWith("text/plain", MESSAGE.id);
@@ -100,12 +112,12 @@ describe("MessageList drag and drop", () => {
       />
     );
 
-    fireEvent.dragStart(screen.getAllByRole("option")[0]!, { dataTransfer: { effectAllowed: "", setData } });
+    fireEvent.dragStart(screen.getAllByRole("listitem")[0]!, { dataTransfer: { effectAllowed: "", setData } });
 
     expect(setData).toHaveBeenCalledWith("text/plain", `${MESSAGE.id}\n${secondMessage.id}`);
     expect(setData).toHaveBeenCalledWith("application/x-archive-mail-messages", JSON.stringify([...selectedIds]));
     expect(onDragStart).toHaveBeenCalledWith(MESSAGE, [...selectedIds]);
-    expect(screen.getAllByRole("option").every((row) => row.classList.contains("dragging"))).toBe(true);
+    expect(screen.getAllByRole("listitem").every((row) => row.classList.contains("dragging"))).toBe(true);
     expect(screen.getAllByTitle("Drag to move 2 selected messages")).toHaveLength(2);
   });
 
@@ -147,19 +159,19 @@ describe("MessageList drag and drop", () => {
       />
     );
 
-    const [readRow, analyzedRow, calendarRow] = screen.getAllByRole("option");
+    const [readRow, analyzedRow, calendarRow] = screen.getAllByRole("listitem");
     expect(readRow?.classList.contains("read")).toBe(true);
     expect(readRow?.classList.contains("analyzed")).toBe(false);
     expect(analyzedRow?.classList.contains("analyzed")).toBe(true);
     expect(analyzedRow?.classList.contains("calendar-linked")).toBe(false);
     expect(calendarRow?.classList.contains("calendar-linked")).toBe(true);
     expect(calendarRow?.classList.contains("analyzed")).toBe(false);
-    expect(screen.getByText("Analyzed")).toBeTruthy();
-    expect(screen.getAllByText("Replied")).toHaveLength(2);
+    expect(screen.getAllByText("AI brief")).toHaveLength(2);
+    expect(screen.getAllByText("Conversation")).toHaveLength(2);
     expect(screen.getByText("Event")).toBeTruthy();
   });
 
-  it("shows Gmail-style Inbox categories with counts and selection", () => {
+  it("shows Focus and useful Inbox category labels with counts and selection", () => {
     const onSelectCategory = vi.fn();
     render(
       <MessageList
@@ -179,35 +191,128 @@ describe("MessageList drag and drop", () => {
           active: "primary",
           tabs: DEFAULT_INBOX_TABS.map((tab) => ({
             ...tab,
-            label: tab.id === "social" ? "Community" : tab.label,
-            enabled: tab.id === "promotions" ? false : tab.enabled,
             keywords: [],
             senderDomains: []
           })),
           counts: {
+            ...EMPTY_INBOX_COUNTS,
             primary: 12,
             promotions: 8,
             social: 4,
             updates: 6,
             bills: 3,
             medical: 2
-          } as unknown as InboxCategoryCounts,
+          },
           onSelect: onSelectCategory
         }}
         {...BULK_SELECTION_PROPS}
       />
     );
 
-    expect(screen.getByRole("button", { name: "Primary, 12 messages" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.queryByRole("button", { name: "Promotions, 8 messages" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Community, 4 messages" }));
-    expect(onSelectCategory).toHaveBeenCalledWith("social");
-    fireEvent.click(screen.getByRole("button", { name: "Mail/Tracking, 0 messages" }));
+    expect(screen.getByRole("button", { name: "Focus, important mail from today and yesterday" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "People, 12 messages" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Focus, important mail from today and yesterday" }));
+    expect(onSelectCategory).toHaveBeenCalledWith("focus");
+    fireEvent.click(screen.getByRole("button", { name: "Newsletters, 8 messages" }));
+    expect(onSelectCategory).toHaveBeenCalledWith("promotions");
+    fireEvent.click(screen.getByRole("button", { name: "Deliveries, 0 messages" }));
     expect(onSelectCategory).toHaveBeenCalledWith("mail_tracking");
-    expect(screen.getByText("No primary messages")).toBeTruthy();
+    expect(screen.getByText("Choose another Inbox category.")).toBeTruthy();
   });
 
-  it("shows upcoming package cards in Mail/Tracking and opens the carrier page", () => {
+  it("groups Focus into Today and Yesterday and prioritizes follow-ups, replies, people, then Career", () => {
+    const messages: MessageSummary[] = [
+      {
+        ...MESSAGE,
+        id: "yesterday-follow-up",
+        subject: "Yesterday follow-up",
+        receivedAt: relativeDayAt(1, 17),
+        inboxCategory: "primary",
+        hasPendingFollowUp: true
+      },
+      {
+        ...MESSAGE,
+        id: "today-career",
+        subject: "Career opportunity",
+        receivedAt: relativeDayAt(0, 17),
+        inboxCategory: "jobs"
+      },
+      {
+        ...MESSAGE,
+        id: "today-person",
+        subject: "Read person update",
+        receivedAt: relativeDayAt(0, 16),
+        inboxCategory: "primary",
+        state: { ...MESSAGE.state, isRead: true }
+      },
+      {
+        ...MESSAGE,
+        id: "today-unread-person",
+        subject: "Unread person update",
+        receivedAt: relativeDayAt(0, 14),
+        inboxCategory: "primary"
+      },
+      {
+        ...MESSAGE,
+        id: "today-follow-up",
+        subject: "Needs my follow-up",
+        receivedAt: relativeDayAt(0, 13),
+        inboxCategory: "jobs",
+        hasPendingFollowUp: true,
+        hasReply: true
+      },
+      {
+        ...MESSAGE,
+        id: "today-reply",
+        subject: "Re: Project question",
+        receivedAt: relativeDayAt(0, 15),
+        inboxCategory: "updates"
+      }
+    ];
+    render(
+      <MessageList
+        items={messages.map((message) => ({ message }))}
+        selectedMessageId={null}
+        title="Focus"
+        loading={false}
+        searching={false}
+        hasMore={false}
+        readOnly={false}
+        onSelect={vi.fn()}
+        onDragStart={vi.fn()}
+        onDragEnd={vi.fn()}
+        onLoadMore={vi.fn()}
+        onMobileBack={vi.fn()}
+        inboxCategories={{
+          active: "focus",
+          tabs: DEFAULT_INBOX_TABS.map((tab) => ({ ...tab, keywords: [], senderDomains: [] })),
+          counts: { ...EMPTY_INBOX_COUNTS, primary: 3, jobs: 2, updates: 1 },
+          onSelect: vi.fn()
+        }}
+        {...BULK_SELECTION_PROPS}
+      />
+    );
+
+    const list = screen.getByRole("list", { name: "Focus" });
+    const today = within(list).getByRole("region", { name: /^Today/ });
+    const yesterday = within(list).getByRole("region", { name: /^Yesterday/ });
+    expect(today.textContent).toContain("5 messages");
+    expect(yesterday.textContent).toContain("1 message");
+
+    const orderedSubjects = within(list).getAllByRole("listitem").map(
+      (row) => row.querySelector(".message-subject-line")?.textContent
+    );
+    expect(orderedSubjects).toEqual([
+      "Needs my follow-up",
+      "Re: Project question",
+      "Unread person update",
+      "Read person update",
+      "Career opportunity",
+      "Yesterday follow-up"
+    ]);
+  });
+
+  it("shows upcoming package cards in Deliveries and opens the carrier page", () => {
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     const onSelect = vi.fn();
     const shipmentMessage: MessageSummary = {
@@ -242,7 +347,7 @@ describe("MessageList drag and drop", () => {
         inboxCategories={{
           active: "mail_tracking",
           tabs: DEFAULT_INBOX_TABS.map((tab) => ({ ...tab, keywords: [], senderDomains: [] })),
-          counts: { primary: 0, promotions: 0, social: 0, updates: 0, bills: 0, medical: 0, mail_tracking: 1 },
+          counts: { primary: 0, jobs: 0, promotions: 0, social: 0, updates: 0, bills: 0, medical: 0, mail_tracking: 1 },
           onSelect: vi.fn()
         }}
         {...BULK_SELECTION_PROPS}
@@ -283,7 +388,7 @@ describe("MessageList drag and drop", () => {
       />
     );
 
-    const row = screen.getByRole("option");
+    const row = screen.getByRole("listitem");
     fireEvent.touchStart(row, { touches: [{ clientX: 12, clientY: 20 }] });
     fireEvent.touchMove(row, { touches: [{ clientX: 100, clientY: 22 }] });
     fireEvent.touchEnd(row);
@@ -565,3 +670,10 @@ describe("MessageList bulk selection", () => {
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });
+
+function relativeDayAt(daysAgo: number, hour: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  date.setHours(hour, 0, 0, 0);
+  return date.toISOString();
+}

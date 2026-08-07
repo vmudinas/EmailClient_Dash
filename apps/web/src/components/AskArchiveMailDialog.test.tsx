@@ -77,7 +77,7 @@ describe("AskArchiveMailDialog", () => {
 
   it("asks the typed question", () => {
     const props = renderDialog();
-    fireEvent.change(screen.getByPlaceholderText(/Ask about your archived mail/), {
+    fireEvent.change(screen.getByPlaceholderText(/Ask about your mail/), {
       target: { value: "When did the landlord mention the boiler?" }
     });
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
@@ -92,7 +92,7 @@ describe("AskArchiveMailDialog", () => {
 
   it("passes filters when they are filled in", () => {
     const props = renderDialog();
-    fireEvent.change(screen.getByPlaceholderText(/Ask about your archived mail/), {
+    fireEvent.change(screen.getByPlaceholderText(/Ask about your mail/), {
       target: { value: "boiler" }
     });
     fireEvent.click(screen.getByRole("button", { name: /Filters/ }));
@@ -143,7 +143,7 @@ describe("AskArchiveMailDialog", () => {
     fireEvent.click(screen.getByLabelText("Recent questions"));
     expect(props.onRefreshHistory).toHaveBeenCalled();
     fireEvent.click(screen.getByTitle("Reuse this question"));
-    expect((screen.getByPlaceholderText(/Ask about your archived mail/) as HTMLTextAreaElement).value)
+    expect((screen.getByPlaceholderText(/Ask about your mail/) as HTMLTextAreaElement).value)
       .toBe("What did the plumber quote?");
   });
 

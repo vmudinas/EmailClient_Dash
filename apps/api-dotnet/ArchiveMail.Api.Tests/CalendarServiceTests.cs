@@ -1,4 +1,5 @@
 using System.Xml.Linq;
+using System.Text.Json;
 using ArchiveMail.Api.Calendar;
 using Xunit;
 
@@ -34,5 +35,40 @@ public sealed class CalendarServiceTests
             """);
 
         Assert.True(CalendarService.IsAppleCalendarCollection(document.Root));
+    }
+
+    [Fact]
+    public void EveryAppleAccountLookupAndMutationIsOwnerScoped()
+    {
+        var ownerScopedSql = new[]
+        {
+            CalendarService.AccountsSql,
+            CalendarService.ReconnectAppleAccountSql,
+            CalendarService.DeleteAppleAccountSql,
+            CalendarService.AppleRecordsSql,
+            CalendarService.AppleRecordSql,
+            CalendarService.UpdateAppleCalendarUrlSql,
+            CalendarService.MarkAppleErrorSql
+        };
+
+        Assert.All(ownerScopedSql, sql =>
+            Assert.Contains("owner_user_id=", sql.Replace(" ", ""), StringComparison.Ordinal));
+        Assert.Contains("owner_user_id", CalendarService.InsertAppleAccountSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GooglePageTokensAreEncodedAndCannotLoopForever()
+    {
+        var url = CalendarService.GooglePageUrl(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=2500",
+            "next/page + token");
+        using var response = JsonDocument.Parse("""{"nextPageToken":"repeat"}""");
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        Assert.EndsWith("&pageToken=next%2Fpage%20%2B%20token", url, StringComparison.Ordinal);
+        Assert.Equal("repeat", CalendarService.NextGooglePageToken(response.RootElement, seen));
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            CalendarService.NextGooglePageToken(response.RootElement, seen));
+        Assert.Contains("repeated page token", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 }
