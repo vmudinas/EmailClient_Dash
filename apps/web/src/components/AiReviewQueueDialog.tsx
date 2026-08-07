@@ -26,7 +26,7 @@ interface AiReviewQueueDialogProps {
   onDeleteAnalyses(items: AiReviewAnalysisItem[]): void;
   onMoveAnalyses(items: AiReviewAnalysisItem[], folderId: string): void;
   onAiFileAnalyses(items: AiReviewAnalysisItem[]): void;
-  onGenerateFilingProposals(items: AiReviewAnalysisItem[]): void;
+  onGenerateFilingProposals(items: AiReviewAnalysisItem[], contentOnly?: boolean): void;
   onApproveFilingProposal(proposal: AiFilingProposal): void;
   onDeclineFilingProposal(proposal: AiFilingProposal): void;
   onMarkAnalysisReviewed(item: AiReviewAnalysisItem): void;
@@ -165,7 +165,7 @@ export function AiReviewQueueDialog({
                           <div className="review-proposal-copy">
                             <strong>{proposal.subject}</strong>
                             <small>{displayAddress(proposal.sender)}</small>
-                            <div className="review-proposal-route"><span>{proposal.currentFolderPath}</span><ArrowRight size={14} /><span>{proposal.proposedFolderPath}</span><em>{Math.round(proposal.confidence * 100)}%</em></div>
+                            <div className="review-proposal-route"><span>{proposal.currentFolderPath}</span><ArrowRight size={14} /><span>{proposal.proposedFolderPath}</span><em>{Math.round(proposal.confidence * 100)}% · {proposal.contentBased ? "Content" : "History"}</em></div>
                             <p>{proposal.reason}</p>
                           </div>
                           <div className="review-proposal-actions">
@@ -213,13 +213,14 @@ export function AiReviewQueueDialog({
                               )}
                             </div>
                             {!readOnly && (
-                              <div className="review-filing-row">
+                            <div className="review-filing-row">
                                 <span><Sparkles size={13} /> AI folders</span>
                                 {(item.filingSuggestions ?? []).length ? item.filingSuggestions!.map((suggestion, index) => (
                                   <button key={suggestion.folderId} disabled={actionsDisabled || busyItemId === item.message.id} onClick={() => onMoveAnalyses([item], suggestion.folderId)} title={`${suggestion.reason} ${Math.round(suggestion.confidence * 100)}% confidence`}>
-                                    {index === 0 && <Sparkles size={12} />}{suggestion.folderPath}<small>{Math.round(suggestion.confidence * 100)}%</small>
+                                    {index === 0 && <Sparkles size={12} />}{suggestion.folderPath}<small>{Math.round(suggestion.confidence * 100)}%{suggestion.contentBased ? " content" : ""}</small>
                                   </button>
                                 )) : <small>No filing history yet</small>}
+                                <button disabled={actionsDisabled || proposalsLoading || busyItemId === item.message.id} onClick={() => onGenerateFilingProposals([item], true)} title="Suggest a folder from the AI analysis of this message's content" aria-label={`Suggest folder from content for ${item.message.subject}`}><BrainCircuit size={12} />Suggest by content</button>
                                 <label className="review-folder-picker"><FolderInput size={13} /><span className="visually-hidden">Move {item.message.subject} to folder</span><select value="" disabled={actionsDisabled || busyItemId === item.message.id} onChange={(event) => { if (event.target.value) onMoveAnalyses([item], event.target.value); }} aria-label={`Move ${item.message.subject} to folder`}><option value="">Choose folder…</option>{(queue.folders ?? []).filter((folder) => folder.archiveId === item.message.archiveId && folder.id !== item.message.folderId).map((folder) => <option key={folder.id} value={folder.id}>{folder.path}</option>)}</select></label>
                               </div>
                             )}

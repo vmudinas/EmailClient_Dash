@@ -18,8 +18,8 @@ public sealed class AiService(
     ILogger<AiService> logger) : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private sealed record FilingCandidate(string FolderId,string FolderPath,string Reason,double Confidence);
-    private sealed record FilingProposal(string Id,string MessageId,string Subject,EmailAddressDto Sender,string CurrentFolderId,string CurrentFolderPath,string ProposedFolderId,string ProposedFolderPath,string Reason,double Confidence);
+    internal sealed record FilingCandidate(string FolderId,string FolderPath,string Reason,double Confidence,bool ContentBased=false);
+    private sealed record FilingProposal(string Id,string MessageId,string Subject,EmailAddressDto Sender,string CurrentFolderId,string CurrentFolderPath,string ProposedFolderId,string ProposedFolderPath,string Reason,double Confidence,bool ContentBased);
     private sealed record FilingContext(string MessageId,string CategoriesJson,string ArchiveId,string CurrentFolderId);
     private sealed record FilingFolder(string ArchiveId,string Id,string Path,string Name);
 
@@ -43,24 +43,19 @@ public sealed class AiService(
     {
         var unique=ids.Distinct().Take(100).ToArray();
         if(unique.Length==0)throw new ArgumentException("Choose messages to file");
-        const string sql="""
-            SELECT f.id,f.path,COUNT(*)
-            FROM messages selected
-            JOIN archives a ON a.id=selected.archive_id
-            JOIN messages similar ON similar.archive_id=selected.archive_id
-                AND lower(similar.sender_address)=lower(selected.sender_address)
-            JOIN folders f ON f.id=similar.folder_id
-            WHERE selected.id=ANY($1) AND a.owner_user_id=$2 AND similar.id<>selected.id
-                AND f.id<>selected.folder_id
-                AND lower(f.name) NOT IN ('trash','spam','junk','deleted')
-            GROUP BY f.id,f.path
-            ORDER BY COUNT(*) DESC,f.path
-            LIMIT 3
-            """;
-        var suggestions=new List<FilingCandidate>();
-        await using var command=database.CreateCommand(sql);command.Parameters.AddWithValue(unique);command.Parameters.AddWithValue(owner);
-        await using var r=await command.ExecuteReaderAsync(token);
-        while(await r.ReadAsync(token))suggestions.Add(Candidate(r.GetString(0),r.GetString(1),r.GetInt64(2)));
+        var suggestions=(await FilingSuggestionsByMessageAsync(unique,owner,token)).Values
+            .SelectMany(value=>value)
+            .GroupBy(candidate=>candidate.FolderId,StringComparer.Ordinal)
+            .Select(group=>
+            {
+                var best=BestFilingCandidate(group)!;
+                var consensus=Math.Min(1d,group.Count()/(double)unique.Length);
+                return best with{Confidence=Math.Min(.95,best.Confidence*.8+consensus*.2)};
+            })
+            .OrderByDescending(candidate=>candidate.ContentBased)
+            .ThenByDescending(candidate=>candidate.Confidence)
+            .Take(3)
+            .ToList();
         var provider=settings.Current().AiValue.ActiveProvider;var model=Provider().Model;
         if(suggestions.Count==0)return new{folderId=(string?)null,folderPath=(string?)null,reason="No previous filing pattern was found.",confidence=.3,messageCount=unique.Length,provider,model,suggestions};
         var best=suggestions[0];
@@ -106,7 +101,7 @@ public sealed class AiService(
         return new{drafts,analyses,followUps=pendingFollowUps,folders,totalItems=drafts.Count+analyses.Count+pendingFollowUps.Count};
     }
 
-    public async Task<object> FilingProposalsAsync(string[] ids,string owner,CancellationToken token)
+    public async Task<object> FilingProposalsAsync(string[] ids,bool contentOnly,string owner,CancellationToken token)
     {
         var unique=ids.Where(id=>!string.IsNullOrWhiteSpace(id)).Distinct().Take(100).ToArray();
         if(unique.Length==0)throw new ArgumentException("Choose messages to recategorize");
@@ -117,9 +112,10 @@ public sealed class AiService(
         var proposals=new List<FilingProposal>();
         foreach(var message in await summaryTask)
         {
-            var candidate=suggestions.GetValueOrDefault(message.Id)?.FirstOrDefault();
+            var candidates=suggestions.GetValueOrDefault(message.Id)??[];
+            var candidate=BestFilingCandidate(contentOnly?candidates.Where(value=>value.ContentBased):candidates);
             if(candidate is null)continue;
-            proposals.Add(new($"{message.Id}:{candidate.FolderId}",message.Id,message.Subject,message.Sender,message.FolderId,message.FolderPath,candidate.FolderId,candidate.FolderPath,candidate.Reason,candidate.Confidence));
+            proposals.Add(new($"{message.Id}:{candidate.FolderId}",message.Id,message.Subject,message.Sender,message.FolderId,message.FolderPath,candidate.FolderId,candidate.FolderPath,candidate.Reason,candidate.Confidence,candidate.ContentBased));
         }
         var ordered=proposals.OrderByDescending(proposal=>proposal.Confidence).ToArray();
         return new{proposals=ordered,considered=unique.Length,skipped=unique.Length-ordered.Length,generatedAt=DateTimeOffset.UtcNow.ToString("O")};
@@ -190,12 +186,19 @@ public sealed class AiService(
             if(!result.TryGetValue(context.MessageId,out var suggestions)){suggestions=new List<FilingCandidate>();result[context.MessageId]=suggestions;}
             foreach(var folder in foldersByArchive[context.ArchiveId])
             {
-                if(suggestions.Count>=3)break;
-                if(folder.Id==context.CurrentFolderId||suggestions.Any(candidate=>candidate.FolderId==folder.Id))continue;
-                if(categories.Any(category=>CategoryMatchesFolder(category,folder.Name,folder.Path)))
-                    suggestions.Add(new(folder.Id,folder.Path,"AI category matches this existing folder.",.68));
+                if(folder.Id==context.CurrentFolderId)continue;
+                var category=categories.FirstOrDefault(value=>CategoryMatchesFolder(value,folder.Name,folder.Path));
+                if(category is null)continue;
+                suggestions.RemoveAll(candidate=>candidate.FolderId==folder.Id);
+                suggestions.Add(new(folder.Id,folder.Path,$"Message content matches the AI category “{category}”.",.78,true));
             }
         }
+        foreach(var messageId in result.Keys.ToArray())
+            result[messageId]=result[messageId]
+                .OrderByDescending(candidate=>candidate.ContentBased)
+                .ThenByDescending(candidate=>candidate.Confidence)
+                .Take(3)
+                .ToList();
         return result;
     }
 
@@ -212,8 +215,28 @@ public sealed class AiService(
         }
     }
 
-    internal static bool CategoryMatchesFolder(string category,string folderName,string folderPath)=>
-        category.Equals(folderName,StringComparison.OrdinalIgnoreCase)||category.Equals(folderPath,StringComparison.OrdinalIgnoreCase);
+    internal static bool CategoryMatchesFolder(string category,string folderName,string folderPath)
+    {
+        var categoryTerms=FilingTerms(category);
+        if(categoryTerms.Count==0)return false;
+        return categoryTerms.Overlaps(FilingTerms($"{folderName} {folderPath.Replace('/',' ')}"));
+    }
+
+    internal static FilingCandidate? BestFilingCandidate(IEnumerable<FilingCandidate> candidates)=>candidates
+        .OrderByDescending(candidate=>candidate.ContentBased)
+        .ThenByDescending(candidate=>candidate.Confidence)
+        .ThenBy(candidate=>candidate.FolderPath,StringComparer.OrdinalIgnoreCase)
+        .FirstOrDefault();
+
+    private static HashSet<string> FilingTerms(string value)
+    {
+        var ignored=new HashSet<string>(["mail","message","messages","folder","archive","inbox","primary"],StringComparer.Ordinal);
+        return System.Text.RegularExpressions.Regex.Matches(value.ToLowerInvariant(),"[a-z0-9]+")
+            .Select(match=>match.Value)
+            .Where(term=>term.Length>=4&&!ignored.Contains(term))
+            .Select(term=>term.EndsWith("ies",StringComparison.Ordinal)&&term.Length>4?term[..^3]+"y":term.EndsWith('s')&&term.Length>4?term[..^1]:term)
+            .ToHashSet(StringComparer.Ordinal);
+    }
 
     private async Task<Dictionary<string,object>> AnalysesAsync(string[] ids,CancellationToken token)
     {

@@ -2,8 +2,10 @@ using System.Text.Json;
 using System.Net;
 using ArchiveMail.Api.Gmail;
 using ArchiveMail.Api.Infrastructure;
+using ArchiveMail.Api.Productivity;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging.Abstractions;
+using MimeKit;
 using Xunit;
 
 namespace ArchiveMail.Api.Tests;
@@ -140,6 +142,37 @@ public sealed class GmailServiceTests : IDisposable
     public void RetriesOnlyTransientGoogleResponses(HttpStatusCode status, bool expected)
     {
         Assert.Equal(expected, GmailService.TransientGoogleStatus(status));
+    }
+
+    [Fact]
+    public async Task ResumeAttachmentRemainsSerializableAfterTheSourceFileIsClosed()
+    {
+        Directory.CreateDirectory(_dataDirectory);
+        var path = Path.Combine(_dataDirectory, "resume.pdf");
+        var expected = "resume bytes"u8.ToArray();
+        await File.WriteAllBytesAsync(path, expected);
+        var body = new BodyBuilder { TextBody = "Hello" };
+
+        await GmailService.AddResumeAttachmentAsync(
+            body,
+            new ResumeContent("resume.pdf", "application/pdf", path),
+            CancellationToken.None);
+        File.Delete(path);
+
+        var message = new MimeMessage();
+        message.From.Add(MailboxAddress.Parse("ai@vitas.work"));
+        message.To.Add(MailboxAddress.Parse("recipient@example.com"));
+        message.Body = body.ToMessageBody();
+        await using var serialized = new MemoryStream();
+        await message.WriteToAsync(serialized);
+        serialized.Position = 0;
+        var parsed = await MimeMessage.LoadAsync(serialized);
+        var attachment = Assert.IsType<MimePart>(Assert.Single(parsed.Attachments));
+        await using var decoded = new MemoryStream();
+        Assert.NotNull(attachment.Content);
+        await attachment.Content!.DecodeToAsync(decoded);
+
+        Assert.Equal(expected, decoded.ToArray());
     }
 
     public void Dispose()

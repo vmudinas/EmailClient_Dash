@@ -135,7 +135,8 @@ describe("AiReviewQueueDialog", () => {
       proposedFolderId: "folder-projects",
       proposedFolderPath: "Projects",
       reason: "AI category matches this existing folder.",
-      confidence: 0.78
+      confidence: 0.78,
+      contentBased: true
     };
     render(
       <AiReviewQueueDialog
@@ -202,6 +203,8 @@ describe("AiReviewQueueDialog", () => {
     expect(onReviewAndArchive).toHaveBeenCalledWith([analysisItem]);
     fireEvent.click(screen.getByRole("button", { name: /Projects78%/ }));
     expect(onMoveAnalyses).toHaveBeenCalledWith([analysisItem], "folder-projects");
+    fireEvent.click(screen.getByRole("button", { name: "Suggest folder from content for Approve the launch plan" }));
+    expect(onGenerateFilingProposals).toHaveBeenCalledWith([analysisItem], true);
     fireEvent.click(screen.getByRole("checkbox", { name: "Select Approve the launch plan" }));
     fireEvent.click(screen.getByRole("button", { name: "AI file" }));
     expect(onAiFileAnalyses).toHaveBeenCalledWith([analysisItem]);
