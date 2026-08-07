@@ -308,6 +308,17 @@ public sealed partial class GmailService(
         body.Attachments.Add(resume.Filename,content,ContentType.Parse(resume.ContentType));
     }
 
+    internal static async Task AddResumeAttachmentAsync(BodyBuilder body,ResumeContent resume,CancellationToken token)
+    {
+        // MimeKit keeps the supplied stream as the attachment body. The previous implementation
+        // disposed that stream before WriteToAsync serialized the message, so every AI draft with
+        // a resume failed at send time with ObjectDisposedException and surfaced as a bare 500.
+        // Copy the bounded resume asset into the MIME part so serialization no longer depends on
+        // the source file staying open.
+        var content=await File.ReadAllBytesAsync(resume.FullPath,token);
+        body.Attachments.Add(resume.Filename,content,ContentType.Parse(resume.ContentType));
+    }
+
     public async Task<IReadOnlyList<object>> SendAsAsync(string id,string owner,CancellationToken token){var connection=await GetAsync(id,owner,token)??throw new KeyNotFoundException("Gmail connection not found");var accessToken=await AccessTokenAsync(connection,token);var json=await GoogleJsonAsync($"{GmailApi}/users/me/settings/sendAs",accessToken,HttpMethod.Get,null,token);if(!json.TryGetProperty("sendAs",out var values)||values.ValueKind!=JsonValueKind.Array)return[];return values.EnumerateArray().Where(item=>item.TryGetProperty("sendAsEmail",out _)).Select(item=>(object)new{email=item.GetProperty("sendAsEmail").GetString(),displayName=item.TryGetProperty("displayName",out var display)?display.GetString()??"":"",isPrimary=item.TryGetProperty("isPrimary",out var primary)&&primary.GetBoolean(),isDefault=item.TryGetProperty("isDefault",out var fallback)&&fallback.GetBoolean()}).ToArray();}
 
     private async Task<GmailReplySource?> ReplySourceAsync(string? messageId,string connectionId,string owner,CancellationToken token)
