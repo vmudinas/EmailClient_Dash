@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CalendarEvent, CalendarSource, GmailConnection, TodoItem } from "@email-client/shared";
 import type { ApiClient } from "../lib/api.js";
@@ -198,6 +198,49 @@ describe("CalendarView", () => {
     expect(grid.querySelectorAll(".has-items")).toHaveLength(1);
   });
 
+  it("marks every local day a timed event intersects and treats all-day end dates as exclusive", async () => {
+    const today = todayIso();
+    const timedSecondDay = addTestDays(today, 1);
+    const timedExclusiveEnd = addTestDays(today, 2);
+    const allDayDate = addTestDays(today, 3);
+    const allDayExclusiveEnd = addTestDays(today, 4);
+    const timedEvent: CalendarEvent = {
+      ...EVENT,
+      id: "event-overnight",
+      title: "Overnight migration",
+      startAt: localDateTimeIso(today, 23),
+      endAt: localDateTimeIso(timedExclusiveEnd, 0),
+      allDay: false
+    };
+    const allDayEvent: CalendarEvent = {
+      ...EVENT,
+      id: "event-all-day",
+      title: "Company holiday",
+      startAt: allDayDate,
+      endAt: allDayExclusiveEnd,
+      allDay: true
+    };
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockImplementation((_sourceId: string, startAt: string, endAt: string) => (
+        isDayRange(startAt, endAt) ? Promise.resolve([]) : Promise.resolve([timedEvent, allDayEvent])
+      )),
+      listTodos: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    const timedStart = await screen.findByRole("button", { name: `${formatTestDate(today)}, 1 event` });
+    const timedContinuation = screen.getByRole("button", { name: `${formatTestDate(timedSecondDay)}, 1 event` });
+    const allDay = screen.getByRole("button", { name: `${formatTestDate(allDayDate)}, 1 event` });
+    expect(timedStart.getAttribute("title")).toContain("Overnight migration");
+    expect(timedContinuation.getAttribute("title")).toContain("Overnight migration");
+    expect(allDay.getAttribute("title")).toContain("Company holiday");
+
+    expect(screen.getByRole("button", { name: formatTestDate(timedExclusiveEnd) }).getAttribute("title")).toBeNull();
+    expect(screen.getByRole("button", { name: formatTestDate(allDayExclusiveEnd) }).getAttribute("title")).toBeNull();
+  });
+
   it("opens the edit dialog with full details when an event is clicked", async () => {
     const api = {
       listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
@@ -271,6 +314,207 @@ describe("CalendarView", () => {
     ));
   });
 
+  it("keeps the latest day when older event and to-do requests finish last", async () => {
+    const today = todayIso();
+    const tomorrow = addTestDays(today, 1);
+    const firstEvents = deferred<CalendarEvent[]>();
+    const nextEvents = deferred<CalendarEvent[]>();
+    const firstTodos = deferred<TodoItem[]>();
+    const nextTodos = deferred<TodoItem[]>();
+    let dayEventRequest = 0;
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockImplementation((_sourceId: string, startAt: string, endAt: string) => {
+        if (!isDayRange(startAt, endAt)) return Promise.resolve([]);
+        dayEventRequest += 1;
+        return dayEventRequest === 1 ? firstEvents.promise : nextEvents.promise;
+      }),
+      listTodos: vi.fn().mockImplementation((startDate: string, endDate: string) => {
+        if (startDate !== endDate) return Promise.resolve([]);
+        return startDate === today ? firstTodos.promise : nextTodos.promise;
+      })
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    await waitFor(() => expect(dayEventRequest).toBe(1));
+    fireEvent.click(screen.getByRole("button", { name: "Next day" }));
+    await waitFor(() => expect(dayEventRequest).toBe(2));
+
+    await act(async () => {
+      nextEvents.resolve([eventForDay("event-next", "Tomorrow event", tomorrow)]);
+      nextTodos.resolve([{ ...TODO, id: "todo-next", date: tomorrow, text: "Tomorrow task" }]);
+    });
+    await waitFor(() => expect(screen.getByText("Tomorrow event")).toBeTruthy());
+    expect(screen.getByText("Tomorrow task")).toBeTruthy();
+
+    await act(async () => {
+      firstEvents.resolve([eventForDay("event-old", "Stale event", today)]);
+      firstTodos.resolve([{ ...TODO, id: "todo-old", date: today, text: "Stale task" }]);
+    });
+    await waitFor(() => expect(screen.queryByText("Stale event")).toBeNull());
+    expect(screen.queryByText("Stale task")).toBeNull();
+    expect(screen.getByText("Tomorrow event")).toBeTruthy();
+    expect(screen.getByText("Tomorrow task")).toBeTruthy();
+  });
+
+  it("reloads day events, day to-dos, and the mini-month after becoming active again", async () => {
+    const listCalendarSourceEvents = vi.fn().mockResolvedValue([]);
+    const listTodos = vi.fn().mockResolvedValue([]);
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents,
+      listTodos
+    } as unknown as ApiClient;
+    const onAddGoogle = vi.fn();
+    const onReauthorize = vi.fn();
+    const onError = vi.fn();
+    const view = render(
+      <CalendarView
+        api={api}
+        connections={[CONNECTION]}
+        active
+        onAddGoogle={onAddGoogle}
+        onReauthorize={onReauthorize}
+        onError={onError}
+      />
+    );
+
+    const dayEventCalls = () => listCalendarSourceEvents.mock.calls.filter(([, startAt, endAt]) => (
+      isDayRange(String(startAt), String(endAt))
+    )).length;
+    const monthEventCalls = () => listCalendarSourceEvents.mock.calls.length - dayEventCalls();
+    const dayTodoCalls = () => listTodos.mock.calls.filter(([startDate, endDate]) => startDate === endDate).length;
+    const monthTodoCalls = () => listTodos.mock.calls.length - dayTodoCalls();
+
+    await waitFor(() => {
+      expect(dayEventCalls()).toBeGreaterThan(0);
+      expect(monthEventCalls()).toBeGreaterThan(0);
+      expect(dayTodoCalls()).toBeGreaterThan(0);
+      expect(monthTodoCalls()).toBeGreaterThan(0);
+    });
+
+    view.rerender(
+      <CalendarView
+        api={api}
+        connections={[CONNECTION]}
+        active={false}
+        onAddGoogle={onAddGoogle}
+        onReauthorize={onReauthorize}
+        onError={onError}
+      />
+    );
+    const hiddenCounts = {
+      dayEvents: dayEventCalls(),
+      monthEvents: monthEventCalls(),
+      dayTodos: dayTodoCalls(),
+      monthTodos: monthTodoCalls()
+    };
+
+    view.rerender(
+      <CalendarView
+        api={api}
+        connections={[CONNECTION]}
+        active
+        onAddGoogle={onAddGoogle}
+        onReauthorize={onReauthorize}
+        onError={onError}
+      />
+    );
+
+    await waitFor(() => {
+      expect(dayEventCalls()).toBeGreaterThan(hiddenCounts.dayEvents);
+      expect(monthEventCalls()).toBeGreaterThan(hiddenCounts.monthEvents);
+      expect(dayTodoCalls()).toBeGreaterThan(hiddenCounts.dayTodos);
+      expect(monthTodoCalls()).toBeGreaterThan(hiddenCounts.monthTodos);
+    });
+  });
+
+  it("does not restore events from a calendar after it is deselected", async () => {
+    const appleSource: CalendarSource = {
+      ...SOURCE,
+      id: "source-apple-work",
+      provider: "apple",
+      accountId: "apple-1",
+      accountLabel: "iCloud",
+      name: "Work",
+      primary: false
+    };
+    const oldPersonal = deferred<CalendarEvent[]>();
+    const oldWork = deferred<CalendarEvent[]>();
+    let personalDayRequests = 0;
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE, appleSource]),
+      listCalendarSourceEvents: vi.fn().mockImplementation((sourceId: string, startAt: string, endAt: string) => {
+        if (!isDayRange(startAt, endAt)) return Promise.resolve([]);
+        if (sourceId === appleSource.id) return oldWork.promise;
+        personalDayRequests += 1;
+        if (personalDayRequests === 1) return oldPersonal.promise;
+        return Promise.resolve([eventForDay("event-current", "Current personal event", todayIso())]);
+      }),
+      listTodos: vi.fn().mockResolvedValue([])
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    const work = await screen.findByRole("checkbox", { name: /Work/ });
+    await waitFor(() => expect(personalDayRequests).toBe(1));
+    fireEvent.click(work);
+    await waitFor(() => expect(screen.getByText("Current personal event")).toBeTruthy());
+
+    await act(async () => {
+      oldPersonal.resolve([eventForDay("event-old-personal", "Old personal event", todayIso())]);
+      oldWork.resolve([eventForDay("event-old-work", "Deselected work event", todayIso())]);
+    });
+    await waitFor(() => expect(screen.queryByText("Deselected work event")).toBeNull());
+    expect(screen.queryByText("Old personal event")).toBeNull();
+    expect(screen.getByText("Current personal event")).toBeTruthy();
+  });
+
+  it("requires an event to end after it starts", async () => {
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([]),
+      listTodos: vi.fn().mockResolvedValue([]),
+      createCalendarSourceEvent: vi.fn()
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    const newEvent = await screen.findByRole("button", { name: "New event" });
+    await waitFor(() => expect((newEvent as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(newEvent);
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Invalid range" } });
+    fireEvent.change(screen.getByLabelText("Starts"), { target: { value: `${todayIso()}T10:00` } });
+    fireEvent.change(screen.getByLabelText("Ends"), { target: { value: `${todayIso()}T09:00` } });
+
+    expect(screen.getByRole("alert").textContent).toContain("Event end must be after its start.");
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(screen.getByLabelText("Title").closest("form")!);
+    expect(api.createCalendarSourceEvent).not.toHaveBeenCalled();
+  });
+
+  it("offers a tablet task drawer toggle", async () => {
+    window.matchMedia = tabletMatchMedia;
+    const api = {
+      listCalendarSources: vi.fn().mockResolvedValue([SOURCE]),
+      listCalendarSourceEvents: vi.fn().mockResolvedValue([]),
+      listTodos: vi.fn().mockResolvedValue([TODO])
+    } as unknown as ApiClient;
+
+    render(<CalendarView api={api} connections={[CONNECTION]} onAddGoogle={vi.fn()} onReauthorize={vi.fn()} onError={vi.fn()} />);
+
+    const toggle = await screen.findByRole("button", { name: /Tasks/ });
+    const workspace = toggle.closest(".calendar-workspace")!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(workspace.className).toContain("tablet-calendar-todos-open");
+
+    fireEvent.click(workspace.querySelector<HTMLButtonElement>(".calendar-tablet-todo-close")!);
+    expect(workspace.className).not.toContain("tablet-calendar-todos-open");
+  });
+
   it("uses an agenda and sheet controls on mobile screens", async () => {
     window.matchMedia = mobileMatchMedia;
     const api = {
@@ -306,6 +550,55 @@ const mobileMatchMedia = ((query: string): MediaQueryList => ({
   removeEventListener: () => {},
   dispatchEvent: () => false
 })) as typeof window.matchMedia;
+
+const tabletMatchMedia = ((query: string): MediaQueryList => ({
+  matches: query.includes("min-width: 801px") && query.includes("max-width: 1120px"),
+  media: query,
+  onchange: null,
+  addListener: () => {},
+  removeListener: () => {},
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  dispatchEvent: () => false
+})) as typeof window.matchMedia;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolver) => { resolve = resolver; });
+  return { promise, resolve };
+}
+
+function isDayRange(startAt: string, endAt: string): boolean {
+  return new Date(endAt).getTime() - new Date(startAt).getTime() <= 26 * 60 * 60 * 1_000;
+}
+
+function eventForDay(id: string, title: string, date: string): CalendarEvent {
+  return {
+    ...EVENT,
+    id,
+    title,
+    allDay: true,
+    startAt: date,
+    endAt: addTestDays(date, 1)
+  };
+}
+
+function addTestDays(dateIso: string, days: number): string {
+  const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
+  const date = new Date(year, month - 1, day + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function localDateTimeIso(dateIso: string, hour: number): string {
+  const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
+  return new Date(year, month - 1, day, hour).toISOString();
+}
+
+function formatTestDate(dateIso: string): string {
+  const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
+  return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })
+    .format(new Date(year, month - 1, day));
+}
 
 function todayIso(): string {
   const now = new Date();

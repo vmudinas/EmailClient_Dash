@@ -83,7 +83,7 @@ export function AskArchiveMailDialog({
                 value={question}
                 maxLength={1000}
                 disabled={asking}
-                placeholder="Ask about your archived mail — e.g. When did the landlord last mention the boiler?"
+                placeholder="Ask about your mail — e.g. What do I need to reply to today?"
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {

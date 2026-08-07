@@ -8,10 +8,12 @@ namespace ArchiveMail.Api.Mail;
 public sealed class MailRepository(NpgsqlDataSource database)
 {
     internal const int MessageSummaryLookupLimit = 500;
+    internal const string InboxOnlyCondition =
+        "EXISTS (SELECT 1 FROM folders inbox_folder WHERE inbox_folder.id = m.folder_id AND lower(trim(inbox_folder.name)) = 'inbox')";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> InboxCategories =
-    ["primary", "promotions", "social", "updates", "bills", "medical", "mail_tracking"];
+    ["primary", "jobs", "promotions", "social", "updates", "bills", "medical", "mail_tracking"];
 
     public async Task<IReadOnlyList<ArchiveDto>> ListArchivesAsync(string ownerUserId, CancellationToken cancellationToken)
     {
@@ -282,7 +284,10 @@ public sealed class MailRepository(NpgsqlDataSource database)
         string ownerUserId,
         CancellationToken cancellationToken)
     {
-        var categoryFilters = filters with { InboxCategory = null, From = null, To = null, After = null, Before = null, HasAttachment = null };
+        // Counts describe the view the user is looking at. Keep its date/read/search filters, but
+        // remove the exclusive category and Focus suppression so set-aside categories remain
+        // discoverable from the daily feed.
+        var categoryFilters = filters with { InboxCategory = null, Focus = false };
         var (where, parameters) = BuildFilters(categoryFilters, ownerUserId);
         var sql = $"""
             SELECT m.inbox_category, COUNT(*)
@@ -297,11 +302,29 @@ public sealed class MailRepository(NpgsqlDataSource database)
         var counts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken)) counts[reader.GetString(0)] = reader.GetInt64(1);
+        await reader.CloseAsync();
+
+        long? focusCount = null;
+        if (filters.Focus is true)
+        {
+            var focusFilters = filters with { InboxCategory = null };
+            var (focusWhere, focusParameters) = BuildFilters(focusFilters, ownerUserId);
+            var focusSql = $"""
+                SELECT COUNT(*)
+                FROM messages m
+                LEFT JOIN message_state s ON s.message_id = m.id
+                JOIN archives owner_archive ON owner_archive.id = m.archive_id
+                WHERE {focusWhere}
+                """;
+            await using var focusCommand = database.CreateCommand(focusSql);
+            AddParameters(focusCommand, focusParameters);
+            focusCount = Convert.ToInt64(await focusCommand.ExecuteScalarAsync(cancellationToken));
+        }
         return new(
-            counts.GetValueOrDefault("primary"), counts.GetValueOrDefault("promotions"),
+            counts.GetValueOrDefault("primary"), counts.GetValueOrDefault("jobs"), counts.GetValueOrDefault("promotions"),
             counts.GetValueOrDefault("social"), counts.GetValueOrDefault("updates"),
             counts.GetValueOrDefault("bills"), counts.GetValueOrDefault("medical"),
-            counts.GetValueOrDefault("mail_tracking"));
+            counts.GetValueOrDefault("mail_tracking"), focusCount);
     }
 
     public async Task<CursorPageDto<SearchHitDto>> SearchAsync(
@@ -472,20 +495,35 @@ public sealed class MailRepository(NpgsqlDataSource database)
             return new(id, 1, one is null ? [] : [SummaryFromDetail(one)]);
         }
         var conversationKey = Convert.ToString(key)!;
-        const string countSql = "SELECT COUNT(*) FROM messages WHERE conversation_key = @key";
+        const string countSql = """
+            SELECT COUNT(*)
+            FROM messages m JOIN archives a ON a.id = m.archive_id
+            WHERE m.conversation_key = @key AND a.owner_user_id = @owner
+            """;
         await using var count = database.CreateCommand(countSql);
         count.Parameters.AddWithValue("key", conversationKey);
+        count.Parameters.AddWithValue("owner", ownerUserId);
         var total = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
         var sql = $"""
             SELECT {SummaryColumns}
             {SummaryJoins}
             WHERE m.conversation_key = @key AND owner_archive.owner_user_id = @owner
-            ORDER BY COALESCE(m.received_at, m.sent_at, m.created_at), m.id LIMIT 50
+            ORDER BY COALESCE(m.received_at, m.sent_at, m.created_at) DESC, m.id DESC LIMIT 50
             """;
         await using var command = database.CreateCommand(sql);
         command.Parameters.AddWithValue("key", conversationKey);
         command.Parameters.AddWithValue("owner", ownerUserId);
-        return new(id, total, await ReadSummariesAsync(command, cancellationToken));
+        // Keep the useful end of a long conversation, then present it oldest-to-newest. If the
+        // user opened an unusually old message in a 50+ message thread, include that anchor too
+        // so the conversation strip never omits the message currently on screen.
+        var messages = await ReadSummariesAsync(command, cancellationToken);
+        messages.Reverse();
+        if (messages.All(message => message.Id != id))
+        {
+            var current = await GetMessageAsync(id, ownerUserId, cancellationToken);
+            if (current is not null) messages.Insert(0, SummaryFromDetail(current));
+        }
+        return new(id, total, messages);
     }
 
     public async Task<AttachmentContentDto?> GetAttachmentContentAsync(
@@ -698,6 +736,8 @@ public sealed class MailRepository(NpgsqlDataSource database)
         void Add(string condition, string name, object value) { conditions.Add(condition); parameters.Add(new(name, value)); }
         if (!string.IsNullOrWhiteSpace(filters.ArchiveId)) Add("m.archive_id = @archive", "archive", filters.ArchiveId);
         if (!string.IsNullOrWhiteSpace(filters.FolderId)) Add("m.folder_id = @folder", "folder", filters.FolderId);
+        if (filters.InboxOnly is true || filters.Focus is true)
+            conditions.Add(InboxOnlyCondition);
         if (filters.IsRead is not null) Add("COALESCE(s.is_read, 0) = @read", "read", filters.IsRead.Value ? 1 : 0);
         if (filters.Starred is not null) Add("COALESCE(s.is_starred, 0) = @starred", "starred", filters.Starred.Value ? 1 : 0);
         if (!string.IsNullOrWhiteSpace(filters.InboxCategory))
@@ -705,10 +745,33 @@ public sealed class MailRepository(NpgsqlDataSource database)
             if (!InboxCategories.Contains(filters.InboxCategory)) throw new ArgumentException("Invalid inbox category");
             Add("m.inbox_category = @category", "category", filters.InboxCategory);
         }
+        if (filters.Focus is true)
+        {
+            // Focus is deliberately conservative: low-value bulk categories stay available in
+            // their own tabs. AI suspicion is never enough to hide mail; only provider/user filing
+            // into Spam/Junk removes it from the Inbox scope selected by the client.
+            // Conversation and follow-up signals override a bulk category so a real response can
+            // never disappear merely because Gmail or a sender labeled it as marketing/social.
+            conditions.Add("""
+                (
+                  m.inbox_category NOT IN ('promotions', 'social')
+                  OR lower(m.subject) ~ '^\s*(re|fwd?):'
+                  OR EXISTS (
+                    SELECT 1 FROM message_follow_ups focus_fu
+                    WHERE focus_fu.status = 'pending'
+                      AND (focus_fu.message_id = m.id OR (m.conversation_key IS NOT NULL AND focus_fu.conversation_key = m.conversation_key))
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM conversation_replies focus_cr
+                    WHERE m.conversation_key IS NOT NULL AND focus_cr.conversation_key = m.conversation_key
+                  )
+                )
+                """);
+        }
         if (!string.IsNullOrWhiteSpace(filters.From)) Add("lower(m.sender_address || ' ' || COALESCE(m.sender_name, '')) LIKE @from ESCAPE '\\'", "from", $"%{EscapeLike(filters.From.ToLowerInvariant())}%");
         if (!string.IsNullOrWhiteSpace(filters.To)) Add("lower(m.recipients_text) LIKE @to ESCAPE '\\'", "to", $"%{EscapeLike(filters.To.ToLowerInvariant())}%");
-        if (!string.IsNullOrWhiteSpace(filters.After)) Add("COALESCE(m.received_at, m.sent_at) >= @after", "after", filters.After);
-        if (!string.IsNullOrWhiteSpace(filters.Before)) Add("COALESCE(m.received_at, m.sent_at) <= @before", "before", filters.Before);
+        if (!string.IsNullOrWhiteSpace(filters.After)) Add("COALESCE(m.received_at, m.sent_at, m.created_at) >= @after", "after", filters.After);
+        if (!string.IsNullOrWhiteSpace(filters.Before)) Add("COALESCE(m.received_at, m.sent_at, m.created_at) <= @before", "before", filters.Before);
         if (filters.HasAttachment is not null)
         {
             conditions.Add($"{(filters.HasAttachment.Value ? "" : "NOT ")}EXISTS (SELECT 1 FROM attachments fa WHERE fa.message_id = m.id AND (fa.disposition <> 'inline' OR fa.content_id IS NULL OR trim(fa.content_id) = ''))");
@@ -996,16 +1059,30 @@ public sealed class MailRepository(NpgsqlDataSource database)
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private const string SummaryColumns = """
+    internal const string SummaryColumns = """
         m.id, m.archive_id, m.folder_id, f.path, m.subject, m.sender_name, m.sender_address, m.to_json,
         m.sent_at, m.received_at, m.created_at, substring(m.body_text FROM 1 FOR 2000),
         (SELECT COUNT(*) FROM attachments sa WHERE sa.message_id = m.id AND
           (sa.disposition <> 'inline' OR sa.content_id IS NULL OR trim(sa.content_id) = '')) AS attachment_count,
         m.inbox_category,
-        false AS has_ai_analysis,
+        EXISTS(SELECT 1 FROM ai_message_analysis ax WHERE ax.message_id = m.id) AS has_ai_analysis,
         EXISTS(SELECT 1 FROM message_calendar_events ce WHERE ce.message_id = m.id) AS has_calendar_event,
-        EXISTS(SELECT 1 FROM message_follow_ups fu WHERE fu.conversation_key = m.conversation_key AND fu.status = 'pending') AS has_pending_follow_up,
-        EXISTS(SELECT 1 FROM conversation_replies cr WHERE cr.conversation_key = m.conversation_key) AS has_reply,
+        EXISTS(SELECT 1 FROM message_follow_ups fu JOIN messages follow_source ON follow_source.id=fu.message_id
+          WHERE fu.status = 'pending' AND (
+            fu.conversation_key = COALESCE(NULLIF(m.conversation_key, ''), m.id)
+            OR fu.message_id = m.id
+            OR (m.conversation_key IS NOT NULL AND m.conversation_key <> ''
+              AND follow_source.conversation_key = m.conversation_key))) AS has_pending_follow_up,
+        (EXISTS(SELECT 1 FROM conversation_replies cr JOIN messages reply_source ON reply_source.id=cr.source_message_id
+           WHERE cr.conversation_key = COALESCE(NULLIF(m.conversation_key, ''), m.id)
+             OR cr.source_message_id = m.id
+             OR (m.conversation_key IS NOT NULL AND m.conversation_key <> ''
+               AND reply_source.conversation_key = m.conversation_key))
+         OR (m.conversation_key IS NOT NULL AND m.conversation_key <> '' AND EXISTS(
+           SELECT 1 FROM messages thread_message
+           WHERE thread_message.archive_id = m.archive_id
+             AND thread_message.conversation_key = m.conversation_key
+             AND thread_message.id <> m.id))) AS has_reply,
         COALESCE(s.is_read, 0), COALESCE(s.is_starred, 0), COALESCE(s.tags_json, '[]'), COALESCE(s.note, ''), s.updated_at
         """;
 

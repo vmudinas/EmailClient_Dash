@@ -16,16 +16,17 @@ public sealed record InboxTabReclassifyResultDto(InboxTabSettingsDto Settings, l
 public sealed class InboxTabRepository(NpgsqlDataSource database)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private static readonly string[] CategoryIds = ["primary", "promotions", "social", "updates", "bills", "medical", "mail_tracking"];
+    private static readonly string[] CategoryIds = ["primary", "jobs", "updates", "bills", "medical", "mail_tracking", "promotions", "social"];
     private static readonly InboxTabDefinitionDto[] Defaults =
     [
-        new("primary", "Primary", "Personal and important conversations.", true, 0, "#1a73e8", [], [], false),
-        new("promotions", "Promotions", "Deals, offers, newsletters, and marketing.", true, 1, "#188038", [], [], false),
-        new("social", "Social", "Social network activity and community updates.", true, 2, "#9334e6", [], [], false),
-        new("updates", "Updates", "Automated confirmations, alerts, and account updates.", true, 3, "#b06000", [], [], false),
-        new("bills", "Bills", "Invoices, statements, balances, and payment notices.", true, 4, "#137333", [], [], false),
-        new("medical", "Medical", "Health care, pharmacy, and appointment messages.", true, 5, "#c5221f", [], [], false),
-        new("mail_tracking", "Mail/Tracking", "Shipping, delivery, and package tracking.", true, 6, "#1967d2", [], [], false)
+        new("primary", "People", "Personal conversations and messages that deserve a look.", true, 0, "#176747", [], [], false),
+        new("jobs", "Career", "Recruiters, applications, interviews, and useful job alerts.", true, 1, "#315f99", [], [], false),
+        new("updates", "Updates", "Confirmations, security alerts, and account activity.", true, 2, "#9a5b12", [], [], false),
+        new("bills", "Money", "Bills, invoices, statements, balances, and payment notices.", true, 3, "#137333", [], [], false),
+        new("medical", "Health", "Health care, pharmacy, results, and appointment messages.", true, 4, "#b63d46", [], [], false),
+        new("mail_tracking", "Deliveries", "Shipping, delivery, and package tracking.", true, 5, "#1967d2", [], [], false),
+        new("promotions", "Newsletters", "Newsletters, deals, offers, and marketing set aside for later.", true, 6, "#6f7457", [], [], false),
+        new("social", "Social", "Social network and community activity set aside for later.", true, 7, "#76558e", [], [], false)
     ];
 
     public async Task<InboxTabSettingsDto?> GetAsync(string archiveId, string ownerUserId, CancellationToken cancellationToken)

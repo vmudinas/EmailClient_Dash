@@ -64,6 +64,7 @@ interface MessageReaderProps {
   api: ApiClient | null;
   connections: GmailConnection[];
   onMobileBack(): void;
+  onOpenMessage(messageId: string): void;
   onUpdateState(patch: LocalMessageStatePatch): Promise<void>;
   onError(message: string): void;
   onReply(message: MessageDetail): void;
@@ -85,6 +86,7 @@ export function MessageReader({
   api,
   connections,
   onMobileBack,
+  onOpenMessage,
   onUpdateState,
   onError,
   onReply,
@@ -438,6 +440,14 @@ export function MessageReader({
           )}
         </header>
 
+        {thread && thread.totalMessages > 1 && (
+          <ConversationContext
+            thread={thread}
+            currentMessageId={message.id}
+            onOpenMessage={onOpenMessage}
+          />
+        )}
+
         {(aiState.analysis || aiState.job || aiError) && (
           <AiAnalysisPanel
             state={aiState}
@@ -604,6 +614,49 @@ export function MessageReader({
   );
 }
 
+function ConversationContext({
+  thread,
+  currentMessageId,
+  onOpenMessage
+}: {
+  thread: MessageThread;
+  currentMessageId: string;
+  onOpenMessage(messageId: string): void;
+}) {
+  const hiddenCount = Math.max(0, thread.totalMessages - thread.messages.length);
+  const [open, setOpen] = useState(thread.totalMessages <= 4);
+  return (
+    <details className="conversation-context" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <span><Reply size={16} /><strong>Conversation</strong></span>
+        <small>{thread.totalMessages} message{thread.totalMessages === 1 ? "" : "s"}</small>
+      </summary>
+      <ol aria-label="Messages in this conversation">
+        {thread.messages.map((entry) => {
+          const current = entry.id === currentMessageId;
+          return (
+            <li key={entry.id}>
+              <button
+                type="button"
+                className={current ? "current" : ""}
+                aria-current={current ? "true" : undefined}
+                disabled={current}
+                onClick={() => onOpenMessage(entry.id)}
+              >
+                <span className="conversation-sender">{displayAddress(entry.sender)}</span>
+                <strong>{entry.subject}</strong>
+                <time>{formatDate(entry.receivedAt ?? entry.sentAt)} · {formatTimeOfDay(entry.receivedAt ?? entry.sentAt)}</time>
+                <span className="conversation-preview">{entry.preview || "No preview available"}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+      {hiddenCount > 0 && <p>Showing {thread.messages.length} of {thread.totalMessages} messages.</p>}
+    </details>
+  );
+}
+
 function AiAnalysisPanel({
   state,
   thread,
@@ -647,16 +700,9 @@ function AiAnalysisPanel({
       {analysis && (
         <div className="ai-analysis-content">
           {((analysis.threadMessageCount ?? 1) > 1 || (thread?.totalMessages ?? 0) > 1) && (
-            <details className="ai-thread-context">
-              <summary>{analysis.threadMessageCount ?? thread?.totalMessages ?? 1} messages analyzed in this conversation</summary>
-              <ol>
-                {thread?.messages.map((entry) => (
-                  <li key={entry.id} className={entry.id === state.analysis?.messageId ? "selected" : ""}>
-                    <span>{displayAddress(entry.sender)}</span><strong>{entry.subject}</strong><time>{formatDate(entry.receivedAt ?? entry.sentAt)}</time>
-                  </li>
-                ))}
-              </ol>
-            </details>
+            <p className="ai-thread-context">
+              {analysis.threadMessageCount ?? thread?.totalMessages ?? 1} messages analyzed in this conversation
+            </p>
           )}
           <p className="ai-summary">{analysis.summary}</p>
           <div className="ai-analysis-badges">

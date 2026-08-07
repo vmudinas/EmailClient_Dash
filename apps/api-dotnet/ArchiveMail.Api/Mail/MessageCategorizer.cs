@@ -8,6 +8,8 @@ public static partial class MessageCategorizer
         ["facebookmail.com", "instagram.com", "linkedin.com", "meetup.com", "nextdoor.com", "pinterest.com", "redditmail.com", "tiktok.com", "twitter.com"];
     private static readonly string[] TrackingDomains = ["dhl.com", "fedex.com", "ups.com", "usps.com"];
     private static readonly string[] AmazonDomains = ["amazon.com", "amazon.co.uk", "amazon.ca"];
+    private static readonly string[] JobDomains =
+        ["indeed.com", "glassdoor.com", "ziprecruiter.com", "monster.com", "greenhouse.io", "lever.co", "myworkdayjobs.com", "workday.com", "icims.com", "smartrecruiters.com"];
 
     public static string Classify(string senderAddress, string subject, string bodyText, IReadOnlyDictionary<string, string> headers)
     {
@@ -16,6 +18,13 @@ public static partial class MessageCategorizer
         var senderName = sender.Split('@').FirstOrDefault() ?? "";
         var body = bodyText[..Math.Min(2_000, bodyText.Length)];
         var categoryText = $"{sender} {subject} {body}";
+        // A reply is a conversation even when Gmail or a mailing-list header says otherwise.
+        // Protect it before any content keyword can file a person's response as a bill, update,
+        // social notification, or promotion.
+        if (Header(headers, "in-reply-to") is not null || Header(headers, "references") is not null
+            || ReplySubject().IsMatch(subject)) return "primary";
+        if (JobDomains.Any(value => DomainMatches(domain, value)) || Job().IsMatch(categoryText)
+            || (DomainMatches(domain, "linkedin.com") && LinkedInJob().IsMatch(categoryText))) return "jobs";
         if (Medical().IsMatch(categoryText)) return "medical";
         if (Bills().IsMatch(categoryText)) return "bills";
         if (TrackingDomains.Any(value => DomainMatches(domain, value))
@@ -47,6 +56,9 @@ public static partial class MessageCategorizer
         var sender = senderAddress.Trim().ToLowerInvariant();
         var domain = sender.Split('@').LastOrDefault() ?? "";
         var searchable = $"{sender} {subject} {bodyText[..Math.Min(2_000, bodyText.Length)]}".ToLowerInvariant();
+        if (Header(headers, "in-reply-to") is not null || Header(headers, "references") is not null
+            || ReplySubject().IsMatch(subject))
+            return enabled.FirstOrDefault(tab => tab.Id == "primary")?.Id ?? enabled.FirstOrDefault()?.Id ?? "primary";
         foreach (var tab in enabled)
         {
             if (tab.Id == "primary") continue;
@@ -73,6 +85,9 @@ public static partial class MessageCategorizer
     }
 
     [GeneratedRegex(@"\b(clinic|dental|dentist|doctor|health(?:care)?|hospital|lab results?|medical|mychart|patient portal|pharmacy|prescription|telehealth|vaccin(?:e|ation))\b", RegexOptions.IgnoreCase)] private static partial Regex Medical();
+    [GeneratedRegex(@"^\s*(?:re|fwd?):\s*", RegexOptions.IgnoreCase)] private static partial Regex ReplySubject();
+    [GeneratedRegex(@"\b(application (?:received|status|update)|candidate|career opportunity|hiring manager|interview|job alert|jobs? (?:for you|matching)|recruiter|talent acquisition|thank you for applying|your (?:application|candidacy|resume|résumé))\b", RegexOptions.IgnoreCase)] private static partial Regex Job();
+    [GeneratedRegex(@"\b(apply|career|hiring|job|position|recruiter)\b", RegexOptions.IgnoreCase)] private static partial Regex LinkedInJob();
     [GeneratedRegex(@"\b(amount due|auto-?pay|balance due|bill(?:ing)?|credit card statement|invoice|mortgage|payment due|rent due|statement (?:is )?ready|tax notice|utility bill)\b", RegexOptions.IgnoreCase)] private static partial Regex Bills();
     [GeneratedRegex(@"\b(arriv(?:al|es|ing)|delivered|in transit|out for delivery|package|parcel|shipment|shipped|tracking(?: number| update)?)\b", RegexOptions.IgnoreCase)] private static partial Regex Tracking();
     [GeneratedRegex(@"\b(arriv(?:es|ing)|delivery|order|package|shipment|shipped)\b", RegexOptions.IgnoreCase)] private static partial Regex AmazonTracking();

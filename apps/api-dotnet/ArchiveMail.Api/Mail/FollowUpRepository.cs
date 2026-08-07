@@ -10,6 +10,16 @@ public sealed record MessageFollowUpPatchRequest(string? DueAt, string? Note, st
 
 public sealed class FollowUpRepository(NpgsqlDataSource database)
 {
+    internal const string ExistingPendingSql = """
+        SELECT fu.id
+        FROM message_follow_ups fu JOIN messages source ON source.id=fu.message_id
+        WHERE fu.status='pending' AND (
+          fu.conversation_key=@conversation OR fu.message_id=@message OR
+          (source.conversation_key IS NOT NULL AND source.conversation_key=@conversation))
+        ORDER BY CASE WHEN fu.conversation_key=@conversation THEN 0 ELSE 1 END,fu.updated_at DESC
+        LIMIT 1 FOR UPDATE OF fu
+        """;
+
     public async Task<MessageFollowUpDto> CreateAsync(string messageId, MessageFollowUpCreateRequest request,
         string ownerUserId, CancellationToken cancellationToken)
     {
@@ -26,9 +36,13 @@ public sealed class FollowUpRepository(NpgsqlDataSource database)
         message.Parameters.AddWithValue("owner", ownerUserId);
         var conversation = Convert.ToString(await message.ExecuteScalarAsync(cancellationToken));
         if (string.IsNullOrEmpty(conversation)) throw new MailNotFoundException("Message not found");
-        const string existingSql = "SELECT id FROM message_follow_ups WHERE conversation_key=@conversation AND status='pending' FOR UPDATE";
-        await using var existing = new NpgsqlCommand(existingSql, connection, transaction);
+        // A Gmail full reconciliation can add a provider thread key to a message that was already
+        // imported. Follow-ups created before that backfill used the message id as their key. Match
+        // both representations so reconciliation never makes an existing reminder disappear or
+        // permits a duplicate reminder for the same conversation.
+        await using var existing = new NpgsqlCommand(ExistingPendingSql, connection, transaction);
         existing.Parameters.AddWithValue("conversation", conversation);
+        existing.Parameters.AddWithValue("message", messageId);
         var id = Convert.ToString(await existing.ExecuteScalarAsync(cancellationToken));
         var now = DateTimeOffset.UtcNow.ToString("O");
         if (string.IsNullOrEmpty(id))
@@ -50,8 +64,9 @@ public sealed class FollowUpRepository(NpgsqlDataSource database)
         else
         {
             await using var update = new NpgsqlCommand(
-                "UPDATE message_follow_ups SET message_id=@message,due_at=@due,note=@note,updated_at=@now WHERE id=@id", connection, transaction);
+                "UPDATE message_follow_ups SET message_id=@message,conversation_key=@conversation,due_at=@due,note=@note,updated_at=@now WHERE id=@id", connection, transaction);
             update.Parameters.AddWithValue("message", messageId);
+            update.Parameters.AddWithValue("conversation", conversation);
             update.Parameters.AddWithValue("due", dueAt);
             update.Parameters.AddWithValue("note", note);
             update.Parameters.AddWithValue("now", now);

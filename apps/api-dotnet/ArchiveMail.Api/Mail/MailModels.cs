@@ -109,13 +109,15 @@ public sealed record SearchHitDto(
 
 public sealed record InboxCategoryCountsDto(
     long Primary,
+    long Jobs,
     long Promotions,
     long Social,
     long Updates,
     long Bills,
     long Medical,
     [property: JsonPropertyName("mail_tracking")]
-    long MailTracking);
+    long MailTracking,
+    long? Focus = null);
 
 public sealed record MessageFilters(
     string? ArchiveId,
@@ -129,7 +131,9 @@ public sealed record MessageFilters(
     string? Before,
     bool? HasAttachment,
     string? Cursor,
-    int? Limit);
+    int? Limit,
+    bool? Focus,
+    bool? InboxOnly = null);
 
 public sealed record MessageStatePatch(bool? IsRead, bool? IsStarred, string[]? Tags, string? Note);
 public sealed record NamePatch(string Name);

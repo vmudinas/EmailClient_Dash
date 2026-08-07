@@ -15,6 +15,7 @@ import {
   Plus,
   Square,
   Star,
+  ShieldCheck,
   Trash2
 } from "lucide-react";
 import type {
@@ -40,7 +41,8 @@ interface SidebarProps {
   jobs: ImportJob[];
   selectedArchiveId: string | null;
   selectedFolderId: string | null;
-  selectedSmartMailbox: "starred" | null;
+  selectedSmartMailbox: "focus" | "inbox" | "starred" | null;
+  focusCount?: number;
   readOnly: boolean;
   draggedMessage: MessageSummary | null;
   draggedMessageIds: string[];
@@ -48,7 +50,7 @@ interface SidebarProps {
   folderBusy: boolean;
   onSelectArchive(id: string): void;
   onSelectFolder(id: string | null): void;
-  onSelectSmartMailbox(mailbox: "starred"): void;
+  onSelectSmartMailbox(mailbox: "focus" | "starred"): void;
   onImport(): void;
   onOpenGmail(): void;
   onCreateFolder(): void;
@@ -73,6 +75,7 @@ export function Sidebar({
   selectedArchiveId,
   selectedFolderId,
   selectedSmartMailbox,
+  focusCount,
   readOnly,
   draggedMessage,
   draggedMessageIds,
@@ -146,7 +149,7 @@ export function Sidebar({
       const row = (
         <div className="folder-entry" key={folder.id}>
           <button
-            className={`folder-row ${selectedFolderId === folder.id ? "selected" : ""} ${canDrop && dropFolderId === folder.id ? "drop-target" : ""}`}
+            className={`folder-row ${selectedFolderId === folder.id && selectedSmartMailbox === null ? "selected" : ""} ${canDrop && dropFolderId === folder.id ? "drop-target" : ""}`}
             style={{ "--folder-depth": depth } as React.CSSProperties}
             draggable={canDragFolder}
             onClick={() => onSelectFolder(folder.id)}
@@ -204,7 +207,7 @@ export function Sidebar({
             ) : (
               <span className="folder-toggle-spacer" />
             )}
-            {selectedFolderId === folder.id ? <FolderOpen size={16} /> : <FolderIcon size={16} />}
+            {selectedFolderId === folder.id && selectedSmartMailbox === null ? <FolderOpen size={16} /> : <FolderIcon size={16} />}
             <span title={folder.name}>{folder.name}</span>
             <span className="folder-counts" aria-label={`${folder.unreadCount.toLocaleString()} unread, ${folder.messageCount.toLocaleString()} total`}>
               <b>{folder.unreadCount.toLocaleString()}</b>
@@ -244,6 +247,28 @@ export function Sidebar({
   return (
     <aside id="folder-sidebar" className="sidebar" aria-label="Archives and folders">
       <div className="sidebar-scroll">
+        {selectedArchive && (
+          <>
+            <div className="section-heading daily-heading"><span>Your day</span></div>
+            <nav className="daily-mailboxes" aria-label="Daily mail views">
+              <button className={selectedSmartMailbox === "focus" ? "selected" : ""} onClick={() => onSelectSmartMailbox("focus")}>
+                <span className="daily-mailbox-icon focus"><ShieldCheck size={17} /></span>
+                <span><strong>Focus</strong><small>Today &amp; yesterday</small></span>
+                <b aria-label={`${(focusCount ?? selectedArchive.unreadCount).toLocaleString()} messages to review`}>
+                  {(focusCount ?? selectedArchive.unreadCount).toLocaleString()}
+                </b>
+              </button>
+              <button className={selectedSmartMailbox === "starred" ? "selected" : ""} onClick={() => onSelectSmartMailbox("starred")}>
+                <span className="daily-mailbox-icon starred"><Star size={17} fill={selectedSmartMailbox === "starred" ? "currentColor" : "none"} /></span>
+                <span><strong>Starred</strong><small>Saved for later</small></span>
+                <b aria-label={`${(selectedArchive.starredUnreadCount ?? 0).toLocaleString()} unread, ${(selectedArchive.starredCount ?? 0).toLocaleString()} total`}>
+                  {(selectedArchive.starredUnreadCount ?? 0).toLocaleString()}/{(selectedArchive.starredCount ?? 0).toLocaleString()}
+                </b>
+              </button>
+            </nav>
+          </>
+        )}
+
         <div className="section-heading">
           <span>Archives</span>
           {!readOnly && (
@@ -332,21 +357,6 @@ export function Sidebar({
                 <span className="folder-counts" aria-label={`${selectedArchive.unreadCount.toLocaleString()} unread, ${selectedArchive.messageCount.toLocaleString()} total`}>
                   <b>{selectedArchive.unreadCount.toLocaleString()}</b>
                   <small>{selectedArchive.messageCount.toLocaleString()}</small>
-                </span>
-              </button>
-              <button
-                className={`folder-row smart-folder-row ${selectedSmartMailbox === "starred" ? "selected" : ""}`}
-                onClick={() => onSelectSmartMailbox("starred")}
-              >
-                <span className="folder-toggle-spacer" />
-                <Star size={16} fill={selectedSmartMailbox === "starred" ? "currentColor" : "none"} />
-                <span>Starred</span>
-                <span
-                  className="folder-counts"
-                  aria-label={`${(selectedArchive.starredUnreadCount ?? 0).toLocaleString()} unread, ${(selectedArchive.starredCount ?? 0).toLocaleString()} total`}
-                >
-                  <b>{(selectedArchive.starredUnreadCount ?? 0).toLocaleString()}</b>
-                  <small>{(selectedArchive.starredCount ?? 0).toLocaleString()}</small>
                 </span>
               </button>
               {renderFolders(null, 0)}
